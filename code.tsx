@@ -12,6 +12,8 @@ import {
   Upload,
   Type,
   Trees,
+  Shrub,
+  Mountain,
   Car,
   Image as ImageIcon,
   Unlock,
@@ -29,7 +31,7 @@ import {
 
 // --- Types ---
 
-type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
+type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-shrub" | "add-terrain" | "add-parking" | "add-label";
 type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 type ViewMode = "plan" | "iso3d";
 
@@ -77,6 +79,9 @@ interface TreeItem extends BaseItem {
   type: "tree";
   radius: number;
   color: string;
+  size?: "small" | "medium" | "large"; // Preset size
+  treeType?: "oak" | "pine" | "palm"; // Tree species
+  height3d?: number; // 3D height in units
 }
 
 interface ParkingItem extends BaseItem {
@@ -103,8 +108,26 @@ interface ImageItem extends BaseItem {
 }
 
 
+interface ShrubItem extends BaseItem {
+  type: "shrub";
+  width: number;
+  height: number; // 2D footprint height
+  height3d: number; // 3D vertical height
+  color: string;
+  points?: { x: number; y: number }[]; // Custom polygon shape
+}
 
-type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem;
+interface TerrainItem extends BaseItem {
+  type: "terrain";
+  width: number;
+  height: number;
+  terrainType: "water" | "grass" | "dirt" | "concrete" | "gravel" | "sand";
+  color: string;
+  points?: { x: number; y: number }[];
+  elevation?: number; // Optional elevation in units
+}
+
+type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | ShrubItem | TerrainItem;
 
 // --- Helper Functions ---
 
@@ -114,8 +137,17 @@ const COLORS = {
   camera: ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"],
   building: ["#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155", "#1e293b"],
   tree: ["#22c55e", "#16a34a", "#15803d", "#14532d", "#84cc16", "#bef264"],
+  shrub: ["#4ade80", "#86efac", "#22c55e", "#166534", "#bbf7d0", "#15803d"],
   parking: ["#e2e8f0", "#cbd5e1", "#94a3b8", "#f8fafc", "#ffffff", "#f1f5f9"],
-  label: ["#1e293b", "#334155", "#475569", "#64748b", "#ef4444", "#3b82f6"]
+  label: ["#1e293b", "#334155", "#475569", "#64748b", "#ef4444", "#3b82f6"],
+  terrain: {
+    water: "#3b82f6",
+    grass: "#22c55e",
+    dirt: "#a16207",
+    concrete: "#94a3b8",
+    gravel: "#78716c",
+    sand: "#fbbf24"
+  }
 };
 
 const DEFAULT_CANVAS = { width: 1000, height: 700 };
@@ -300,33 +332,38 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
 const create3dTree = (item: TreeItem): THREE.Group => {
   const group = new THREE.Group();
 
-  // Deterministic style
+  // Use treeType from item, fallback to deterministic selection
   const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const isPine = hash % 2 === 0;
+  const treeType = item.treeType ?? (hash % 2 === 0 ? "pine" : "oak");
+  const height3d = item.height3d ?? (item.radius * 1.6); // Default height based on radius
 
   // Trunk
-  const trunkRadius = item.radius * 0.25;
-  const trunkHeight = isPine ? item.radius * 2 : item.radius * 1.5;
+  const trunkRadius = item.radius * 0.15;
+  const trunkHeight = treeType === "palm" ? height3d * 0.7 : (treeType === "pine" ? height3d * 0.4 : height3d * 0.35);
   const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, trunkHeight, 6);
-  const trunkMat = new THREE.MeshStandardMaterial({ color: '#4a3728', roughness: 1.0, flatShading: true });
+  const trunkMat = new THREE.MeshStandardMaterial({
+    color: treeType === "palm" ? '#8B7355' : '#4a3728',
+    roughness: 1.0,
+    flatShading: true
+  });
   const trunk = new THREE.Mesh(trunkGeo, trunkMat);
   trunk.position.y = trunkHeight / 2;
   trunk.castShadow = true;
   trunk.receiveShadow = true;
   group.add(trunk);
 
-  const foliageColor = isPine ? '#1e4620' : item.color; // Pines are dark green
-  const foliageMat = new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.8, flatShading: true });
-
-  if (isPine) {
+  if (treeType === "pine") {
     // Pine Tree: Stacked Cones
+    const foliageColor = '#1e4620';
+    const foliageMat = new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.8, flatShading: true });
     const layers = 4;
     const baseR = item.radius;
-    const layerH = item.radius * 2.5 / layers;
+    const foliageHeight = height3d - trunkHeight * 0.3;
+    const layerH = foliageHeight / layers;
 
     for (let i = 0; i < layers; i++) {
-      const t = i / (layers - 1); // 0 to 1
-      const r = baseR * (1 - t * 0.6); // Taper
+      const t = i / (layers - 1);
+      const r = baseR * (1 - t * 0.6);
       const y = trunkHeight * 0.3 + i * (layerH * 0.8);
 
       const cone = new THREE.Mesh(
@@ -338,12 +375,55 @@ const create3dTree = (item: TreeItem): THREE.Group => {
       cone.receiveShadow = true;
       group.add(cone);
     }
+  } else if (treeType === "palm") {
+    // Palm Tree: Curved trunk with fronds at top
+    const frondColor = '#228B22';
+    const frondMat = new THREE.MeshStandardMaterial({ color: frondColor, roughness: 0.7, flatShading: true, side: THREE.DoubleSide });
+
+    // Add fronds at top of trunk
+    const numFronds = 8;
+    for (let i = 0; i < numFronds; i++) {
+      const angle = (i / numFronds) * Math.PI * 2;
+      const frondLength = item.radius * 1.5;
+      const frondWidth = item.radius * 0.3;
+
+      // Create frond shape (elongated leaf)
+      const frondGeo = new THREE.ConeGeometry(frondWidth, frondLength, 4);
+      const frond = new THREE.Mesh(frondGeo, frondMat);
+
+      // Position at top of trunk, angled outward and down
+      frond.position.set(
+        Math.cos(angle) * item.radius * 0.3,
+        trunkHeight + frondLength * 0.2,
+        Math.sin(angle) * item.radius * 0.3
+      );
+      frond.rotation.z = Math.cos(angle) * 0.8;
+      frond.rotation.x = Math.sin(angle) * 0.8;
+      frond.castShadow = true;
+      group.add(frond);
+    }
+
+    // Add coconuts
+    const coconutMat = new THREE.MeshStandardMaterial({ color: '#8B4513', roughness: 0.9 });
+    for (let i = 0; i < 3; i++) {
+      const coconut = new THREE.Mesh(new THREE.SphereGeometry(item.radius * 0.08, 6, 6), coconutMat);
+      const cAngle = (i / 3) * Math.PI * 2;
+      coconut.position.set(
+        Math.cos(cAngle) * trunkRadius * 1.5,
+        trunkHeight - item.radius * 0.1,
+        Math.sin(cAngle) * trunkRadius * 1.5
+      );
+      group.add(coconut);
+    }
   } else {
     // Oak Tree: Fluffy Spheres (Icosahedrons)
+    const foliageColor = item.color;
+    const foliageMat = new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.8, flatShading: true });
+
     // Main center
     const mainGeo = new THREE.IcosahedronGeometry(item.radius * 0.8, 0);
     const main = new THREE.Mesh(mainGeo, foliageMat);
-    main.position.y = trunkHeight + item.radius * 0.2;
+    main.position.y = trunkHeight + item.radius * 0.4;
     main.castShadow = true;
     main.receiveShadow = true;
     group.add(main);
@@ -351,7 +431,6 @@ const create3dTree = (item: TreeItem): THREE.Group => {
     // Random clumps
     const clumps = 10;
     for (let i = 0; i < clumps; i++) {
-      // Deterministic pseudo-random based on ID + i
       const pseudoRnd = ((hash + i * 13) % 100) / 100;
       const theta = pseudoRnd * Math.PI * 2;
       const phi = (((hash + i * 7) % 100) / 100) * Math.PI;
@@ -371,6 +450,89 @@ const create3dTree = (item: TreeItem): THREE.Group => {
   }
 
   group.position.set(item.x, 0, item.y);
+  group.rotation.y = -THREE.MathUtils.degToRad(item.rotation); // Apply rotation
+  return group;
+};
+
+// Create a 3D shrub/hedge model from polygon shape
+const create3dShrub = (item: ShrubItem): THREE.Group => {
+  const group = new THREE.Group();
+
+  const points = item.points ?? rectanglePoints(item.width, item.height);
+  const height3d = item.height3d ?? 8;
+
+  // Create extruded shape for the shrub base
+  const shape = new THREE.Shape();
+  if (points.length > 0) {
+    shape.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      shape.lineTo(points[i].x, points[i].y);
+    }
+    shape.closePath();
+  }
+
+  const extrudeSettings = {
+    depth: height3d,
+    bevelEnabled: true,
+    bevelThickness: 2,
+    bevelSize: 3,
+    bevelSegments: 3
+  };
+
+  const shrubMat = new THREE.MeshStandardMaterial({
+    color: item.color,
+    roughness: 0.9,
+    flatShading: true
+  });
+
+  const shrubGeo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  shrubGeo.rotateX(-Math.PI / 2); // Rotate to stand upright
+  const shrubMesh = new THREE.Mesh(shrubGeo, shrubMat);
+  shrubMesh.castShadow = true;
+  shrubMesh.receiveShadow = true;
+  group.add(shrubMesh);
+
+  // Add small spheres on top for organic bush appearance
+  const sphereMat = new THREE.MeshStandardMaterial({
+    color: adjustColor(item.color, 20),
+    roughness: 0.8,
+    flatShading: true
+  });
+
+  const bounds = getPointsBounds(points);
+  const numBushes = Math.max(3, Math.floor((bounds.width + bounds.height) / 20));
+  const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+
+  for (let i = 0; i < numBushes; i++) {
+    const t = i / numBushes;
+    const pointIdx = Math.floor(t * points.length);
+    const nextIdx = (pointIdx + 1) % points.length;
+    const lerp = (t * points.length) % 1;
+
+    const x = points[pointIdx].x + (points[nextIdx].x - points[pointIdx].x) * lerp;
+    const y = points[pointIdx].y + (points[nextIdx].y - points[pointIdx].y) * lerp;
+
+    const sphereSize = 3 + ((hash + i * 7) % 4);
+    const sphere = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(sphereSize, 0),
+      sphereMat
+    );
+    sphere.position.set(x * 0.6, height3d + sphereSize * 0.5, y * 0.6);
+    sphere.castShadow = true;
+    group.add(sphere);
+  }
+
+  // Add center cluster
+  const centerSphere = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(height3d * 0.4, 0),
+    sphereMat
+  );
+  centerSphere.position.set(0, height3d + height3d * 0.2, 0);
+  centerSphere.castShadow = true;
+  group.add(centerSphere);
+
+  group.position.set(item.x, 0, item.y);
+  group.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
   return group;
 };
 
@@ -922,7 +1084,33 @@ export default function SecurityPlanner() {
           ...common,
           type: "tree",
           radius: 25,
-          color: COLORS.tree[0]
+          color: COLORS.tree[0],
+          size: "medium",
+          treeType: "oak",
+          height3d: 40
+        };
+        break;
+      case "add-shrub":
+        newItem = {
+          ...common,
+          type: "shrub",
+          width: 60,
+          height: 40,
+          height3d: 8,
+          color: COLORS.shrub[0],
+          points: rectanglePoints(60, 40)
+        };
+        break;
+      case "add-terrain":
+        newItem = {
+          ...common,
+          type: "terrain",
+          width: 150,
+          height: 100,
+          terrainType: "grass",
+          color: COLORS.terrain.grass,
+          points: rectanglePoints(150, 100),
+          elevation: 0
         };
         break;
       case "add-parking":
@@ -1950,6 +2138,37 @@ export default function SecurityPlanner() {
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
         group.add(tree);
+      }
+
+      // Shrubs
+      if (item.type === "shrub") {
+        const shrub = create3dShrub(item as ShrubItem);
+        group.add(shrub);
+      }
+
+      // Terrain
+      if (item.type === "terrain") {
+        const terrain = item as TerrainItem;
+        const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+        const elevation = terrain.elevation ?? 0;
+
+        const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
+        const terrainGeometry = new THREE.ShapeGeometry(shape);
+        terrainGeometry.rotateX(-Math.PI / 2);
+
+        const terrainMaterial = new THREE.MeshStandardMaterial({
+          color: terrain.color,
+          roughness: terrain.terrainType === "water" ? 0.1 : 0.9,
+          metalness: terrain.terrainType === "water" ? 0.3 : 0,
+          transparent: true,
+          opacity: terrain.terrainType === "water" ? 0.7 : 0.9
+        });
+
+        const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+        terrainMesh.position.set(terrain.x, elevation + 0.05, terrain.y);
+        terrainMesh.rotation.y = -THREE.MathUtils.degToRad(terrain.rotation);
+        terrainMesh.receiveShadow = true;
+        group.add(terrainMesh);
       }
 
       // Camera with proper 3D frustum
@@ -3168,6 +3387,8 @@ export default function SecurityPlanner() {
             { mode: "add-camera", icon: Camera, label: "Camera" },
             { mode: "add-building", icon: Square, label: "Building" },
             { mode: "add-tree", icon: Trees, label: "Tree" },
+            { mode: "add-shrub", icon: Shrub, label: "Shrub" },
+            { mode: "add-terrain", icon: Mountain, label: "Terrain" },
             { mode: "add-parking", icon: Car, label: "Parking" },
             { mode: "add-label", icon: Type, label: "Label" }
           ].map(tool => (
@@ -3298,7 +3519,58 @@ export default function SecurityPlanner() {
                     />
                   )}
 
-                  {items.map(item => {
+                  {/* Render terrain first (in background) */}
+                  {items.filter(item => item.type === "terrain").map(item => {
+                    const terrain = item as TerrainItem;
+                    const isSelected = selectedId === terrain.id;
+                    const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+                    return (
+                      <g
+                        key={terrain.id}
+                        transform={`translate(${terrain.x}, ${terrain.y}) rotate(${terrain.rotation})`}
+                        onMouseDown={e => handleMouseDown(e, terrain.id, "move")}
+                        onClick={e => e.stopPropagation()}
+                        className="cursor-move"
+                        opacity={interactionState.itemId === terrain.id && interactionState.type === "move" ? 0.8 : 1}
+                      >
+                        <polygon
+                          points={points.map(point => `${point.x},${point.y}`).join(" ")}
+                          fill={terrain.color}
+                          fillOpacity="0.6"
+                          stroke={isSelected ? "#0ea5e9" : terrain.color}
+                          strokeWidth={isSelected ? 3 : 1}
+                          strokeDasharray={terrain.terrainType === "water" ? "5,3" : "none"}
+                        />
+                        <text
+                          x="0"
+                          y="0"
+                          fontSize="12"
+                          fill={terrain.terrainType === "water" ? "#1e40af" : "#134e4a"}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          className="select-none pointer-events-none"
+                        >
+                          {terrain.terrainType.charAt(0).toUpperCase() + terrain.terrainType.slice(1)}
+                        </text>
+                        {isSelected &&
+                          points.map((point, index) => (
+                            <circle
+                              key={`${terrain.id}-vertex-${index}`}
+                              cx={point.x}
+                              cy={point.y}
+                              r="5"
+                              fill="#ffffff"
+                              stroke="#0ea5e9"
+                              strokeWidth="2"
+                              className="cursor-pointer"
+                              onMouseDown={e => handleMouseDown(e, terrain.id, "vertex", String(index))}
+                            />
+                          ))}
+                      </g>
+                    );
+                  })}
+
+                  {items.filter(item => item.type !== "terrain").map(item => {
                     const isSelected = selectedId === item.id;
                     if (item.type === "building" || item.type === "parking") {
                       const b = item as BuildingItem | ParkingItem;
@@ -3449,6 +3721,48 @@ export default function SecurityPlanner() {
                       );
                     }
 
+                    if (item.type === "shrub") {
+                      const shrub = item as ShrubItem;
+                      const points = shrub.points ?? rectanglePoints(shrub.width, shrub.height);
+                      return (
+                        <g
+                          key={shrub.id}
+                          transform={`translate(${shrub.x}, ${shrub.y}) rotate(${shrub.rotation})`}
+                          onMouseDown={e => handleMouseDown(e, shrub.id, "move")}
+                          onClick={e => e.stopPropagation()}
+                          className="cursor-move"
+                          opacity={interactionState.itemId === shrub.id && interactionState.type === "move" ? 0.8 : 1}
+                        >
+                          <polygon
+                            points={points.map(point => `${point.x},${point.y}`).join(" ")}
+                            fill={shrub.color}
+                            fillOpacity="0.7"
+                            stroke={isSelected ? "#16a34a" : "#166534"}
+                            strokeWidth={isSelected ? 3 : 1}
+                          />
+                          {/* Organic texture overlay */}
+                          <polygon
+                            points={points.map(point => `${point.x * 0.7},${point.y * 0.7}`).join(" ")}
+                            fill="#15803d"
+                            fillOpacity="0.3"
+                          />
+                          {isSelected &&
+                            points.map((point, index) => (
+                              <circle
+                                key={`${shrub.id}-vertex-${index}`}
+                                cx={point.x}
+                                cy={point.y}
+                                r="5"
+                                fill="#ffffff"
+                                stroke="#16a34a"
+                                strokeWidth="2"
+                                className="cursor-pointer"
+                                onMouseDown={e => handleMouseDown(e, shrub.id, "vertex", String(index))}
+                              />
+                            ))}
+                        </g>
+                      );
+                    }
                     if (item.type === "image") {
                       const img = item as ImageItem;
                       return (
@@ -4001,6 +4315,237 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
+              {selectedItem.type === "shrub" && (
+                <div className="space-y-4">
+                  {/* 3D Height */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>3D Height</span>
+                      <span>{(selectedItem as ShrubItem).height3d} units</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="2"
+                      max="30"
+                      value={(selectedItem as ShrubItem).height3d}
+                      onChange={e => updateItem(selectedItem.id, { height3d: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  {/* Width/Depth */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
+                      <input
+                        type="number"
+                        value={(selectedItem as ShrubItem).width}
+                        onChange={e => {
+                          const newWidth = parseInt(e.target.value);
+                          const shrub = selectedItem as ShrubItem;
+                          const points = shrub.points ?? rectanglePoints(shrub.width, shrub.height);
+                          const scaled = scalePointsToSize(points, newWidth, shrub.height);
+                          updateItem(selectedItem.id, { width: newWidth, points: scaled });
+                        }}
+                        className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Depth</label>
+                      <input
+                        type="number"
+                        value={(selectedItem as ShrubItem).height}
+                        onChange={e => {
+                          const newHeight = parseInt(e.target.value);
+                          const shrub = selectedItem as ShrubItem;
+                          const points = shrub.points ?? rectanglePoints(shrub.width, shrub.height);
+                          const scaled = scalePointsToSize(points, shrub.width, newHeight);
+                          updateItem(selectedItem.id, { height: newHeight, points: scaled });
+                        }}
+                        className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Shrub Shape Controls */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Shrub Shape</label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => {
+                          const shrub = selectedItem as ShrubItem;
+                          const points = shrub.points ?? rectanglePoints(shrub.width, shrub.height);
+                          updateItem(selectedItem.id, { points: insertVertexAtLongestEdge(points) });
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Add Vertex
+                      </button>
+                      <button
+                        onClick={() => setVertexInsertMode(true)}
+                        className={`px-3 py-1 rounded-full border text-xs ${vertexInsertMode
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                          : "border-slate-200 text-slate-400 hover:bg-slate-50"
+                          }`}
+                      >
+                        Insert on Edge
+                      </button>
+                      <button
+                        onClick={() => {
+                          const shrub = selectedItem as ShrubItem;
+                          const points = shrub.points ?? rectanglePoints(shrub.width, shrub.height);
+                          if (points.length > 3) {
+                            updateItem(selectedItem.id, { points: points.slice(0, -1) });
+                          }
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Remove Vertex
+                      </button>
+                      <button
+                        onClick={() => {
+                          const shrub = selectedItem as ShrubItem;
+                          updateItem(selectedItem.id, { points: rectanglePoints(shrub.width, shrub.height) });
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Reset Shape
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Drag the green nodes in plan view to sculpt the shrub shape.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {selectedItem.type === "terrain" && (
+                <div className="space-y-4">
+                  {/* Terrain Type */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Terrain Type</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(["water", "grass", "dirt", "concrete", "gravel", "sand"] as const).map(terrainType => (
+                        <button
+                          key={terrainType}
+                          onClick={() => updateItem(selectedItem.id, {
+                            terrainType,
+                            color: COLORS.terrain[terrainType]
+                          })}
+                          className={`px-2 py-1.5 rounded-lg text-xs font-medium capitalize transition-all ${(selectedItem as TerrainItem).terrainType === terrainType
+                              ? "bg-indigo-600 text-white shadow-lg"
+                              : "bg-white/10 text-slate-300 hover:bg-white/20"
+                            }`}
+                          style={{ borderLeft: `3px solid ${COLORS.terrain[terrainType]}` }}
+                        >
+                          {terrainType}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Elevation */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Elevation</span>
+                      <span>{(selectedItem as TerrainItem).elevation ?? 0} units</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="-20"
+                      max="50"
+                      value={(selectedItem as TerrainItem).elevation ?? 0}
+                      onChange={e => updateItem(selectedItem.id, { elevation: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-cyan-600"
+                    />
+                  </div>
+
+                  {/* Width/Depth */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
+                      <input
+                        type="number"
+                        value={(selectedItem as TerrainItem).width}
+                        onChange={e => {
+                          const newWidth = parseInt(e.target.value);
+                          const terrain = selectedItem as TerrainItem;
+                          const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+                          const scaled = scalePointsToSize(points, newWidth, terrain.height);
+                          updateItem(selectedItem.id, { width: newWidth, points: scaled });
+                        }}
+                        className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Depth</label>
+                      <input
+                        type="number"
+                        value={(selectedItem as TerrainItem).height}
+                        onChange={e => {
+                          const newHeight = parseInt(e.target.value);
+                          const terrain = selectedItem as TerrainItem;
+                          const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+                          const scaled = scalePointsToSize(points, terrain.width, newHeight);
+                          updateItem(selectedItem.id, { height: newHeight, points: scaled });
+                        }}
+                        className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Shape Controls */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Terrain Shape</label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => {
+                          const terrain = selectedItem as TerrainItem;
+                          const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+                          updateItem(selectedItem.id, { points: insertVertexAtLongestEdge(points) });
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Add Vertex
+                      </button>
+                      <button
+                        onClick={() => setVertexInsertMode(true)}
+                        className={`px-3 py-1 rounded-full border text-xs ${vertexInsertMode
+                          ? "border-cyan-300 bg-cyan-50 text-cyan-700"
+                          : "border-slate-200 text-slate-400 hover:bg-slate-50"
+                          }`}
+                      >
+                        Insert on Edge
+                      </button>
+                      <button
+                        onClick={() => {
+                          const terrain = selectedItem as TerrainItem;
+                          const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+                          if (points.length > 3) {
+                            updateItem(selectedItem.id, { points: points.slice(0, -1) });
+                          }
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Remove Vertex
+                      </button>
+                      <button
+                        onClick={() => {
+                          const terrain = selectedItem as TerrainItem;
+                          updateItem(selectedItem.id, { points: rectanglePoints(terrain.width, terrain.height) });
+                        }}
+                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50 text-xs"
+                      >
+                        Reset Shape
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Drag the blue nodes in plan view to sculpt the terrain boundary.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {selectedItem.type === "image" && (
                 <div className="space-y-4">
                   <button
@@ -4055,16 +4600,95 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "tree" && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Canopy Size</label>
-                  <input
-                    type="range"
-                    min="10"
-                    max="100"
-                    value={(selectedItem as TreeItem).radius}
-                    onChange={e => updateItem(selectedItem.id, { radius: parseInt(e.target.value) })}
-                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                  />
+                <div className="space-y-4">
+                  {/* Tree Type Selection */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Tree Type</label>
+                    <div className="flex gap-2">
+                      {(["oak", "pine", "palm"] as const).map(type => (
+                        <button
+                          key={type}
+                          onClick={() => updateItem(selectedItem.id, { treeType: type })}
+                          className={`flex-1 py-2 rounded-lg text-xs font-medium capitalize transition-colors ${(selectedItem as TreeItem).treeType === type || (!((selectedItem as TreeItem).treeType) && type === "oak")
+                            ? "bg-emerald-600 text-white"
+                            : "bg-white/10 text-slate-300 hover:bg-white/20"
+                            }`}
+                        >
+                          {type}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Size Presets */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Size Preset</label>
+                    <div className="flex gap-2">
+                      {(["small", "medium", "large"] as const).map(size => {
+                        const sizeValues = { small: { radius: 15, height3d: 25 }, medium: { radius: 25, height3d: 40 }, large: { radius: 40, height3d: 60 } };
+                        return (
+                          <button
+                            key={size}
+                            onClick={() => updateItem(selectedItem.id, { size, ...sizeValues[size] })}
+                            className={`flex-1 py-2 rounded-lg text-xs font-medium capitalize transition-colors ${(selectedItem as TreeItem).size === size || (!((selectedItem as TreeItem).size) && size === "medium")
+                              ? "bg-emerald-600 text-white"
+                              : "bg-white/10 text-slate-300 hover:bg-white/20"
+                              }`}
+                          >
+                            {size}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Custom Canopy Size */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Canopy Radius</span>
+                      <span>{(selectedItem as TreeItem).radius}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
+                      value={(selectedItem as TreeItem).radius}
+                      onChange={e => updateItem(selectedItem.id, { radius: parseInt(e.target.value), size: undefined })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  {/* 3D Height */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>3D Height</span>
+                      <span>{(selectedItem as TreeItem).height3d ?? 40} units</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="10"
+                      max="120"
+                      value={(selectedItem as TreeItem).height3d ?? 40}
+                      onChange={e => updateItem(selectedItem.id, { height3d: parseInt(e.target.value), size: undefined })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  {/* Rotation */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Rotation</span>
+                      <span>{selectedItem.rotation}°</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      value={selectedItem.rotation}
+                      onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
                 </div>
               )}
 
@@ -4327,11 +4951,11 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
-              {selectedItem.type !== "image" && COLORS[selectedItem.type as keyof typeof COLORS] && (
+              {selectedItem.type !== "image" && selectedItem.type !== "terrain" && COLORS[selectedItem.type as keyof typeof COLORS] && (
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Color Code</label>
                   <div className="flex flex-wrap gap-2">
-                    {COLORS[selectedItem.type as keyof typeof COLORS].map(color => (
+                    {(COLORS[selectedItem.type as keyof Omit<typeof COLORS, 'terrain'>] as string[]).map((color: string) => (
                       <button
                         key={color}
                         onClick={() => updateItem(selectedItem.id!, { color })}
