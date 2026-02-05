@@ -1489,7 +1489,7 @@ export default function SecurityPlanner() {
       new THREE.MeshStandardMaterial({ color: '#6B8E23', roughness: 0.9 })
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(canvasSize.width / 2, 0, canvasSize.height / 2);
+    ground.position.set(canvasSize.width / 2, -0.5, canvasSize.height / 2);
     scene.add(ground);
 
     // Background image
@@ -1521,6 +1521,32 @@ export default function SecurityPlanner() {
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
         scene.add(tree);
+      }
+      if (item.type === "shrub") {
+        const shrub = create3dShrub(item as ShrubItem);
+        scene.add(shrub);
+      }
+      if (item.type === "terrain") {
+        const terrain = item as TerrainItem;
+        const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
+        const elevation = terrain.elevation ?? 0;
+        const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
+        const terrainGeometry = new THREE.ShapeGeometry(shape);
+        terrainGeometry.rotateX(-Math.PI / 2);
+
+        const terrainMaterial = new THREE.MeshStandardMaterial({
+          color: terrain.color,
+          roughness: terrain.terrainType === "water" ? 0.1 : 0.9,
+          metalness: terrain.terrainType === "water" ? 0.3 : 0,
+          transparent: true,
+          opacity: terrain.terrainType === "water" ? 0.7 : 0.9,
+          side: THREE.DoubleSide
+        });
+
+        const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+        terrainMesh.position.set(terrain.x, elevation + 0.05, terrain.y);
+        terrainMesh.rotation.y = -THREE.MathUtils.degToRad(terrain.rotation);
+        scene.add(terrainMesh);
       }
       if (item.type === "parking") {
         const car = create3dCar(item as ParkingItem);
@@ -1926,7 +1952,7 @@ export default function SecurityPlanner() {
     return null;
   };
 
-  const getVisibilityPolygon = (origin: { x: number, y: number }, range: number, fov: number, rotation: number, obstacles: (BuildingItem | TreeItem)[]) => {
+  const getVisibilityPolygon = (origin: { x: number, y: number }, range: number, fov: number, rotation: number, obstacles: (BuildingItem | TreeItem | ShrubItem)[]) => {
     const segments = obstacles.flatMap(item => {
       if (item.type === "building") {
         const b = item as BuildingItem;
@@ -1946,6 +1972,12 @@ export default function SecurityPlanner() {
           });
         }
         return pts.map((p, i) => [p, pts[(i + 1) % pts.length]]);
+      } else if (item.type === "shrub") {
+        const s = item as ShrubItem;
+        const pts = s.points ?? rectanglePoints(s.width, s.height);
+        const worldPts = pts.map(p => toWorldPoint(p, s));
+        if (worldPts.length < 2) return [];
+        return worldPts.map((p, i) => [p, worldPts[(i + 1) % worldPts.length]]);
       }
       return [];
     });
@@ -4433,8 +4465,8 @@ export default function SecurityPlanner() {
                             color: COLORS.terrain[terrainType]
                           })}
                           className={`px-2 py-1.5 rounded-lg text-xs font-medium capitalize transition-all ${(selectedItem as TerrainItem).terrainType === terrainType
-                              ? "bg-indigo-600 text-white shadow-lg"
-                              : "bg-white/10 text-slate-300 hover:bg-white/20"
+                            ? "bg-indigo-600 text-white shadow-lg"
+                            : "bg-white/10 text-slate-300 hover:bg-white/20"
                             }`}
                           style={{ borderLeft: `3px solid ${COLORS.terrain[terrainType]}` }}
                         >
