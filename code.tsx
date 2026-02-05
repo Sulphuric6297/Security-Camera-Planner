@@ -464,9 +464,9 @@ const create3dShrub = (item: ShrubItem): THREE.Group => {
   // Create extruded shape for the shrub base
   const shape = new THREE.Shape();
   if (points.length > 0) {
-    shape.moveTo(points[0].x, points[0].y);
+    shape.moveTo(points[0].x, -points[0].y);
     for (let i = 1; i < points.length; i++) {
-      shape.lineTo(points[i].x, points[i].y);
+      shape.lineTo(points[i].x, -points[i].y);
     }
     shape.closePath();
   }
@@ -3848,7 +3848,7 @@ export default function SecurityPlanner() {
                       const polyFull = getVisibilityPolygon(cameraPos, r, hFov, c.rotation, buildings);
 
                       // Layer 2: Buildings + Trees (clear view)
-                      const obstacles = items.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
+                      const obstacles = items.filter(i => i.type === "building" || i.type === "tree" || i.type === "shrub") as (BuildingItem | TreeItem | ShrubItem)[];
                       const polyClear = getVisibilityPolygon(cameraPos, r, hFov, c.rotation, obstacles);
 
                       const pointsToPath = (pts: { x: number, y: number }[]) => {
