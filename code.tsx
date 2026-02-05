@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
 import {
   Camera,
@@ -22,14 +22,14 @@ import {
   X,
   Layers,
   Plus,
-  Box,
+
   Undo,
   Redo
 } from "lucide-react";
 
 // --- Types ---
 
-type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "add-model";
+type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
 type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 type ViewMode = "plan" | "iso3d";
 
@@ -102,14 +102,9 @@ interface ImageItem extends BaseItem {
   aspectRatioLocked?: boolean;
 }
 
-interface ModelItem extends BaseItem {
-  type: "model";
-  src: string;
-  scale: number;
-  label: string;
-}
 
-type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | ModelItem;
+
+type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem;
 
 // --- Helper Functions ---
 
@@ -483,7 +478,6 @@ const hFovFromV = (v: number, aspect: number) => {
 export default function SecurityPlanner() {
   // --- State ---
   const [items, setItems] = useState<CanvasItem[]>([]);
-  const modelInputRef = useRef<HTMLInputElement>(null);
 
   // Clipboard
   const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
@@ -636,24 +630,10 @@ export default function SecurityPlanner() {
   const [backgroundMode, setBackgroundMode] = useState<'flat' | 'panorama'>('flat'); // 'flat' = image, 'panorama' = 360° equirectangular
 
   // Street View Integration
-  const [streetViewSettings, setStreetViewSettings] = useState({
-    apiKey: '',
-    location: '', // Address or lat,lng
-    heading: 0,
-    pitch: 0,
-    fov: 90
-  });
-  const [streetViewLoading, setStreetViewLoading] = useState(false);
+
 
   // 3D Model URLs (for higher quality models)
-  const [modelUrls, setModelUrls] = useState({
-    tree: '',
-    car: '',
-    camera: ''
-  });
 
-  // Cache for loaded GLTF models to avoid reloading
-  const modelCache = useRef<any>({ tree: undefined, car: undefined, camera: undefined });
 
   // Camera placement preview state - for visual feedback when placing cameras
   const [cameraPlacementPreview, setCameraPlacementPreview] = useState<{
@@ -679,9 +659,6 @@ export default function SecurityPlanner() {
         if (data.frustumSettings) setFrustumSettings(data.frustumSettings);
         if (data.sceneBackgroundImg) setSceneBackgroundImg(data.sceneBackgroundImg);
         if (data.backgroundMode) setBackgroundMode(data.backgroundMode);
-        if (data.streetViewSettings) setStreetViewSettings(data.streetViewSettings);
-
-        // if (data.modelUrls) setModelUrls(data.modelUrls); // Disabled to revert to procedural defaults
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -700,9 +677,7 @@ export default function SecurityPlanner() {
           projectName,
           frustumSettings,
           sceneBackgroundImg,
-          backgroundMode,
-          streetViewSettings,
-          modelUrls
+          backgroundMode
         };
         localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
       } catch (err: any) {
@@ -729,7 +704,7 @@ export default function SecurityPlanner() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, streetViewSettings, modelUrls]);
+  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -1431,51 +1406,7 @@ export default function SecurityPlanner() {
     addToExportList('camera', `Camera: ${cam.label}`, dataUrl, cam.id);
   };
 
-  // Fetch Google Street View panorama and set as background
-  const fetchStreetViewBackground = async () => {
-    if (!streetViewSettings.apiKey) {
-      alert('Please enter a Google Maps API key');
-      return;
-    }
-    if (!streetViewSettings.location) {
-      alert('Please enter a location (address or lat,lng)');
-      return;
-    }
 
-    setStreetViewLoading(true);
-    try {
-      // Build Street View Static API URL
-      // For panoramic backgrounds, we use larger size and specific parameters
-      const size = '1280x640'; // 2:1 aspect ratio for equirectangular
-      const location = encodeURIComponent(streetViewSettings.location);
-      const heading = streetViewSettings.heading;
-      const pitch = streetViewSettings.pitch;
-      const fov = streetViewSettings.fov;
-
-      // Street View API URL - fetches image directly
-      const url = `https://maps.googleapis.com/maps/api/streetview?size=${size}&location=${location}&heading=${heading}&pitch=${pitch}&fov=${fov}&key=${streetViewSettings.apiKey}`;
-
-      // Fetch the image and convert to data URL
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Street View request failed: ${response.statusText}`);
-      }
-
-      const blob = await response.blob();
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const dataUrl = reader.result as string;
-        setSceneBackgroundImg(dataUrl);
-        setBackgroundMode('flat'); // Street View static is flat projection
-      };
-      reader.readAsDataURL(blob);
-    } catch (error) {
-      console.error('Failed to fetch Street View:', error);
-      alert('Failed to fetch Street View. Check your API key and location.');
-    } finally {
-      setStreetViewLoading(false);
-    }
-  };
 
   // Handle panorama/HDRI file upload with auto-detection
   const handlePanoramaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1739,29 +1670,7 @@ export default function SecurityPlanner() {
     }
   };
 
-  const handleModelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const src = event.target?.result as string;
-        const newItem: ModelItem = {
-          id: generateId(),
-          type: "model",
-          x: canvasSize.width / 2,
-          y: canvasSize.height / 2,
-          rotation: 0,
-          src: src, // Data URL
-          scale: 20,
-          label: file.name.replace(/\.[^/.]+$/, "")
-        };
-        setItems(prev => [...prev, newItem]);
-        setTimeout(() => saveHistory(), 50);
-        setMode("select");
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+
 
   const disposeGroup = (group: THREE.Group) => {
     group.traverse(child => {
@@ -1971,32 +1880,7 @@ export default function SecurityPlanner() {
 
     // Process all items
     items.forEach(item => {
-      if (item.type === "model") {
-        const m = item as ModelItem;
-        const g = new THREE.Group();
-        g.position.set(m.x, 0, m.y);
-        g.rotation.y = -THREE.MathUtils.degToRad(m.rotation);
-        group.add(g);
 
-        const loader = new GLTFLoader();
-        loader.load(m.src, (gltf: any) => {
-          const model = gltf.scene;
-          model.scale.set(m.scale, m.scale, m.scale);
-          model.traverse((o: any) => {
-            if (o.isMesh) {
-              o.castShadow = true;
-              o.receiveShadow = true;
-            }
-          });
-          g.add(model);
-        });
-
-        const label = createTextSprite(m.label);
-        if (label) {
-          label.position.set(0, 20, 0);
-          g.add(label);
-        }
-      }
       // Buildings with improved materials
       if (item.type === "building") {
         const building = item as BuildingItem;
@@ -2058,43 +1942,14 @@ export default function SecurityPlanner() {
 
       // Cars (Parking Items treated as cars)
       if (item.type === "parking") {
-        if (modelCache.current.car) {
-          const g = new THREE.Group();
-          g.position.set(item.x, 0, item.y);
-          g.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-          group.add(g);
-
-          const model = modelCache.current.car.clone();
-          const box = new THREE.Box3().setFromObject(model);
-          const size = box.getSize(new THREE.Vector3());
-          // Scale to fit length (~4.5m)
-          const scale = (item.height / (size.z || 4.5)) * 0.9;
-          if (isFinite(scale) && scale > 0) model.scale.set(scale, scale, scale);
-          g.add(model);
-        } else {
-          const car = create3dCar(item as ParkingItem);
-          group.add(car);
-        }
+        const car = create3dCar(item as ParkingItem);
+        group.add(car);
       }
 
       // Trees
       if (item.type === "tree") {
-        if (modelCache.current.tree) {
-          const g = new THREE.Group();
-          g.position.set(item.x, 0, item.y);
-          group.add(g);
-
-          const model = modelCache.current.tree.clone();
-          const box = new THREE.Box3().setFromObject(model);
-          const size = box.getSize(new THREE.Vector3());
-          const maxDim = Math.max(size.x, size.z, size.y) || 5;
-          const scale = ((item as TreeItem).radius * 3 / maxDim);
-          if (isFinite(scale) && scale > 0) model.scale.set(scale, scale, scale);
-          g.add(model);
-        } else {
-          const tree = create3dTree(item as TreeItem);
-          group.add(tree);
-        }
+        const tree = create3dTree(item as TreeItem);
+        group.add(tree);
       }
 
       // Camera with proper 3D frustum
@@ -2118,69 +1973,34 @@ export default function SecurityPlanner() {
         // Camera body - box with lens
         const cameraGroup = new THREE.Group();
 
-        if (modelUrls.camera) {
-          const loader = new GLTFLoader();
-          loader.load(modelUrls.camera, (gltf: any) => {
-            const model = gltf.scene.clone();
-            const box = new THREE.Box3().setFromObject(model);
-            const size = box.getSize(new THREE.Vector3());
-            const scale = (10 / (Math.max(size.x, size.y, size.z) || 10));
-            if (isFinite(scale) && scale > 0) model.scale.set(scale, scale, scale);
+        // Main camera body
+        const bodyGeometry = new THREE.BoxGeometry(14, 10, 10);
+        const bodyMaterial = new THREE.MeshStandardMaterial({
+          color: "#1e293b",
+          roughness: 0.3,
+          metalness: 0.5
+        });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        cameraGroup.add(body);
 
-            // Rotate model to face +X if needed (assuming standard Forward is -Z or +Z)
-            // This depends on the model. We'll leave as is or rotate 90.
-            // Standard GLTF is usually +Z or -Z. Our expectation is +X.
-            // Let's assume user provides correct model or adjust. 
-            // Common: rotateY(PI/2)
-            model.rotation.y = Math.PI / 2;
+        // Camera lens
+        const lensGeometry = new THREE.CylinderGeometry(3.5, 4, 8, 16);
+        lensGeometry.rotateZ(Math.PI / 2);
+        const lensMaterial = new THREE.MeshStandardMaterial({
+          color: "#0f172a",
+          roughness: 0.2,
+          metalness: 0.7
+        });
+        const lens = new THREE.Mesh(lensGeometry, lensMaterial);
+        lens.position.set(10, 0, 0);
+        cameraGroup.add(lens);
 
-            model.traverse((o: any) => {
-              if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
-            });
-            cameraGroup.add(model);
-          }, undefined, async (err: any) => {
-            // Fallback to procedural
-            const bodyGeometry = new THREE.BoxGeometry(14, 10, 10);
-            const bodyMaterial = new THREE.MeshStandardMaterial({ color: "#1e293b", roughness: 0.3, metalness: 0.5 });
-            cameraGroup.add(new THREE.Mesh(bodyGeometry, bodyMaterial));
-
-            const lensGeometry = new THREE.CylinderGeometry(3.5, 4, 8, 16);
-            lensGeometry.rotateZ(Math.PI / 2);
-            const lensMaterial = new THREE.MeshStandardMaterial({ color: "#0f172a", roughness: 0.2, metalness: 0.7 });
-            const lens = new THREE.Mesh(lensGeometry, lensMaterial);
-            lens.position.set(10, 0, 0);
-            cameraGroup.add(lens);
-          });
-        } else {
-          // Main camera body
-          const bodyGeometry = new THREE.BoxGeometry(14, 10, 10);
-          const bodyMaterial = new THREE.MeshStandardMaterial({
-            color: "#1e293b",
-            roughness: 0.3,
-            metalness: 0.5
-          });
-          const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-          cameraGroup.add(body);
-
-          // Camera lens
-          const lensGeometry = new THREE.CylinderGeometry(3.5, 4, 8, 16);
-          lensGeometry.rotateZ(Math.PI / 2);
-          const lensMaterial = new THREE.MeshStandardMaterial({
-            color: "#0f172a",
-            roughness: 0.2,
-            metalness: 0.7
-          });
-          const lens = new THREE.Mesh(lensGeometry, lensMaterial);
-          lens.position.set(10, 0, 0);
-          cameraGroup.add(lens);
-
-          // Indicator light
-          const lightGeometry = new THREE.SphereGeometry(1.5, 8, 8);
-          const lightMaterial = new THREE.MeshBasicMaterial({ color: cameraItem.color });
-          const light = new THREE.Mesh(lightGeometry, lightMaterial);
-          light.position.set(-5, 4, 0);
-          cameraGroup.add(light);
-        }
+        // Indicator light
+        const lightGeometry = new THREE.SphereGeometry(1.5, 8, 8);
+        const lightMaterial = new THREE.MeshBasicMaterial({ color: cameraItem.color });
+        const light = new THREE.Mesh(lightGeometry, lightMaterial);
+        light.position.set(-5, 4, 0);
+        cameraGroup.add(light);
 
         // Position and rotate camera body
         cameraGroup.position.set(cameraPos.x, cameraHeight, cameraPos.y);
@@ -2732,31 +2552,9 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (viewMode !== "iso3d") return;
     rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, streetViewSettings, modelUrls, selectedId]);
+  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId]);
 
-  // Load models into cache
-  useEffect(() => {
-    const loader = new GLTFLoader();
-    const loadModel = (url: string, key: 'tree' | 'car' | 'camera') => {
-      if (!url) {
-        modelCache.current[key] = undefined;
-        return;
-      }
-      loader.load(url, (gltf) => {
-        gltf.scene.traverse((o: any) => {
-          if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
-        });
-        modelCache.current[key] = gltf.scene;
-        rebuildThreeScene(); // Refresh scene when loaded
-      }, undefined, (err) => {
-        console.error(`Failed to load ${key}`, err);
-        modelCache.current[key] = undefined;
-      });
-    };
-    if (modelUrls.tree) loadModel(modelUrls.tree, 'tree');
-    if (modelUrls.car) loadModel(modelUrls.car, 'car');
-    if (modelUrls.camera) loadModel(modelUrls.camera, 'camera');
-  }, [modelUrls]);
+
 
   useEffect(() => {
     if (viewMode !== "plan") {
@@ -2848,26 +2646,6 @@ export default function SecurityPlanner() {
 
     // Add items
     items.forEach(item => {
-      if (item.type === "model") {
-        const m = item as ModelItem;
-        const g = new THREE.Group();
-        g.position.set(m.x, 0, m.y);
-        g.rotation.y = -THREE.MathUtils.degToRad(m.rotation);
-        scene.add(g);
-
-        const loader = new GLTFLoader();
-        loader.load(m.src, (gltf) => {
-          const model = gltf.scene;
-          model.scale.set(m.scale, m.scale, m.scale);
-          model.traverse((o: any) => {
-            if (o.isMesh) {
-              o.castShadow = true;
-              o.receiveShadow = true;
-            }
-          });
-          g.add(model);
-        });
-      }
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const pts = getBuildingPoints(bld);
@@ -2880,28 +2658,10 @@ export default function SecurityPlanner() {
         scene.add(mesh);
       }
       if (item.type === "tree") {
-        if (modelCache.current.tree) {
-          const tree = modelCache.current.tree.clone();
-          const scale = ((item as TreeItem).radius * 2 * 0.05) * 1.5;
-          tree.scale.set(scale, scale, scale);
-          tree.position.set(item.x, 0, item.y);
-          scene.add(tree);
-        } else {
-          scene.add(create3dTree(item as TreeItem));
-        }
+        scene.add(create3dTree(item as TreeItem));
       }
       if (item.type === "parking") {
-        if (modelCache.current.car) {
-          const car = modelCache.current.car.clone();
-          const scale = ((item as ParkingItem).height / 4.5) * 0.9;
-          if (isFinite(scale) && scale > 0) car.scale.set(scale, scale, scale);
-          // Apply color if possible? GLTF usually has own mats.
-          car.position.set(item.x, 0, item.y);
-          car.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-          scene.add(car);
-        } else {
-          scene.add(create3dCar(item as ParkingItem));
-        }
+        scene.add(create3dCar(item as ParkingItem));
       }
     });
 
@@ -2948,7 +2708,7 @@ export default function SecurityPlanner() {
       pmremGenerator.dispose(); // Cleanup
       renderer.dispose();
     };
-  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg, modelUrls]);
+  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg]);
 
 
   // --- Event Handlers ---
@@ -3406,7 +3166,6 @@ export default function SecurityPlanner() {
           {[
             { mode: "select", icon: Move, label: "Select" },
             { mode: "add-camera", icon: Camera, label: "Camera" },
-            { mode: "add-model", icon: Box, label: "Model" },
             { mode: "add-building", icon: Square, label: "Building" },
             { mode: "add-tree", icon: Trees, label: "Tree" },
             { mode: "add-parking", icon: Car, label: "Parking" },
@@ -3471,7 +3230,6 @@ export default function SecurityPlanner() {
           {/* Inputs */}
           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
           <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
-          <input type="file" ref={modelInputRef} className="hidden" accept=".glb,.gltf" onChange={handleModelUpload} />
           <input type="file" ref={projectInputRef} className="hidden" accept=".json" onChange={handleLoadProject} />
           <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
 
@@ -3713,41 +3471,7 @@ export default function SecurityPlanner() {
                       );
                     }
 
-                    if (item.type === "model") {
-                      const m = item as ModelItem;
-                      return (
-                        <g
-                          key={m.id}
-                          transform={`translate(${m.x}, ${m.y}) rotate(${m.rotation})`}
-                          onMouseDown={e => handleMouseDown(e, m.id, "move")}
-                          onClick={e => e.stopPropagation()}
-                          className="cursor-move"
-                        >
-                          <rect
-                            x={-15}
-                            y={-15}
-                            width={30}
-                            height={30}
-                            fill="#818cf8"
-                            fillOpacity="0.5"
-                            stroke={isSelected ? "#3b82f6" : "#6366f1"}
-                            strokeWidth="2"
-                          />
-                          <text x="0" y="5" textAnchor="middle" fill="white" fontSize="10" fontWeight="bold">3D</text>
-                          {/* Label */}
-                          <text
-                            y="-25"
-                            textAnchor="middle"
-                            fill="#6366f1"
-                            fontSize="12"
-                            fontWeight="bold"
-                            className="select-none"
-                          >
-                            {m.label}
-                          </text>
-                        </g>
-                      );
-                    }
+
 
                     if (item.type === "camera") {
                       const c = item as CameraItem;
@@ -4837,122 +4561,9 @@ export default function SecurityPlanner() {
                   )}
                 </div>
 
-                {/* Google Street View Integration */}
-                <div className="space-y-3 mb-4 p-3 bg-white/5 rounded-lg border border-white/10">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-400">Google Street View</label>
-                    <a href="https://developers.google.com/maps/documentation/streetview" target="_blank" rel="noopener noreferrer" className="text-[10px] text-indigo-400 hover:underline">Get API Key</a>
-                  </div>
 
-                  <input
-                    type="password"
-                    placeholder="Google Maps API Key"
-                    value={streetViewSettings.apiKey}
-                    onChange={e => setStreetViewSettings({ ...streetViewSettings, apiKey: e.target.value })}
-                    className="w-full bg-transparent border border-white/20 rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-indigo-500 outline-none"
-                  />
 
-                  <input
-                    type="text"
-                    placeholder="Address or Lat,Lng (e.g. 40.7128,-74.0060)"
-                    value={streetViewSettings.location}
-                    onChange={e => setStreetViewSettings({ ...streetViewSettings, location: e.target.value })}
-                    className="w-full bg-transparent border border-white/20 rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:border-indigo-500 outline-none"
-                  />
 
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">Heading</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="360"
-                        value={streetViewSettings.heading}
-                        onChange={e => setStreetViewSettings({ ...streetViewSettings, heading: parseInt(e.target.value) || 0 })}
-                        className="w-full bg-transparent border border-white/20 rounded px-1.5 py-1 text-[10px] text-slate-300 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">Pitch</label>
-                      <input
-                        type="number"
-                        min="-90"
-                        max="90"
-                        value={streetViewSettings.pitch}
-                        onChange={e => setStreetViewSettings({ ...streetViewSettings, pitch: parseInt(e.target.value) || 0 })}
-                        className="w-full bg-transparent border border-white/20 rounded px-1.5 py-1 text-[10px] text-slate-300 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">FOV</label>
-                      <input
-                        type="number"
-                        min="10"
-                        max="120"
-                        value={streetViewSettings.fov}
-                        onChange={e => setStreetViewSettings({ ...streetViewSettings, fov: parseInt(e.target.value) || 90 })}
-                        className="w-full bg-transparent border border-white/20 rounded px-1.5 py-1 text-[10px] text-slate-300 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={fetchStreetViewBackground}
-                    disabled={streetViewLoading || !streetViewSettings.apiKey}
-                    className={`w-full py-1.5 rounded-md text-xs font-medium transition-colors ${streetViewLoading || !streetViewSettings.apiKey
-                      ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                      : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                      }`}
-                  >
-                    {streetViewLoading ? 'Loading...' : 'Fetch Street View'}
-                  </button>
-                </div>
-
-                {/* 3D Model URLs (Advanced) */}
-                <details className="group mb-4">
-                  <summary className="text-xs font-semibold text-slate-400 cursor-pointer hover:text-slate-300 flex items-center gap-1">
-                    <span className="transform transition-transform group-open:rotate-90">▶</span>
-                    Custom 3D Models (Advanced)
-                  </summary>
-                  <div className="mt-2 space-y-2 pl-3 border-l border-white/10">
-                    <p className="text-[10px] text-slate-500 mb-2">
-                      Provide GLTF model URLs for higher quality assets. Leave empty to use default procedural models.
-                    </p>
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">Tree Model URL</label>
-                      <input
-                        type="url"
-                        placeholder="https://example.com/tree.glb"
-                        value={modelUrls.tree}
-                        onChange={e => setModelUrls({ ...modelUrls, tree: e.target.value })}
-                        className="w-full bg-transparent border border-white/20 rounded px-2 py-1 text-[10px] text-slate-300 placeholder-slate-600 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">Car Model URL</label>
-                      <input
-                        type="url"
-                        placeholder="https://example.com/car.glb"
-                        value={modelUrls.car}
-                        onChange={e => setModelUrls({ ...modelUrls, car: e.target.value })}
-                        className="w-full bg-transparent border border-white/20 rounded px-2 py-1 text-[10px] text-slate-300 placeholder-slate-600 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-slate-500">Camera Model URL</label>
-                      <input
-                        type="url"
-                        placeholder="https://example.com/camera.glb"
-                        value={modelUrls.camera}
-                        onChange={e => setModelUrls({ ...modelUrls, camera: e.target.value })}
-                        className="w-full bg-transparent border border-white/20 rounded px-2 py-1 text-[10px] text-slate-300 placeholder-slate-600 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                    <p className="text-[10px] text-slate-600">
-                      Get free models: <a href="https://poly.pizza" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">Poly Pizza</a>, <a href="https://sketchfab.com" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">Sketchfab</a>
-                    </p>
-                  </div>
-                </details>
 
                 {/* Frustum Settings & Declutter */}
                 <div className="flex items-center justify-between">
