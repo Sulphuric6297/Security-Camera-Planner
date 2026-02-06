@@ -2558,6 +2558,53 @@ export default function SecurityPlanner() {
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
+  // Effect: Handle 3D Selection Highlight (Emissive Glow)
+  useEffect(() => {
+    const scene = threeStateRef.current?.scene;
+    const cache = threeObjectCacheRef.current;
+    if (!scene || !cache) return;
+
+    // Helper to Apply Highlight
+    const setHighlight = (obj: THREE.Object3D, active: boolean) => {
+      obj.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.material) {
+          // Handle single material or array
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+
+          materials.forEach(mat => {
+            if ('emissive' in mat) {
+              // Save original emissive if not saved
+              if (!child.userData.originalEmissive) {
+                child.userData.originalEmissive = mat.emissive.clone();
+              }
+
+              if (active) {
+                // Set glowing blue emissive
+                mat.emissive.setHex(0x4444ff);
+                mat.emissiveIntensity = 0.5;
+              } else {
+                // Restore original
+                if (child.userData.originalEmissive) {
+                  mat.emissive.copy(child.userData.originalEmissive);
+                  mat.emissiveIntensity = 1; // Default or saved
+                } else {
+                  mat.emissive.setHex(0x000000);
+                }
+              }
+            }
+          });
+        }
+      });
+    };
+
+    // Update all objects
+    cache.forEach((obj, id) => {
+      setHighlight(obj, id === selectedId);
+    });
+
+    threeStateRef.current?.renderer.render(threeStateRef.current.scene, threeStateRef.current.camera);
+  }, [selectedId, items]); // Re-run when selection or items change
+
   useEffect(() => {
     if (!threeContainerRef.current || threeStateRef.current) return;
     const container = threeContainerRef.current;
@@ -2740,8 +2787,8 @@ export default function SecurityPlanner() {
           forward.normalize();
 
           // Apply movement: world follows mouse (grab-and-drag)
-          state.target.x += right.x * dx * panScale + forward.x * dy * panScale;
-          state.target.z += right.z * dx * panScale + forward.z * dy * panScale;
+          state.target.x += -right.x * dx * panScale + forward.x * dy * panScale;
+          state.target.z += -right.z * dx * panScale + forward.z * dy * panScale;
 
           updateCamera();
         };
