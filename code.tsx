@@ -2606,35 +2606,51 @@ export default function SecurityPlanner() {
       if (active) {
         const item = items.find(i => i.id === id);
         if (item && item.type === "building") {
-          const building = item as BuildingItem;
-          const h = building.wallHeight ?? 60;
-
           // Create Green Cone Handle
-          // Positions: at top of building.
-          const geometry = new THREE.ConeGeometry(5, 15, 8);
-          const material = new THREE.MeshBasicMaterial({
-            color: 0x10b981,
-            depthTest: false,
-            transparent: true,
-            opacity: 0.9,
-            toneMapped: false
-          });
-          const handle = new THREE.Mesh(geometry, material);
-          handle.name = "height-handle";
-
-          // ExtrudeGeometry is rotated X -90.
-          // Local Z is height. 
-          // Position at Z = h + offset. 
-          handle.position.set(0, 0, h + 10);
-
-          // Rotate Cone to point along Z?
-          // Cone default is Y-up.
-          // We want it pointing +Z?
-          handle.rotation.x = Math.PI / 2;
-
-          obj.add(handle);
+          const info = createHeightHandle(obj, id);
+          if (info) obj.add(info);
         }
       }
+    };
+
+    const createHeightHandle = (obj: THREE.Object3D, id: string) => {
+      // Find the mesh to get bounding box
+      let mesh: THREE.Mesh | null = null;
+      obj.traverse(c => {
+        if (c instanceof THREE.Mesh && !mesh) mesh = c;
+      });
+
+      if (!mesh) return null;
+
+      const targetMesh = mesh as THREE.Mesh;
+      if (!targetMesh.geometry.boundingBox) targetMesh.geometry.computeBoundingBox();
+      const bbox = targetMesh.geometry.boundingBox;
+      if (!bbox) return null;
+
+      const center = new THREE.Vector3();
+      bbox.getCenter(center);
+      const topZ = bbox.max.z;
+
+      const geometry = new THREE.ConeGeometry(6, 18, 16);
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.9,
+        toneMapped: false
+      });
+      const handle = new THREE.Mesh(geometry, material);
+      handle.name = "height-handle";
+
+      // Position
+      handle.position.set(center.x, center.y, topZ + 12);
+      handle.rotation.x = Math.PI / 2;
+
+      // CRITICAL: Add userData for Raycasting
+      handle.userData.itemId = id;
+      handle.userData.isHandle = true;
+
+      return handle;
     };
 
     // Update all objects
@@ -2642,7 +2658,35 @@ export default function SecurityPlanner() {
       setHighlight(obj, id === selectedId, id);
     });
 
+    // Add Hover Cursor Logic
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!threeStateRef.current) return;
+
+      // Local helper for NDC
+      const rect = threeStateRef.current.renderer.domElement.getBoundingClientRect();
+      const ndc = {
+        x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        y: -((e.clientY - rect.top) / rect.height) * 2 + 1
+      };
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), threeStateRef.current.camera);
+      const intersects = raycaster.intersectObjects(threeStateRef.current.scene.children, true);
+
+      const hitHandle = intersects.find(h => h.object.name === "height-handle");
+      if (hitHandle) {
+        document.body.style.cursor = "ns-resize";
+      } else {
+        document.body.style.cursor = "default";
+      }
+    };
+    threeStateRef.current?.renderer.domElement.addEventListener("pointermove", handlePointerMove);
+
     threeStateRef.current?.renderer.render(threeStateRef.current.scene, threeStateRef.current.camera);
+
+    return () => {
+      threeStateRef.current?.renderer.domElement.removeEventListener("pointermove", handlePointerMove);
+    };
   }, [selectedId, items]); // Re-run when selection or items change
 
   useEffect(() => {
