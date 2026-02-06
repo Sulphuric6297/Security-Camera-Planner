@@ -2886,8 +2886,8 @@ export default function SecurityPlanner() {
             // Update accumulated offset
             dragState.accumulatedOffset = { x: totalDx, z: totalDz };
 
-            // Calculate new position: SUBTRACT delta (inverted for natural feel)
-            const newX = Math.round((dragState.originalItemPos.x - totalDx) / gridSize) * gridSize;
+            // Calculate new position: X uses ADD, Y uses SUBTRACT (mixed inversion for correct feel)
+            const newX = Math.round((dragState.originalItemPos.x + totalDx) / gridSize) * gridSize;
             const newY = Math.round((dragState.originalItemPos.y - totalDz) / gridSize) * gridSize;
 
             // "Local Drag" pattern: Update Three.js mesh directly for smooth 60fps performance
@@ -2921,7 +2921,7 @@ export default function SecurityPlanner() {
 
             if (dragState.isDragging && dragState.itemId && dragState.originalItemPos) {
               // Now commit the final position to React state (single update)
-              const finalX = Math.round((dragState.originalItemPos.x - dragState.accumulatedOffset.x) / gridSize) * gridSize;
+              const finalX = Math.round((dragState.originalItemPos.x + dragState.accumulatedOffset.x) / gridSize) * gridSize;
               const finalY = Math.round((dragState.originalItemPos.y - dragState.accumulatedOffset.z) / gridSize) * gridSize;
               const dragItemId = dragState.itemId;
 
