@@ -2550,14 +2550,14 @@ export default function SecurityPlanner() {
 
   // 3D View Click Interaction
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const container = threeContainerRef.current;
+    if (!container) return;
 
     const handleClick = (event: MouseEvent) => {
       const state = threeStateRef.current;
       if (!state) return;
 
-      const rect = canvas.getBoundingClientRect();
+      const rect = container.getBoundingClientRect();
       const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
@@ -2588,8 +2588,8 @@ export default function SecurityPlanner() {
       }
     };
 
-    canvas.addEventListener('click', handleClick);
-    return () => canvas.removeEventListener('click', handleClick);
+    container.addEventListener('click', handleClick);
+    return () => container.removeEventListener('click', handleClick);
   }, []);
 
   const handleCaptureSnapshot = () => {
