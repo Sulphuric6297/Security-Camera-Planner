@@ -2603,9 +2603,9 @@ export default function SecurityPlanner() {
           forward.y = 0; // Project onto ground plane
           forward.normalize();
 
-          // Apply movement: drag right moves target left, drag up moves target forward
-          state.target.x -= right.x * dx * panScale + forward.x * dy * panScale;
-          state.target.z -= right.z * dx * panScale + forward.z * dy * panScale;
+          // Apply movement: world follows mouse (grab-and-drag)
+          state.target.x += right.x * dx * panScale + forward.x * dy * panScale;
+          state.target.z += right.z * dx * panScale + forward.z * dy * panScale;
 
           updateCamera();
         };
@@ -2789,8 +2789,8 @@ export default function SecurityPlanner() {
             forward.y = 0;
             forward.normalize();
 
-            state.target.x -= right.x * dx * panScale + forward.x * dy * panScale;
-            state.target.z -= right.z * dx * panScale + forward.z * dy * panScale;
+            state.target.x += right.x * dx * panScale + forward.x * dy * panScale;
+            state.target.z += right.z * dx * panScale + forward.z * dy * panScale;
 
             updateCamera();
           };
