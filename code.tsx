@@ -627,6 +627,9 @@ export default function SecurityPlanner() {
   const [terrainSelection, setTerrainSelection] = useState<{ x1: number, z1: number, x2: number, z2: number } | null>(null);
   const [selectionHeight, setSelectionHeightState] = useState<number>(0);
 
+  const panelSection = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-3";
+  const panelSectionLoose = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-4";
+
   // State Refs for History (Ensures we save latest state in async callbacks)
   const currentItemsRef = useRef(items);
   const terrainHeightsRef = useRef(terrainHeights);
@@ -724,6 +727,8 @@ export default function SecurityPlanner() {
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [projectName, setProjectName] = useState("Security Camera Plan");
   const [showExportPanel, setShowExportPanel] = useState(false);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+  const [rightPanelMode, setRightPanelMode] = useState<"properties" | "project">("properties");
   const [viewMode, setViewMode] = useState<ViewMode>("plan");
   const [exportOptions, setExportOptions] = useState({
     scale: 2,
@@ -742,6 +747,13 @@ export default function SecurityPlanner() {
 
   const [mode, setMode] = useState<ToolMode>("select");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedId) {
+      setIsRightPanelOpen(true);
+      setRightPanelMode("properties");
+    }
+  }, [selectedId]);
 
   // Interaction State
   const [interactionState, setInteractionState] = useState<{
@@ -1190,11 +1202,9 @@ export default function SecurityPlanner() {
     if (!svgRef.current) return;
     if (viewMode === "iso3d") return;
 
-    const CTM = svgRef.current.getScreenCTM();
-    if (!CTM) return;
-
-    const x = snapValue((e.clientX - CTM.e) / CTM.a);
-    const y = snapValue((e.clientY - CTM.f) / CTM.d);
+    const pos = getSvgMousePos(e);
+    const x = snapValue(pos.x);
+    const y = snapValue(pos.y);
 
     let newItem: CanvasItem;
 
@@ -1213,9 +1223,9 @@ export default function SecurityPlanner() {
           rotation: 45,
           label: "Camera",
           description: "",
-          fov: 70,
-          hFov: 70,
-          vFov: 45,
+          fov: 109,
+          hFov: 109,
+          vFov: vFovFromH(109, 16 / 9),
           pitch: -15, // Slightly steeper downward angle for better coverage
           height: 60, // Default to building roof height
           aspect: 16 / 9,
@@ -1412,6 +1422,61 @@ export default function SecurityPlanner() {
       setItems([]);
       setSelectedId(null);
     }
+  };
+
+  const handleNewProject = () => {
+    if (!window.confirm("Start a new project? This will clear the current project.")) return;
+
+    setItems([]);
+    setSelectedId(null);
+    setBackgroundImg(null);
+    setCanvasSize(DEFAULT_CANVAS);
+    setBgSettings({
+      x: 0,
+      y: 0,
+      width: DEFAULT_CANVAS.width,
+      height: DEFAULT_CANVAS.height,
+      opacity: 0.5
+    });
+    setGridSize(20);
+    setShowGrid(true);
+    setSnapToGrid(true);
+    setProjectName("Security Camera Plan");
+    setExportList([]);
+    setSnapshots([]);
+    setFrustumSettings({
+      visible: true,
+      opacity: 0.15,
+      edgeOpacity: 0.6,
+      useCameraColor: true,
+      color: '#3b82f6',
+      showAll: true,
+      mode: 'volume'
+    });
+    setSceneBackgroundImg(null);
+    setBackgroundMode('flat');
+    setNvrLayout([]);
+    setMaximizedCamId(null);
+    setViewMode("plan");
+    setMode("select");
+    setPanOffset({ x: 0, y: 0 });
+    setZoom(1);
+    setIsPanning(false);
+    setPanStart({ x: 0, y: 0, panX: 0, panY: 0 });
+    setIsSpacePressed(false);
+    isSpacePressedRef.current = false;
+    setShowCameraPreview(true);
+    setShowExportPanel(false);
+    setClipboard(null);
+    setIsTerrainMode(false);
+    setTerrainSelection(null);
+    setSelectionHeightState(0);
+    setTerrainHeights({});
+    setCameraPlacementPreview(null);
+    setHistory([]);
+    setHistoryIndex(-1);
+    setRightPanelMode("project");
+    setIsRightPanelOpen(true);
   };
 
   const handleFitBackground = () => {
@@ -2992,10 +3057,14 @@ export default function SecurityPlanner() {
   const itemsRef = useRef(items);
   const modeRef = useRef(mode);
   const selectedIdRef = useRef(selectedId);
+  const snapToGridRef = useRef(snapToGrid);
+  const gridSizeRef = useRef(gridSize);
 
   useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  useEffect(() => { snapToGridRef.current = snapToGrid; }, [snapToGrid]);
+  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
 
   // Effect: Handle 3D Selection Highlight (Emissive Glow)
   useEffect(() => {
@@ -3504,8 +3573,10 @@ export default function SecurityPlanner() {
             // Create synthetic event-like object for handleAddItem
             // Since handleAddItem expects a React.MouseEvent with specific calculations,
             // we'll directly create items here for 3D placement
-            const x = Math.round(groundPos.x / gridSize) * gridSize;
-            const y = Math.round(groundPos.z / gridSize) * gridSize; // z in 3D maps to y in 2D
+            const snapSize = gridSizeRef.current || 20;
+            const snapEnabled = snapToGridRef.current;
+            const x = snapEnabled ? Math.round(groundPos.x / snapSize) * snapSize : groundPos.x;
+            const y = snapEnabled ? Math.round(groundPos.z / snapSize) * snapSize : groundPos.z; // z in 3D maps to y in 2D
 
             const common = {
               id: generateId(),
@@ -3524,9 +3595,9 @@ export default function SecurityPlanner() {
                   rotation: 45,
                   label: "Camera",
                   description: "",
-                  fov: 70,
-                  hFov: 70,
-                  vFov: 45,
+                  fov: 109,
+                  hFov: 109,
+                  vFov: vFovFromH(109, 16 / 9),
                   pitch: -15,
                   height: 60,
                   aspect: 16 / 9,
@@ -3653,9 +3724,11 @@ export default function SecurityPlanner() {
             const rawX = newGroundPos.x + dragState.dragOffset.x;
             const rawY = newGroundPos.z + dragState.dragOffset.z;
 
-            // Snap to grid
-            const newX = Math.round(rawX / gridSize) * gridSize;
-            const newY = Math.round(rawY / gridSize) * gridSize;
+            // Snap to grid (if enabled)
+            const snapSize = gridSizeRef.current || 20;
+            const snapEnabled = snapToGridRef.current;
+            const newX = snapEnabled ? Math.round(rawX / snapSize) * snapSize : rawX;
+            const newY = snapEnabled ? Math.round(rawY / snapSize) * snapSize : rawY;
 
             // Update Three.js mesh directly
             const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
@@ -4320,8 +4393,8 @@ export default function SecurityPlanner() {
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
   const cameraAspect = selectedCamera?.aspect ?? 16 / 9;
-  const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 70;
-  const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : 45;
+  const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
+  const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
   const cameraDiag = selectedCamera ? diagonalFromHv(cameraHFov, cameraVFov) : 90;
   const buildingOptions = items.filter(item => item.type === "building") as BuildingItem[];
   const mountType = selectedCamera?.mount?.type ?? "free";
@@ -4331,6 +4404,10 @@ export default function SecurityPlanner() {
   const mountEdgeCount = mountBuilding ? getBuildingPoints(mountBuilding).length : 0;
   const mountEdgeIndex = selectedCamera?.mount?.edgeIndex ?? 0;
   const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
+  const rightPanelOffset = isRightPanelOpen ? "lg:right-[22rem]" : "lg:right-4";
+  const workspaceRightPadding = isRightPanelOpen ? "pr-80" : "pr-6";
+  const floatingPanelRight = isRightPanelOpen ? "right-96" : "right-4";
+  const showProjectSettings = rightPanelMode === "project";
 
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
@@ -4642,7 +4719,7 @@ export default function SecurityPlanner() {
       </div>
 
       {/* --- Top Header Actions --- */}
-      <div className="absolute top-4 left-24 right-4 lg:right-[22rem] h-14 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center px-4 justify-between ring-1 ring-white/5 transition-all duration-300">
+      <div className={`absolute top-4 left-24 right-4 ${rightPanelOffset} h-14 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center px-4 justify-between ring-1 ring-white/5 transition-all duration-300`}>
         <div className="flex items-center gap-4">
           <h1 className="text-lg font-bold text-slate-200 tracking-tight flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
@@ -4653,6 +4730,9 @@ export default function SecurityPlanner() {
           <div className="h-6 w-px bg-white/10 mx-2"></div>
 
           <div className="flex items-center gap-1">
+            <button onClick={handleNewProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="New Project">
+              <Plus className="w-5 h-5" />
+            </button>
             <button onClick={() => projectInputRef.current?.click()} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Load Project">
               <FolderOpen className="w-5 h-5" />
             </button>
@@ -4672,6 +4752,16 @@ export default function SecurityPlanner() {
           <button onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
             <LayoutGrid className="w-4 h-4" />
             <span>NVR</span>
+          </button>
+          <button
+            onClick={() => {
+              setRightPanelMode("project");
+              setIsRightPanelOpen(true);
+            }}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all"
+          >
+            <MapIcon className="w-4 h-4" />
+            <span>Project</span>
           </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <Upload className="w-4 h-4" />
@@ -4695,7 +4785,7 @@ export default function SecurityPlanner() {
 
       <div className="absolute inset-0 z-0 overflow-hidden">
         {/* --- Main Workspace --- */}
-        <div className="w-full h-full relative overflow-auto bg-zinc-950 flex items-center justify-center pt-20 pl-24 pr-80 pb-6 custom-scrollbar">
+        <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex items-center justify-center pt-20 pl-24 ${workspaceRightPadding} pb-6 custom-scrollbar`}>
           <div className="shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden">
             {viewMode === "plan" ? (
               <svg
@@ -5348,11 +5438,24 @@ export default function SecurityPlanner() {
                         margin={[16, 16]}
                       >
                         {items.filter(i => i.type === 'camera').map(cam => (
-                          <div key={cam.id} className="relative group">
+                          <div
+                            key={cam.id}
+                            className="relative group"
+                            onClick={() => {
+                              setSelectedId(cam.id);
+                              setRightPanelMode("properties");
+                              setIsRightPanelOpen(true);
+                            }}
+                          >
                             <NVRCard
                               camera={cam as CameraItem}
                               renderFn={renderCameraViewToDataUrl}
-                              onMaximize={() => setMaximizedCamId(cam.id)}
+                              onMaximize={() => {
+                                setSelectedId(cam.id);
+                                setRightPanelMode("properties");
+                                setIsRightPanelOpen(true);
+                                setMaximizedCamId(cam.id);
+                              }}
                               onExport={() => addCameraViewToExportList(cam as CameraItem)}
                             />
                           </div>
@@ -5395,7 +5498,7 @@ export default function SecurityPlanner() {
 
         {/* Camera Preview Panel - Picture-in-Picture style */}
         {selectedCamera && showCameraPreview && (
-          <div className="absolute bottom-4 right-96 w-80 bg-zinc-900/90 backdrop-blur-xl rounded-xl shadow-2xl overflow-hidden border border-white/10 z-40 ring-1 ring-black/50">
+          <div className={`absolute bottom-4 ${floatingPanelRight} w-80 bg-zinc-900/90 backdrop-blur-xl rounded-xl shadow-2xl overflow-hidden border border-white/10 z-40 ring-1 ring-black/50`}>
             <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5">
               <div className="flex items-center gap-2">
                 <Camera className="w-4 h-4 text-emerald-400" />
@@ -5435,7 +5538,7 @@ export default function SecurityPlanner() {
         {selectedCamera && !showCameraPreview && (
           <button
             onClick={() => setShowCameraPreview(true)}
-            className="absolute bottom-4 right-96 px-4 py-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors z-40 flex items-center gap-2"
+            className={`absolute bottom-4 ${floatingPanelRight} px-4 py-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors z-40 flex items-center gap-2`}
           >
             <Camera className="w-4 h-4" />
             <span className="text-sm font-medium">Show Camera View</span>
@@ -5443,18 +5546,22 @@ export default function SecurityPlanner() {
         )}
 
         {/* --- Properties Sidebar (Docked) --- */}
-        <div className="absolute right-0 top-0 bottom-0 w-80 bg-zinc-900/90 backdrop-blur-xl border-l border-white/10 overflow-y-auto hidden lg:block shadow-2xl z-40 custom-scrollbar">
-          {selectedItem ? (
+        <div className={`absolute right-0 top-0 bottom-0 w-80 bg-zinc-900/90 backdrop-blur-xl border-l border-white/10 overflow-y-auto shadow-2xl z-40 custom-scrollbar ${isRightPanelOpen ? "hidden lg:block" : "hidden"}`}>
+          {selectedItem && !showProjectSettings ? (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
                 <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {selectedItem.type}</h2>
-                <button onClick={() => deleteItem(selectedItem.id)} className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-full transition-colors">
-                  <Trash2 className="w-5 h-5" />
+                <button
+                  onClick={() => setIsRightPanelOpen(false)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                  title="Close Panel"
+                >
+                  <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && selectedItem.type !== "parking" && (
-                <div className="space-y-2">
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && (
+                <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
                     <span>{Math.round(selectedItem.rotation)}deg</span>
@@ -5474,7 +5581,7 @@ export default function SecurityPlanner() {
                 selectedItem.type === "building" ||
                 selectedItem.type === "image" ||
                 selectedItem.type === "label") && (
-                  <div className="space-y-2">
+                  <div className={panelSection}>
                     <label className="text-xs font-semibold text-slate-400 uppercase">
                       {selectedItem.type === "label" ? "Text Content" : "Label"}
                     </label>
@@ -5488,7 +5595,7 @@ export default function SecurityPlanner() {
                 )}
 
               {selectedItem.type === "label" && (
-                <div className="space-y-2">
+                <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase">Font Size</label>
                   <input
                     type="number"
@@ -5502,11 +5609,12 @@ export default function SecurityPlanner() {
               )}
 
               {(selectedItem.type === "building" || selectedItem.type === "parking") && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
-                    <input
-                      type="number"
+                <div className={panelSection}>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
+                      <input
+                        type="number"
                       value={(selectedItem as any).width}
                       onChange={e =>
                         selectedItem.type === "building"
@@ -5515,11 +5623,11 @@ export default function SecurityPlanner() {
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Height</label>
-                    <input
-                      type="number"
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Height</label>
+                      <input
+                        type="number"
                       value={(selectedItem as any).height}
                       onChange={e =>
                         selectedItem.type === "building"
@@ -5528,12 +5636,13 @@ export default function SecurityPlanner() {
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
+                    </div>
                   </div>
                 </div>
               )}
 
               {selectedItem.type === "parking" && (
-                <div className="space-y-4 mt-4">
+                <div className={panelSectionLoose}>
                   {/* Vehicle Type Selector */}
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Vehicle Type</label>
@@ -5609,7 +5718,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "building" && (
-                <div className="space-y-2 mt-4">
+                <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
                     <span>{(selectedItem as BuildingItem).wallHeight ?? 60} units</span>
@@ -5634,7 +5743,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "building" && (
-                <div className="space-y-2">
+                <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase">Building Shape</label>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -5672,7 +5781,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "image" && (
-                <div className="space-y-4">
+                <div className={panelSectionLoose}>
                   <button
                     onClick={() => updateItem(selectedItem.id, { aspectRatioLocked: !(selectedItem as ImageItem).aspectRatioLocked })}
                     className={`flex items-center gap-2 text-sm font-medium w-full p-2 rounded border ${(selectedItem as ImageItem).aspectRatioLocked ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-white border-slate-200 text-slate-400"
@@ -5725,7 +5834,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "tree" && (
-                <div className="space-y-4">
+                <div className={panelSectionLoose}>
                   {/* Tree Type Selector */}
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Tree Type</label>
@@ -5797,7 +5906,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "camera" && (
-                <div className="space-y-5">
+                <div className={panelSectionLoose}>
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Horizontal FOV</span>
@@ -5898,6 +6007,21 @@ export default function SecurityPlanner() {
                       max="800"
                       value={(selectedItem as CameraItem).range}
                       onChange={e => updateItem(selectedItem.id, { range: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Rotation</span>
+                      <span>{Math.round(selectedItem.rotation)}deg</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      value={selectedItem.rotation}
+                      onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                     />
                   </div>
@@ -6056,7 +6180,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (
-                <div className="space-y-2">
+                <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Color Code</label>
                   <div className="flex flex-wrap gap-2">
                     {COLORS[selectedItem.type as keyof typeof COLORS].map(color => (
@@ -6070,15 +6194,34 @@ export default function SecurityPlanner() {
                   </div>
                 </div>
               )}
+
+              <div className={panelSection}>
+                <button
+                  onClick={() => deleteItem(selectedItem.id)}
+                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-red-500/30 text-red-400 hover:text-red-200 hover:bg-red-500/10 transition-colors text-sm font-semibold"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete {selectedItem.type}
+                </button>
+              </div>
             </div>
-          ) : (
+          ) : showProjectSettings ? (
             <div className="p-6 flex flex-col gap-6">
-              <div className="flex items-center gap-2 border-b border-white/10 pb-4">
-                <MapIcon className="w-5 h-5 text-slate-400" />
-                <h2 className="font-bold text-lg text-slate-200">Project Settings</h2>
+              <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <div className="flex items-center gap-2">
+                  <MapIcon className="w-5 h-5 text-slate-400" />
+                  <h2 className="font-bold text-lg text-slate-200">Project Settings</h2>
+                </div>
+                <button
+                  onClick={() => setIsRightPanelOpen(false)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                  title="Close Panel"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              <div className="space-y-2">
+              <div className={panelSection}>
                 <label className="text-xs font-semibold text-slate-400 uppercase">Project Name</label>
                 <input
                   type="text"
@@ -6088,21 +6231,24 @@ export default function SecurityPlanner() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  { label: "Cameras", value: items.filter(item => item.type === "camera").length },
-                  { label: "Buildings", value: items.filter(item => item.type === "building").length },
-                  { label: "Trees", value: items.filter(item => item.type === "tree").length },
-                  { label: "Parking", value: items.filter(item => item.type === "parking").length }
-                ].map(stat => (
-                  <div key={stat.label} className="rounded-lg border border-white/10 bg-white/5 p-3">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">{stat.label}</p>
-                    <p className="text-lg font-semibold text-slate-200">{stat.value}</p>
-                  </div>
-                ))}
+              <div className={panelSectionLoose}>
+                <h3 className="text-sm font-semibold text-slate-300">Stats</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  {[
+                    { label: "Cameras", value: items.filter(item => item.type === "camera").length },
+                    { label: "Buildings", value: items.filter(item => item.type === "building").length },
+                    { label: "Trees", value: items.filter(item => item.type === "tree").length },
+                    { label: "Parking", value: items.filter(item => item.type === "parking").length }
+                  ].map(stat => (
+                    <div key={stat.label} className="rounded-lg border border-white/10 bg-white/5 p-3">
+                      <p className="text-xs uppercase tracking-wide text-slate-400">{stat.label}</p>
+                      <p className="text-lg font-semibold text-slate-200">{stat.value}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
 
-              <div className="border-t border-white/10 pt-6 space-y-4">
+              <div className={panelSectionLoose}>
                 <h3 className="text-sm font-semibold text-slate-300">Canvas</h3>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -6144,8 +6290,8 @@ export default function SecurityPlanner() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
-                  <span className="text-slate-600">Show Grid</span>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
+                  <span className="text-slate-300">Show Grid</span>
                   <button
                     onClick={() => setShowGrid(prev => !prev)}
                     className={`px-3 py-1 rounded-full text-xs font-semibold ${showGrid ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}
@@ -6154,8 +6300,8 @@ export default function SecurityPlanner() {
                   </button>
                 </div>
 
-                <div className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm">
-                  <span className="text-slate-600">Snap to Grid</span>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
+                  <span className="text-slate-300">Snap to Grid</span>
                   <button
                     onClick={() => setSnapToGrid(prev => !prev)}
                     className={`px-3 py-1 rounded-full text-xs font-semibold ${snapToGrid ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}
@@ -6172,7 +6318,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              <div className="border-t border-white/10 pt-6 space-y-4">
+              <div className={panelSectionLoose}>
                 <h3 className="text-sm font-semibold text-slate-300">Background Map</h3>
                 <p className="text-xs text-slate-400">Adjust the uploaded map to align with the grid.</p>
 
@@ -6239,7 +6385,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              <div className="border-t border-white/10 pt-6 space-y-4">
+              <div className={panelSectionLoose}>
                 <h3 className="text-sm font-semibold text-slate-300">3D Visualization</h3>
 
 
@@ -6377,7 +6523,7 @@ export default function SecurityPlanner() {
                 )}
               </div>
 
-              <div className="border-t border-white/10 pt-6 space-y-4">
+              <div className={panelSectionLoose}>
                 <h3 className="text-sm font-semibold text-slate-300">3D Snapshots</h3>
                 {viewMode !== "iso3d" ? (
                   <p className="text-xs text-slate-400">Switch to Isometric view to capture snapshots.</p>
@@ -6401,6 +6547,31 @@ export default function SecurityPlanner() {
                     ))}
                   </div>
                 )}
+              </div>
+            </div>
+          ) : (
+            <div className="p-6 flex flex-col gap-6">
+              <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                <h2 className="font-bold text-lg text-slate-200">No Selection</h2>
+                <button
+                  onClick={() => setIsRightPanelOpen(false)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                  title="Close Panel"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className={panelSectionLoose}>
+                <p className="text-sm text-slate-400">Select an item to edit its settings or open project settings.</p>
+                <button
+                  onClick={() => {
+                    setRightPanelMode("project");
+                    setIsRightPanelOpen(true);
+                  }}
+                  className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium text-slate-200 transition-colors"
+                >
+                  Open Project Settings
+                </button>
               </div>
             </div>
           )}
