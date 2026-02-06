@@ -3830,6 +3830,7 @@ export default function SecurityPlanner() {
                           }}
                           className="cursor-move"
                           opacity={interactionState.itemId === b.id && interactionState.type === "move" ? 0.8 : 1}
+                          style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
                         >
                           <rect
                             x={-b.width / 2}
@@ -3838,7 +3839,7 @@ export default function SecurityPlanner() {
                             height={b.height}
                             fill={b.color}
                             stroke={isSelected ? "#3b82f6" : isParking ? "#94a3b8" : "#334155"}
-                            strokeWidth={isSelected ? 3 : 1}
+                            strokeWidth={isSelected ? 4 : 1}
                             strokeDasharray={isParking ? "4" : "0"}
                           />
                           {isParking && (
@@ -3883,13 +3884,14 @@ export default function SecurityPlanner() {
                           onMouseDown={e => handleMouseDown(e, t.id, "move")}
                           onClick={e => e.stopPropagation()}
                           className="cursor-move"
+                          style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
                         >
                           <circle
                             r={t.radius}
                             fill={t.color}
                             fillOpacity="0.6"
                             stroke={isSelected ? "#3b82f6" : t.color}
-                            strokeWidth={isSelected ? 2 : 0}
+                            strokeWidth={isSelected ? 3 : 0}
                           />
                           <circle r={t.radius * 0.5} fill="black" fillOpacity="0.1" />
                         </g>
@@ -3910,7 +3912,11 @@ export default function SecurityPlanner() {
                           className="cursor-move select-none"
                           onMouseDown={e => handleMouseDown(e, l.id, "move")}
                           onClick={e => e.stopPropagation()}
-                          style={{ textShadow: "0px 1px 2px rgba(255,255,255,0.8)" }}
+                          style={{
+                            textShadow: isSelected ? "0 0 8px rgba(59, 130, 246, 0.8)" : "0px 1px 2px rgba(255,255,255,0.8)",
+                            stroke: isSelected ? "#3b82f6" : "none",
+                            strokeWidth: isSelected ? 1 : 0
+                          }}
                         >
                           {l.text}
                         </text>
@@ -3933,7 +3939,10 @@ export default function SecurityPlanner() {
                             y={-img.height / 2}
                             width={img.width}
                             height={img.height}
-                            style={{ outline: isSelected ? "2px solid #3b82f6" : "none" }}
+                            style={{
+                              outline: isSelected ? "3px solid #3b82f6" : "none",
+                              filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none"
+                            }}
                           />
                         </g>
                       );
@@ -3984,7 +3993,11 @@ export default function SecurityPlanner() {
 
                       return (
                         <g key={c.id} transform={`translate(${cameraPos.x}, ${cameraPos.y})`} onClick={e => e.stopPropagation()}>
-                          <g onMouseDown={e => handleMouseDown(e, c.id, "move")} className="cursor-move">
+                          <g
+                            onMouseDown={e => handleMouseDown(e, c.id, "move")}
+                            className="cursor-move"
+                            style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
+                          >
                             <defs>
                               <mask id={`mask-${c.id}`}>
                                 <rect x={-r} y={-r} width={r * 2} height={r * 2} fill="white" />
