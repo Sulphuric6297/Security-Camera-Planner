@@ -637,6 +637,18 @@ const hFovFromV = (v: number, aspect: number) => {
   return (hRad * 180) / Math.PI;
 };
 
+const isPointInPolygon = (point: { x: number; y: number }, polygon: { x: number; y: number }[]) => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect = ((yi > point.y) !== (yj > point.y)) &&
+      (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+};
+
 export default function SecurityPlanner() {
   // --- State ---
   const [items, setItems] = useState<CanvasItem[]>([]);
@@ -1506,7 +1518,24 @@ export default function SecurityPlanner() {
     }
 
     // Add items
+    // Terrain height helper
+    const terrainItems = items.filter(i => i.type === "terrain") as TerrainItem[];
+    const getTerrainHeightAt = (x: number, y: number) => {
+      let h = 0;
+      for (const t of terrainItems) {
+        const pts = t.points ?? rectanglePoints(t.width, t.height);
+        const worldPts = pts.map(p => toWorldPoint(p, t));
+        if (isPointInPolygon({ x, y }, worldPts)) {
+          h = Math.max(h, t.elevation ?? 0);
+        }
+      }
+      return h;
+    };
+
+    // Add items
     items.forEach(item => {
+      const terrainHeight = getTerrainHeightAt(item.x, item.y);
+
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const pts = getBuildingPoints(bld);
@@ -1514,24 +1543,30 @@ export default function SecurityPlanner() {
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 60, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
         const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: bld.color, side: THREE.DoubleSide }));
-        mesh.position.set(bld.x, 0, bld.y);
+        mesh.position.set(bld.x, terrainHeight, bld.y);
         mesh.rotation.y = -THREE.MathUtils.degToRad(bld.rotation);
         scene.add(mesh);
       }
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
+        tree.position.y += terrainHeight;
         scene.add(tree);
       }
       if (item.type === "shrub") {
         const shrub = create3dShrub(item as ShrubItem);
+        shrub.position.y += terrainHeight;
         scene.add(shrub);
       }
       if (item.type === "terrain") {
         const terrain = item as TerrainItem;
         const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
         const elevation = terrain.elevation ?? 0;
+        const basePadding = 50;
+        const depth = elevation + basePadding;
+
         const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-        const terrainGeometry = new THREE.ShapeGeometry(shape);
+        const extrudeSettings = { depth: depth, bevelEnabled: false };
+        const terrainGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
         terrainGeometry.rotateX(-Math.PI / 2);
 
         const terrainMaterial = new THREE.MeshStandardMaterial({
@@ -1544,12 +1579,13 @@ export default function SecurityPlanner() {
         });
 
         const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
-        terrainMesh.position.set(terrain.x, elevation + 0.05, terrain.y);
+        terrainMesh.position.set(terrain.x, -basePadding, terrain.y);
         terrainMesh.rotation.y = -THREE.MathUtils.degToRad(terrain.rotation);
         scene.add(terrainMesh);
       }
       if (item.type === "parking") {
         const car = create3dCar(item as ParkingItem);
+        car.position.y += terrainHeight;
         scene.add(car);
       }
     });
@@ -2099,7 +2135,23 @@ export default function SecurityPlanner() {
     }
 
     // Process all items
+    // Terrain height helper
+    const terrainItems = items.filter(i => i.type === "terrain") as TerrainItem[];
+    const getTerrainHeightAt = (x: number, y: number) => {
+      let h = 0;
+      for (const t of terrainItems) {
+        const pts = t.points ?? rectanglePoints(t.width, t.height);
+        const worldPts = pts.map(p => toWorldPoint(p, t));
+        if (isPointInPolygon({ x, y }, worldPts)) {
+          h = Math.max(h, t.elevation ?? 0);
+        }
+      }
+      return h;
+    };
+
+    // Process all items
     items.forEach(item => {
+      const terrainHeight = getTerrainHeightAt(item.x, item.y);
 
       // Buildings with improved materials
       if (item.type === "building") {
@@ -2108,8 +2160,7 @@ export default function SecurityPlanner() {
         const buildingHeight = 60;
 
         // Create extruded building shape
-        // IMPORTANT: Negate Y because rotateX(-PI/2) will negate it again, 
-        // making the final Z coordinate match the 2D Y coordinate
+        // IMPORTANT: Negate Y because rotateX(-PI/2) will negate it again
         const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
         const extrudeSettings = {
           depth: buildingHeight,
@@ -2131,10 +2182,11 @@ export default function SecurityPlanner() {
         });
 
         const mesh = new THREE.Mesh(geometry, buildingMaterial);
-        mesh.position.set(building.x, 0, building.y);
+        mesh.position.set(building.x, terrainHeight, building.y);
         mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
+        mesh.userData = { id: item.id };
         group.add(mesh);
 
         // Building roof (slightly darker)
@@ -2147,15 +2199,17 @@ export default function SecurityPlanner() {
         const roofGeometry = new THREE.ShapeGeometry(roofShape);
         roofGeometry.rotateX(-Math.PI / 2);
         const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-        roof.position.set(building.x, buildingHeight + 0.1, building.y);
+        roof.position.set(building.x, terrainHeight + buildingHeight + 0.1, building.y);
         roof.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
         roof.receiveShadow = true;
+        roof.userData = { id: item.id };
         group.add(roof);
 
         // Building label
         const label = createTextSprite(building.label);
         if (label) {
-          label.position.set(building.x, buildingHeight + 15, building.y);
+          label.position.set(building.x, terrainHeight + buildingHeight + 15, building.y);
+          label.userData = { id: item.id };
           group.add(label);
         }
       }
@@ -2163,18 +2217,24 @@ export default function SecurityPlanner() {
       // Cars (Parking Items treated as cars)
       if (item.type === "parking") {
         const car = create3dCar(item as ParkingItem);
+        car.position.y += terrainHeight;
+        car.userData = { id: item.id };
         group.add(car);
       }
 
       // Trees
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
+        tree.position.y += terrainHeight;
+        tree.userData = { id: item.id };
         group.add(tree);
       }
 
       // Shrubs
       if (item.type === "shrub") {
         const shrub = create3dShrub(item as ShrubItem);
+        shrub.position.y += terrainHeight;
+        shrub.userData = { id: item.id };
         group.add(shrub);
       }
 
@@ -2183,9 +2243,15 @@ export default function SecurityPlanner() {
         const terrain = item as TerrainItem;
         const points = terrain.points ?? rectanglePoints(terrain.width, terrain.height);
         const elevation = terrain.elevation ?? 0;
+        const basePadding = 50;
+        const depth = elevation + basePadding;
 
         const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-        const terrainGeometry = new THREE.ShapeGeometry(shape);
+        const extrudeSettings = {
+          depth: depth,
+          bevelEnabled: false
+        };
+        const terrainGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
         terrainGeometry.rotateX(-Math.PI / 2);
 
         const terrainMaterial = new THREE.MeshStandardMaterial({
@@ -2197,9 +2263,11 @@ export default function SecurityPlanner() {
         });
 
         const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
-        terrainMesh.position.set(terrain.x, elevation + 0.05, terrain.y);
+        // Position at -basePadding so the top surface ends up at 'elevation'
+        terrainMesh.position.set(terrain.x, -basePadding, terrain.y);
         terrainMesh.rotation.y = -THREE.MathUtils.degToRad(terrain.rotation);
         terrainMesh.receiveShadow = true;
+        terrainMesh.userData = { id: item.id };
         group.add(terrainMesh);
       }
 
@@ -2441,12 +2509,14 @@ export default function SecurityPlanner() {
           texture.minFilter = THREE.LinearFilter;
           material.map = texture;
           material.needsUpdate = true;
-          renderer.render(scene, state.camera);
+          const s = threeStateRef.current;
+          if (s) s.renderer.render(s.scene, s.camera);
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.rotation.x = -Math.PI / 2;
-        mesh.position.set(img.x, 0.25, img.y);
+        mesh.position.set(img.x, 0.25 + terrainHeight, img.y);
         mesh.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        mesh.userData = { id: item.id };
         group.add(mesh);
       }
 
@@ -2455,7 +2525,8 @@ export default function SecurityPlanner() {
         const labelItem = item as LabelItem;
         const label = createTextSprite(labelItem.text);
         if (label) {
-          label.position.set(labelItem.x, 8, labelItem.y);
+          label.position.set(labelItem.x, 8 + terrainHeight, labelItem.y);
+          label.userData = { id: item.id };
           group.add(label);
         }
       }
@@ -2476,6 +2547,50 @@ export default function SecurityPlanner() {
     }
     renderer.render(scene, state.camera);
   };
+
+  // 3D View Click Interaction
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleClick = (event: MouseEvent) => {
+      const state = threeStateRef.current;
+      if (!state) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(x, y), state.camera);
+
+      const intersects = raycaster.intersectObjects(state.group.children, true);
+      let foundId: string | null = null;
+
+      for (const hit of intersects) {
+        let obj: THREE.Object3D | null = hit.object;
+        while (obj) {
+          if (obj.userData?.id) {
+            foundId = obj.userData.id;
+            break;
+          }
+          if (obj === state.group) break;
+          obj = obj.parent;
+        }
+        if (foundId) break;
+      }
+
+      if (foundId) {
+        setSelectedId(foundId);
+      } else if (intersects.length > 0) {
+        // Clicked on something without ID (e.g. ground plane), deselect
+        setSelectedId(null);
+      }
+    };
+
+    canvas.addEventListener('click', handleClick);
+    return () => canvas.removeEventListener('click', handleClick);
+  }, []);
 
   const handleCaptureSnapshot = () => {
     const state = threeStateRef.current;
