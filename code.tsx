@@ -2876,16 +2876,19 @@ export default function SecurityPlanner() {
             const newGroundPos = raycastToGround(moveNdc);
             if (!newGroundPos) return;
 
-            // Calculate delta from ORIGINAL start position (not accumulated)
+            // Calculate delta: where mouse moved in world space
+            // newGroundPos is where mouse now points on ground
+            // startPos is where mouse originally pointed on ground
+            // Object should move TO where mouse points, so add the delta
             const totalDx = newGroundPos.x - dragState.startPos.x;
             const totalDz = newGroundPos.z - dragState.startPos.z;
 
             // Update accumulated offset
             dragState.accumulatedOffset = { x: totalDx, z: totalDz };
 
-            // Calculate new position from original + offset (with grid snapping)
-            const newX = Math.round((dragState.originalItemPos.x + totalDx) / gridSize) * gridSize;
-            const newY = Math.round((dragState.originalItemPos.y + totalDz) / gridSize) * gridSize;
+            // Calculate new position: SUBTRACT delta (inverted for natural feel)
+            const newX = Math.round((dragState.originalItemPos.x - totalDx) / gridSize) * gridSize;
+            const newY = Math.round((dragState.originalItemPos.y - totalDz) / gridSize) * gridSize;
 
             // "Local Drag" pattern: Update Three.js mesh directly for smooth 60fps performance
             // Do NOT update React state here - that causes lag
@@ -2918,8 +2921,8 @@ export default function SecurityPlanner() {
 
             if (dragState.isDragging && dragState.itemId && dragState.originalItemPos) {
               // Now commit the final position to React state (single update)
-              const finalX = Math.round((dragState.originalItemPos.x + dragState.accumulatedOffset.x) / gridSize) * gridSize;
-              const finalY = Math.round((dragState.originalItemPos.y + dragState.accumulatedOffset.z) / gridSize) * gridSize;
+              const finalX = Math.round((dragState.originalItemPos.x - dragState.accumulatedOffset.x) / gridSize) * gridSize;
+              const finalY = Math.round((dragState.originalItemPos.y - dragState.accumulatedOffset.z) / gridSize) * gridSize;
               const dragItemId = dragState.itemId;
 
               setItems(prev => prev.map(item => {
