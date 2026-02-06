@@ -2546,6 +2546,7 @@ export default function SecurityPlanner() {
     isDragging: boolean;
     itemId: string | null;
     dragOffset: { x: number; z: number } | null;
+    originalItemPos?: { x: number; y: number };
   }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
@@ -2858,37 +2859,56 @@ export default function SecurityPlanner() {
           const groundPos = raycastToGround(ndc);
 
           if (groundPos && clickedItem) {
-            // "Hit Offset" Pattern:
-            // Calculate vector from Hit Point on Ground to Object Center
-            // ObjectCenter = HitPoint + Offset
             threeDragStateRef.current = {
               isDragging: true,
               itemId: clickedItemId,
-              dragOffset: {
-                x: clickedItem.x - groundPos.x,
-                z: clickedItem.y - groundPos.z
-              }
-            };
+              // We store the START details now to handle the "Subtract" logic cleanly
+              dragOffset: { x: groundPos.x, z: groundPos.z }, // Store Initial Hit Point
+              // We also need the item's original position to subtract from
+              // We'll calculate: NewPos = OriginalPos +/- (CurrentHit - InitialHit)
+              originalItemPos: { x: clickedItem.x, y: clickedItem.y }
+            } as any; // Cast to any to bypass type checks temporarily while debugging
           }
 
           const moveHandler = (moveEvent: PointerEvent) => {
-            const dragState = threeDragStateRef.current;
-            if (!dragState.isDragging || !dragState.itemId || !dragState.dragOffset) return;
+            const dragState = threeDragStateRef.current as any;
+            if (!dragState.isDragging || !dragState.itemId) return;
 
             const moveNdc = getNDC(moveEvent);
             const newGroundPos = raycastToGround(moveNdc);
             if (!newGroundPos) return;
 
-            // Calculate new position using Hit Offset logic
-            // NewPos = NewHitPoint + Offset
-            // This guarantees the object stays rigidly attached to the mouse cursor
-            // regardless of camera rotation or angle.
-            const rawX = newGroundPos.x + dragState.dragOffset.x;
-            const rawY = newGroundPos.z + dragState.dragOffset.z;
+            // DEBUG: visualize hit point (Red Sphere)
+            let debugHit = state.scene.getObjectByName("debugHit");
+            if (!debugHit) {
+              debugHit = new THREE.Mesh(new THREE.SphereGeometry(20), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+              debugHit.name = "debugHit";
+              state.scene.add(debugHit);
+            }
+            debugHit.position.set(newGroundPos.x, 5, newGroundPos.z);
+
+            // Calculate Delta from Start Hit
+            const deltaX = newGroundPos.x - dragState.dragOffset.x;
+            const deltaZ = newGroundPos.z - dragState.dragOffset.z;
+
+            // LOGIC: Horizontal (X) is SUBTRACT (Inv), Vertical (Z) is ADD (Normal)
+            // Based on user report: "Horizontal is inverted, Vertical is correct"
+            let rawX = dragState.originalItemPos.x - deltaX; // SUBTRACT
+            let rawY = dragState.originalItemPos.y + deltaZ; // ADD
 
             // Snap to grid
             const newX = Math.round(rawX / gridSize) * gridSize;
             const newY = Math.round(rawY / gridSize) * gridSize;
+
+            // DEBUG: visualize target pos (Green Sphere)
+            let debugTarget = state.scene.getObjectByName("debugTarget");
+            if (!debugTarget) {
+              debugTarget = new THREE.Mesh(new THREE.SphereGeometry(20), new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+              debugTarget.name = "debugTarget";
+              state.scene.add(debugTarget);
+            }
+            debugTarget.position.set(newX, 15, newY);
+
 
             // Update Three.js mesh directly
             const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
@@ -2912,15 +2932,20 @@ export default function SecurityPlanner() {
           };
 
           const upHandler = () => {
-            const dragState = threeDragStateRef.current;
+            const dragState = threeDragStateRef.current as any;
+            // Cleanup debug
+            const h = state.scene.getObjectByName("debugHit");
+            if (h) state.scene.remove(h);
+            const t = state.scene.getObjectByName("debugTarget");
+            if (t) state.scene.remove(t);
 
-            if (dragState.isDragging && dragState.itemId && dragState.dragOffset) {
+            if (dragState.isDragging && dragState.itemId) {
               // We need the final position to commit to state
-              // We can't rely on 'last known pos', so let's re-calculate or just 
-              // we can't recalculate without event. 
+              // We can't rely on 'last known pos', so let's re-calculate or just
+              // we can't recalculate without event.
               // Actually better to just use the logic from move handler but we don't have event here.
-              // Wait, we need the final position. 
-              // Let's store the 'lastValidPos' in ref? 
+              // Wait, we need the final position.
+              // Let's store the 'lastValidPos' in ref?
               // Or simpler: just get the Object's current position from the scene since we updated it!
               const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
               if (cachedObj) {
