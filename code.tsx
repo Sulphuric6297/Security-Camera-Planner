@@ -1867,7 +1867,7 @@ export default function SecurityPlanner() {
       if (nextItem.type === "building") {
         const prevB = prevItem as BuildingItem;
         const nextB = nextItem as BuildingItem;
-        if (prevB.width !== nextB.width || prevB.height !== nextB.height) return true;
+        if (prevB.width !== nextB.width || prevB.height !== nextB.height || prevB.wallHeight !== nextB.wallHeight) return true;
         if (JSON.stringify(prevB.points) !== JSON.stringify(nextB.points)) return true;
         if (prevB.color !== nextB.color) return true;
       }
