@@ -95,6 +95,7 @@ interface ParkingItem extends BaseItem {
   height: number;
   color: string;
   vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'motorcycle';
+  vehicleHeight?: number;
 }
 
 interface LabelItem extends BaseItem {
@@ -163,7 +164,7 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
   const group = new THREE.Group();
   const width = item.width;
   const length = item.height;
-  const carHeight = 12;
+  const carHeight = item.vehicleHeight ?? 12;
   const wheelRadius = 3;
   const color = item.color;
 
@@ -990,6 +991,7 @@ export default function SecurityPlanner() {
         if (data.sceneBackgroundImg) setSceneBackgroundImg(data.sceneBackgroundImg);
         if (data.backgroundMode) setBackgroundMode(data.backgroundMode);
         if (data.nvrLayout) setNvrLayout(data.nvrLayout);
+        if (data.terrainHeights) setTerrainHeights(data.terrainHeights);
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -1009,7 +1011,8 @@ export default function SecurityPlanner() {
           frustumSettings,
           sceneBackgroundImg,
           backgroundMode,
-          nvrLayout
+          nvrLayout,
+          terrainHeights
         };
         localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
       } catch (err: any) {
@@ -1022,7 +1025,8 @@ export default function SecurityPlanner() {
               bgSettings,
               canvasSize,
               exportList,
-              projectName
+              projectName,
+              terrainHeights
               // omit backgroundImg
             };
             localStorage.setItem('securityCameraPlannerData', JSON.stringify(partialData));
@@ -1036,7 +1040,7 @@ export default function SecurityPlanner() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode]);
+  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -1261,7 +1265,8 @@ export default function SecurityPlanner() {
           type: "parking",
           width: 30,
           height: 50,
-          color: COLORS.parking[0]
+          color: COLORS.parking[0],
+          vehicleHeight: 12
         };
         break;
       case "add-label":
@@ -2057,6 +2062,7 @@ export default function SecurityPlanner() {
     const projectData = {
       version: 1,
       items,
+      terrainHeights,
       backgroundImg,
       bgSettings,
       canvasSize,
@@ -2090,6 +2096,7 @@ export default function SecurityPlanner() {
         const projectData = JSON.parse(json);
 
         if (projectData.items) setItems(projectData.items);
+        if (projectData.terrainHeights) setTerrainHeights(projectData.terrainHeights);
         if (projectData.backgroundImg) setBackgroundImg(projectData.backgroundImg);
         if (projectData.bgSettings) setBgSettings(projectData.bgSettings);
         if (projectData.canvasSize) setCanvasSize(projectData.canvasSize);
@@ -2342,7 +2349,13 @@ export default function SecurityPlanner() {
       if (nextItem.type === "parking") {
         const prevP = prevItem as ParkingItem;
         const nextP = nextItem as ParkingItem;
-        if (prevP.width !== nextP.width || prevP.height !== nextP.height) return true;
+        if (
+          prevP.width !== nextP.width ||
+          prevP.height !== nextP.height ||
+          prevP.vehicleHeight !== nextP.vehicleHeight ||
+          prevP.vehicleType !== nextP.vehicleType ||
+          prevP.color !== nextP.color
+        ) return true;
         if (prevP.color !== nextP.color || prevP.vehicleType !== nextP.vehicleType) return true;
         // if (prevP.rotation !== nextP.rotation) return true;
       }
@@ -3634,7 +3647,8 @@ export default function SecurityPlanner() {
                   type: "parking",
                   width: 30,
                   height: 50,
-                  color: COLORS.parking[0]
+                  color: COLORS.parking[0],
+                  vehicleHeight: 12
                 } as ParkingItem;
                 break;
               case "add-label":
@@ -5705,17 +5719,43 @@ export default function SecurityPlanner() {
                         </button>
                       ))}
                     </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="360"
+                    value={(selectedItem as ParkingItem).rotation}
+                    onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
+                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  />
+                </div>
+
+                {/* Vehicle Height */}
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                    <span>Vehicle Height</span>
+                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} units</span>
+                  </label>
+                  <div className="flex gap-2">
                     <input
                       type="range"
-                      min="0"
-                      max="360"
-                      value={(selectedItem as ParkingItem).rotation}
-                      onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      min="6"
+                      max="40"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
+                    />
+                    <input
+                      type="number"
+                      min="6"
+                      max="40"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>
                 </div>
-              )}
+              </div>
+            )}
 
               {selectedItem.type === "building" && (
                 <div className={panelSection}>
