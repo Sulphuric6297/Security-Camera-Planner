@@ -587,7 +587,41 @@ export default function SecurityPlanner() {
     snap?: boolean;
   }>({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
 
+  // Terrain State
+  const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
+  const [isTerrainMode, setIsTerrainMode] = useState(false);
+  const [terrainSelection, setTerrainSelection] = useState<{ x1: number, z1: number, x2: number, z2: number } | null>(null);
+  const [selectionHeight, setSelectionHeightState] = useState<number>(0);
+
+  const getGridHeight = (x: number, y: number) => {
+    const gx = Math.round(x / gridSize) * gridSize;
+    const gy = Math.round(y / gridSize) * gridSize;
+    return terrainHeights[`${gx},${gy}`] || 0;
+  };
+
+  const setSelectionHeight = (height: number) => {
+    setSelectionHeightState(height); // Update display
+    if (!terrainSelection) return;
+    const { x1, z1, x2, z2 } = terrainSelection;
+    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+
+    setTerrainHeights(prev => {
+      const next = { ...prev };
+      for (let x = minX; x <= maxX; x += gridSize) {
+        for (let z = minZ; z <= maxZ; z += gridSize) {
+          next[`${x},${z}`] = height;
+        }
+      }
+      return next;
+    });
+  };
+
   // Refs
+  const isTerrainModeRef = useRef(isTerrainMode);
+  useEffect(() => { isTerrainModeRef.current = isTerrainMode; }, [isTerrainMode]);
+  const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
+
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const elementImageInputRef = useRef<HTMLInputElement>(null);
@@ -1798,7 +1832,7 @@ export default function SecurityPlanner() {
     return pathPoints;
   };
 
-  // Fast position-only update for 3D objects (used during dragging to avoid full rebuilds)
+  // Fast position-only update for 3D objects (used during dragging)
   const updateThreeScenePositions = () => {
     const state = threeStateRef.current;
     if (!state) return;
@@ -1810,29 +1844,34 @@ export default function SecurityPlanner() {
       const obj = cache.get(item.id);
       if (!obj) return;
 
+      // Get terrain height for the item
+      const h = getGridHeight(item.x, item.y);
+
       if (item.type === "building" || item.type === "parking") {
-        obj.position.set(item.x, 0, item.y);
+        obj.position.set(item.x, h, item.y);
         obj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
         needsRender = true;
       } else if (item.type === "tree") {
         const tree = item as TreeItem;
-        obj.position.set(tree.x, 0, tree.y);
+        obj.position.set(tree.x, h, tree.y);
         needsRender = true;
       } else if (item.type === "camera") {
         const cam = item as CameraItem;
         const camPos = getCameraPlanPosition(cam);
-        const camHeight = cam.mount?.height ?? cam.height ?? 10;
-        obj.position.set(camPos.x, camHeight, camPos.y);
+        const camH = getGridHeight(camPos.x, camPos.y); // Get height at camera specific position (pivot)
+        const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
+
+        obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
         obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
         obj.rotation.x = THREE.MathUtils.degToRad(cam.pitch ?? 0);
         needsRender = true;
       } else if (item.type === "image") {
         const img = item as ImageItem;
-        obj.position.set(img.x, 0.25, img.y);
+        obj.position.set(img.x, h + 0.25, img.y);
         obj.rotation.z = THREE.MathUtils.degToRad(img.rotation);
         needsRender = true;
       } else if (item.type === "label") {
-        obj.position.set(item.x, 8, item.y);
+        obj.position.set(item.x, h + 8, item.y);
         needsRender = true;
       }
     });
@@ -1898,56 +1937,61 @@ export default function SecurityPlanner() {
     const { group, scene, renderer } = state;
 
     // Check if we can do a fast position-only update
+    // Fast path: Only if items structure/props haven't changed AND terrain hasn't changed
     const prevItems = prevItemsRef.current;
-    if (prevItems.length > 0 && !needsFullRebuild(prevItems, items)) {
+
+    // We need to track previous terrain heights to know if we need a full rebuild
+    // Note: We use the ref inside the condition
+    const terrainChanged = prevTerrainHeightsRef.current !== terrainHeights;
+
+    if (prevItems.length > 0 && !needsFullRebuild(prevItems, items) && !terrainChanged) {
       updateThreeScenePositions();
       prevItemsRef.current = [...items];
       return;
     }
+    prevTerrainHeightsRef.current = terrainHeights;
 
     // Full rebuild needed - clear cache and group
     threeObjectCacheRef.current.clear();
     disposeGroup(group);
 
-    // Improved ground plane with subtle gradient effect
-    const groundSize = Math.max(canvasSize.width, canvasSize.height) * 2;
-    const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
-    const groundMaterial = new THREE.MeshStandardMaterial({
-      color: 0x09090b,
-      roughness: 0.95,
-      metalness: 0
-    });
-    const groundPlane = new THREE.Mesh(groundGeometry, groundMaterial);
-    groundPlane.rotation.x = -Math.PI / 2;
-    groundPlane.position.set(canvasSize.width / 2, -0.5, canvasSize.height / 2);
-    groundPlane.receiveShadow = true;
-    group.add(groundPlane);
+    // Terrain Mesh (Dynamic Grid Height)
+    // Removed static groundPlane and canvasPlane
+    const segW = Math.round(canvasSize.width / gridSize);
+    const segH = Math.round(canvasSize.height / gridSize);
+    const terrainGeometry = new THREE.PlaneGeometry(canvasSize.width, canvasSize.height, segW, segH);
 
-    // Grid helper with proper sizing
-    const gridHelper = new THREE.GridHelper(
-      groundSize,
-      Math.round(groundSize / gridSize),
-      0x27272a,
-      0x27272a
-    );
-    gridHelper.position.set(canvasSize.width / 2, 0.01, canvasSize.height / 2);
-    if (showGrid) {
-      group.add(gridHelper);
+    // Apply Heights
+    const posAttr = terrainGeometry.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i);
+      const vy = posAttr.getY(i); // Plane Y corresponds to World Z (after rotation)
+
+      // Transform to World Coordinates to lookup height
+      // Plane Center (0,0) -> World Center (W/2, H/2)
+      // vy goes +H/2 (Top) to -H/2 (Bottom)
+      // World Z goes 0 (Top) to H (Bottom)
+      const worldX = (canvasSize.width / 2) + vx;
+      const worldZ = (canvasSize.height / 2) - vy;
+
+      const h = getGridHeight(worldX, worldZ);
+      posAttr.setZ(i, h);
     }
+    terrainGeometry.computeVertexNormals();
 
-    // Canvas boundary plane (the actual work area)
-    const canvasPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(canvasSize.width, canvasSize.height),
-      new THREE.MeshStandardMaterial({
-        color: 0x18181b,
-        roughness: 0.8,
-        metalness: 0
-      })
-    );
-    canvasPlane.rotation.x = -Math.PI / 2;
-    canvasPlane.position.set(canvasSize.width / 2, 0.05, canvasSize.height / 2); // Z-fighting fix: clear separation from ground
-    canvasPlane.receiveShadow = true;
-    group.add(canvasPlane);
+    const terrainMaterial = new THREE.MeshStandardMaterial({
+      color: 0x18181b,
+      roughness: 0.9,
+      metalness: 0.1,
+      flatShading: true
+    });
+
+    const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+    terrainMesh.rotation.x = -Math.PI / 2;
+    terrainMesh.position.set(canvasSize.width / 2, 0, canvasSize.height / 2);
+    terrainMesh.receiveShadow = true;
+    terrainMesh.name = "terrain-mesh";
+    group.add(terrainMesh);
 
     // Canvas boundary outline
     const boundaryGeometry = new THREE.BufferGeometry();
@@ -1983,14 +2027,33 @@ export default function SecurityPlanner() {
         mapPlaneMaterial.needsUpdate = true;
         renderer.render(scene, state.camera);
       });
-      const mapPlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(bgSettings.width, bgSettings.height),
-        mapPlaneMaterial
-      );
+
+      // Create subdivided geometry to deform with terrain
+      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
+      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
+      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
+
+      // Apply terrain heights to map geometry
+      const mapPosAttr = mapGeometry.attributes.position;
+      for (let i = 0; i < mapPosAttr.count; i++) {
+        const localX = mapPosAttr.getX(i);
+        const localY = mapPosAttr.getY(i); // This becomes Z after rotation
+
+        // Transform local geometry coords to world coords
+        // Local plane center (0,0) -> World position at bgSettings center
+        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
+        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
+
+        const h = getGridHeight(worldX, worldZ);
+        mapPosAttr.setZ(i, h + 0.15); // Slight offset above terrain to prevent z-fighting
+      }
+      mapGeometry.computeVertexNormals();
+
+      const mapPlane = new THREE.Mesh(mapGeometry, mapPlaneMaterial);
       mapPlane.rotation.x = -Math.PI / 2;
       mapPlane.position.set(
         bgSettings.x + bgSettings.width / 2,
-        0.15, // Z-fighting fix: above canvas plane
+        0,
         bgSettings.y + bgSettings.height / 2
       );
       mapPlane.receiveShadow = true;
@@ -1999,6 +2062,7 @@ export default function SecurityPlanner() {
 
     // Process all items
     items.forEach(item => {
+      const terrainH = getGridHeight(item.x, item.y);
 
       // Buildings with improved materials
       if (item.type === "building") {
@@ -2030,7 +2094,7 @@ export default function SecurityPlanner() {
         });
 
         const mesh = new THREE.Mesh(geometry, buildingMaterial);
-        mesh.position.set(building.x, 0, building.y);
+        mesh.position.set(building.x, terrainH, building.y);
         mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -2084,7 +2148,12 @@ export default function SecurityPlanner() {
       if (item.type === "camera") {
         const cameraItem = item as CameraItem;
         const cameraPos = getCameraPlanPosition(cameraItem);
-        const cameraHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
+
+        // Recalculate height at specific camera pivot
+        const camTerrainH = getGridHeight(cameraPos.x, cameraPos.y);
+        const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
+        const absHeight = camTerrainH + cameraMountHeight;
+        const cameraHeight = cameraMountHeight;
         const pitch = cameraItem.pitch ?? 0;
         const hFov = cameraItem.hFov ?? cameraItem.fov;
         const vFov = cameraItem.vFov ?? vFovFromH(hFov, cameraItem.aspect ?? 16 / 9);
@@ -2135,7 +2204,9 @@ export default function SecurityPlanner() {
         // For a camera facing +X locally:
         // - Y rotation controls azimuth (horizontal direction)
         // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
-        cameraGroup.position.set(cameraPos.x, cameraHeight, cameraPos.y);
+        // - Y rotation controls azimuth (horizontal direction)
+        // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
+        cameraGroup.position.set(cameraPos.x, absHeight, cameraPos.y);
         cameraGroup.rotation.order = 'YXZ'; // Apply Y (azimuth) first, then X (pitch)
         cameraGroup.rotation.y = rotAngle;
         cameraGroup.rotation.x = pitchRad; // Pitch: positive = look up, negative = look down
@@ -2150,7 +2221,7 @@ export default function SecurityPlanner() {
           metalness: 0.3
         });
         const pole = new THREE.Mesh(poleGeometry, poleMaterial);
-        pole.position.set(cameraPos.x, cameraHeight / 2, cameraPos.y);
+        pole.position.set(cameraPos.x, camTerrainH + cameraMountHeight / 2, cameraPos.y);
         pole.castShadow = true;
         group.add(pole);
 
@@ -2363,6 +2434,7 @@ export default function SecurityPlanner() {
       state.camera.position.set(x, y, z);
       state.camera.lookAt(state.target);
     }
+
     renderer.render(scene, state.camera);
 
     // Update previous items ref for next diff comparison
@@ -2690,6 +2762,91 @@ export default function SecurityPlanner() {
   }, [selectedId, items]); // Re-run when selection or items change
 
   useEffect(() => {
+    // Terrain Interaction: Cursor & Selection
+    if (!threeStateRef.current) return;
+    const scene = threeStateRef.current.scene;
+    const camera = threeStateRef.current.camera;
+    const renderer = threeStateRef.current.renderer;
+
+    // 1. Cursor Logic
+    let cursor = scene.getObjectByName("terrain-cursor") as THREE.Mesh;
+    if (!cursor) {
+      const geo = new THREE.BoxGeometry(gridSize / 2, 4, gridSize / 2);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.6, depthTest: false });
+      cursor = new THREE.Mesh(geo, mat);
+      cursor.name = "terrain-cursor";
+      scene.add(cursor);
+    }
+
+    if (isTerrainMode) {
+      cursor.visible = true;
+    } else {
+      cursor.visible = false;
+    }
+
+    // 2. Selection Box
+    let selectionMesh = scene.getObjectByName("terrain-selection-box") as THREE.Mesh;
+    if (!selectionMesh) {
+      const geo = new THREE.BoxGeometry(1, 400, 1); // Tall box to cover height variations
+      const mat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+      selectionMesh = new THREE.Mesh(geo, mat);
+      selectionMesh.name = "terrain-selection-box";
+      scene.add(selectionMesh);
+    }
+
+    if (isTerrainMode && terrainSelection) {
+      selectionMesh.visible = true;
+      const { x1, z1, x2, z2 } = terrainSelection;
+      const minX = Math.min(x1, x2);
+      const maxX = Math.max(x1, x2);
+      const minZ = Math.min(z1, z2);
+      const maxZ = Math.max(z1, z2);
+
+      const w = (maxX - minX) + gridSize / 2;
+      const d = (maxZ - minZ) + gridSize / 2;
+
+      selectionMesh.scale.set(Math.max(w, 4), 1, Math.max(d, 4));
+      selectionMesh.position.set((minX + maxX) / 2, 0, (minZ + maxZ) / 2);
+    } else {
+      selectionMesh.visible = false;
+    }
+
+    // Only attach listener if in Terrain Mode
+    if (!isTerrainMode) {
+      renderer.render(scene, camera);
+      return;
+    }
+
+    const onMove = (e: PointerEvent) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
+
+      const terrain = scene.getObjectByName("terrain-mesh");
+      if (terrain) {
+        const hits = raycaster.intersectObject(terrain);
+        if (hits.length > 0) {
+          const pt = hits[0].point;
+          const gx = Math.round(pt.x / gridSize) * gridSize;
+          const gz = Math.round(pt.z / gridSize) * gridSize;
+
+          const h = getGridHeight(gx, gz);
+          cursor.position.set(gx, h, gz);
+          renderer.render(scene, camera);
+        }
+      }
+    };
+
+    renderer.domElement.addEventListener("pointermove", onMove);
+    return () => {
+      renderer.domElement.removeEventListener("pointermove", onMove);
+    };
+  }, [isTerrainMode, gridSize, terrainHeights, terrainSelection]);
+
+  useEffect(() => {
     if (!threeContainerRef.current || threeStateRef.current) return;
     const container = threeContainerRef.current;
 
@@ -2842,6 +2999,95 @@ export default function SecurityPlanner() {
         window.addEventListener("pointerup", upHandler);
         return;
       }
+
+      // Terrain Edit Mode (Selection Logic)
+      if (isTerrainModeRef.current) {
+        raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+        const terrain = group.getObjectByName("terrain-mesh");
+        if (terrain) {
+          const hits = raycaster.intersectObject(terrain);
+          if (hits.length > 0) {
+            const pt = hits[0].point;
+            const safeGrid = gridSize || 20;
+            const gx = Math.round(pt.x / safeGrid) * safeGrid;
+            const gz = Math.round(pt.z / safeGrid) * safeGrid;
+
+            // Start Selection
+            setTerrainSelection({ x1: gx, z1: gz, x2: gx, z2: gz });
+
+            // Disable Orbit Controls to prevent panning/rotating while selecting
+            if (threeStateRef.current?.controls) {
+              threeStateRef.current.controls.enabled = false;
+            }
+
+            threeDragStateRef.current = {
+              isDragging: true,
+              interactionType: "select-terrain" as any,
+              itemId: "terrain-select",
+              startMouse: { x: gx, y: gz } // Using as Grid Coord storage effectively
+            } as any;
+
+            const moveHandler = (moveEvent: PointerEvent) => {
+              const moveNdc = getNDC(moveEvent);
+              raycaster.setFromCamera(new THREE.Vector2(moveNdc.x, moveNdc.y), camera);
+              const moveHits = raycaster.intersectObject(terrain);
+              if (moveHits.length > 0) {
+                const mPt = moveHits[0].point;
+                const safeGrid = gridSize || 20;
+                const mGx = Math.round(mPt.x / safeGrid) * safeGrid;
+                const mGz = Math.round(mPt.z / safeGrid) * safeGrid;
+
+                setTerrainSelection(prev => {
+                  if (!prev) return { x1: gx, z1: gz, x2: mGx, z2: mGz };
+                  return { ...prev, x2: mGx, z2: mGz };
+                });
+              }
+            };
+
+            const upHandler = () => {
+              const dragState = threeDragStateRef.current;
+
+              // Re-enable Orbit
+              if (threeStateRef.current?.controls) {
+                threeStateRef.current.controls.enabled = true;
+              }
+
+              if ((dragState as any).interactionType === "select-terrain") {
+                threeDragStateRef.current = { ...threeDragStateRef.current, isDragging: false, interactionType: null };
+              }
+              window.removeEventListener("pointermove", moveHandler);
+              window.removeEventListener("pointerup", upHandler);
+            };
+
+            window.addEventListener("pointermove", moveHandler);
+            window.addEventListener("pointerup", upHandler);
+            event.stopPropagation(); // Stop bubbling
+            return; // Stop propagation
+          }
+        }
+        // If in terrain mode but clicked off-terrain, fallback or do nothing?
+        // Do distinct check:
+        return;
+      } else {
+        // Normal mode (Selection check)
+        // Only check selection if NOT terrain mode
+      }
+
+      // 1. Handle Selection / Drag (Existing logic)
+      // We need to wrap existing logic in "if (!isTerrainMode)" or handle fallthrough?
+      // If terrain mode started drag, we want to attach listeners.
+      // Existing code structure:
+      // const clickedItemId = ...
+      // ...
+
+      // My insertion above falls through?
+      // If threeDragStateRef is set, we skip selection logic?
+      // Existing selection logic sets threeDragStateRef.
+      // I should WRAP the selection logic.
+
+      // Let's look at the TARGET of replace.
+      // I'll replace lines 2900 
+
 
       // Middle-click or Space+click = Pan (Google Earth style - camera-relative)
       if (event.button === 1 || isSpacePressedRef.current) {
@@ -3187,7 +3433,62 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (viewMode !== "iso3d") return;
     rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId]);
+  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId, terrainHeights]);
+
+  // Lightweight effect for terrain selection visualization (no full rebuild)
+  useEffect(() => {
+    if (viewMode !== "iso3d") return;
+    const state = threeStateRef.current;
+    if (!state) return;
+
+    const { group, scene, camera, renderer } = state;
+
+    // Remove old selection helper
+    const oldHelper = group.getObjectByName("terrain-selection-helper");
+    if (oldHelper) {
+      group.remove(oldHelper);
+      if ((oldHelper as any).geometry) (oldHelper as any).geometry.dispose();
+    }
+
+    // Add new selection helper if selection exists
+    if (terrainSelection) {
+      const minX = Math.min(terrainSelection.x1, terrainSelection.x2);
+      const maxX = Math.max(terrainSelection.x1, terrainSelection.x2);
+      const minZ = Math.min(terrainSelection.z1, terrainSelection.z2);
+      const maxZ = Math.max(terrainSelection.z1, terrainSelection.z2);
+
+      const points = [
+        new THREE.Vector3(minX, getGridHeight(minX, minZ) + 3, minZ),
+        new THREE.Vector3(maxX, getGridHeight(maxX, minZ) + 3, minZ),
+        new THREE.Vector3(maxX, getGridHeight(maxX, maxZ) + 3, maxZ),
+        new THREE.Vector3(minX, getGridHeight(minX, maxZ) + 3, maxZ),
+        new THREE.Vector3(minX, getGridHeight(minX, minZ) + 3, minZ)
+      ];
+
+      const selGroup = new THREE.Group();
+      selGroup.name = "terrain-selection-helper";
+
+      const selGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const selMat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2, depthTest: false });
+      const selLine = new THREE.Line(selGeo, selMat);
+      selLine.renderOrder = 999;
+      selGroup.add(selLine);
+
+      // Corner markers
+      const markerGeo = new THREE.BoxGeometry(5, 5, 5);
+      const markerMat = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
+      points.slice(0, 4).forEach(p => {
+        const m = new THREE.Mesh(markerGeo, markerMat);
+        m.position.copy(p);
+        m.renderOrder = 999;
+        selGroup.add(m);
+      });
+
+      group.add(selGroup);
+    }
+
+    renderer.render(scene, camera);
+  }, [terrainSelection, viewMode]);
 
 
 
@@ -3223,6 +3524,7 @@ export default function SecurityPlanner() {
     const height = canvas.height;
 
     const camPos = getCameraPlanPosition(cam);
+    const camTerrainH = getGridHeight(camPos.x, camPos.y); // Terrain adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
@@ -3239,14 +3541,14 @@ export default function SecurityPlanner() {
     scene.background = new THREE.Color('#09090b');
     scene.fog = new THREE.Fog('#09090b', range * 0.3, range * 1.2);
 
-    // Perspective camera at security camera position
+    // Perspective camera at security camera position (Terrain Adjusted)
     const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 1, range * 2);
-    perspCam.position.set(camPos.x, camHeight, camPos.y);
+    perspCam.position.set(camPos.x, camTerrainH + camHeight, camPos.y);
 
     const pitchRad = THREE.MathUtils.degToRad(pitch);
     const lookAt = new THREE.Vector3(
       camPos.x + Math.cos(rotAngle) * 100,
-      camHeight + Math.tan(pitchRad) * 100,
+      camTerrainH + camHeight + Math.tan(pitchRad) * 100, // Look from correct height
       camPos.y + Math.sin(rotAngle) * 100
     );
     perspCam.lookAt(lookAt);
@@ -3257,30 +3559,74 @@ export default function SecurityPlanner() {
     dirLight.position.set(100, 200, 50);
     scene.add(dirLight);
 
-    // Ground
+    // Ground with Terrain Height
+    const groundW = canvasSize.width * 2;
+    const groundH = canvasSize.height * 2;
+    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, 64, 64);
+
+    // Apply terrain height to ground geometry
+    const pos = groundGeo.attributes.position;
+    const centerX = canvasSize.width / 2;
+    const centerY = canvasSize.height / 2;
+
+    for (let i = 0; i < pos.count; i++) {
+      const lx = pos.getX(i);
+      const ly = pos.getY(i); // This is Z before rotation
+      // World coordinates relative to the ground placement
+      const wx = lx + centerX;
+      const wy = centerY - ly; // Fixed: Match Main Scene logic (Y+ is Up/Top, Z+ is Down)
+
+      const h = getGridHeight(wx, wy);
+      pos.setZ(i, h);
+    }
+    groundGeo.computeVertexNormals();
+
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(canvasSize.width * 2, canvasSize.height * 2),
+      groundGeo,
       new THREE.MeshStandardMaterial({ color: '#6B8E23', roughness: 0.9 })
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(canvasSize.width / 2, 0, canvasSize.height / 2);
+    ground.position.set(centerX, 0, centerY);
     scene.add(ground);
 
-    // Background image
+    // Background image (terrain deformed)
     if (bgImageRef.current) {
       const tex = new THREE.CanvasTexture(bgImageRef.current);
       tex.colorSpace = THREE.SRGBColorSpace;
+
+      // Create subdivided geometry to deform with terrain
+      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
+      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
+      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
+
+      // Apply terrain heights to map geometry
+      const mapPosAttr = mapGeometry.attributes.position;
+      for (let i = 0; i < mapPosAttr.count; i++) {
+        const localX = mapPosAttr.getX(i);
+        const localY = mapPosAttr.getY(i);
+
+        // Transform to world coords
+        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
+        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
+
+        const h = getGridHeight(worldX, worldZ);
+        mapPosAttr.setZ(i, h + 0.1); // Slight offset above terrain
+      }
+      mapGeometry.computeVertexNormals();
+
       const mapPlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(bgSettings.width, bgSettings.height),
+        mapGeometry,
         new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity })
       );
       mapPlane.rotation.x = -Math.PI / 2;
-      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0.1, bgSettings.y + bgSettings.height / 2);
+      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
       scene.add(mapPlane);
     }
 
-    // Add items
+    // Add items (Terrain Aware)
     items.forEach(item => {
+      const itemH = getGridHeight(item.x, item.y);
+
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const pts = getBuildingPoints(bld);
@@ -3288,15 +3634,19 @@ export default function SecurityPlanner() {
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 60, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
         const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: bld.color, side: THREE.DoubleSide }));
-        mesh.position.set(bld.x, 0, bld.y);
+        mesh.position.set(bld.x, itemH, bld.y);
         mesh.rotation.y = -THREE.MathUtils.degToRad(bld.rotation);
         scene.add(mesh);
       }
       if (item.type === "tree") {
-        scene.add(create3dTree(item as TreeItem));
+        const tree = create3dTree(item as TreeItem);
+        tree.position.set(item.x, itemH, item.y); // Ensure tree sits on terrain
+        scene.add(tree);
       }
       if (item.type === "parking") {
-        scene.add(create3dCar(item as ParkingItem));
+        const car = create3dCar(item as ParkingItem);
+        car.position.set(item.x, itemH, item.y); // Car on terrain
+        scene.add(car);
       }
     });
 
@@ -3342,6 +3692,19 @@ export default function SecurityPlanner() {
     return () => {
       pmremGenerator.dispose(); // Cleanup
       renderer.dispose();
+
+      scene.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) {
+            if (Array.isArray(obj.material)) {
+              obj.material.forEach((m: THREE.Material) => m.dispose());
+            } else {
+              (obj.material as THREE.Material).dispose();
+            }
+          }
+        }
+      });
     };
   }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg]);
 
@@ -3828,6 +4191,75 @@ export default function SecurityPlanner() {
           >
             <Layers className="w-5 h-5" />
           </button>
+
+          {viewMode === "iso3d" && (
+            <div className="relative group">
+              <button
+                onClick={() => setIsTerrainMode(!isTerrainMode)}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${isTerrainMode ? "bg-emerald-600 text-white shadow-lg shadow-emerald-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"}`}
+                title={isTerrainMode ? "Exit Terrain Mode" : "Edit Terrain"}
+              >
+                <MapIcon className="w-5 h-5" />
+              </button>
+
+              {/* Terrain Controls Popup */}
+              {isTerrainMode && (
+                <div className="absolute left-14 top-0 ml-4 w-64 bg-zinc-900/95 backdrop-blur-xl border border-white/10 p-4 rounded-xl shadow-2xl z-50 animate-in fade-in slide-in-from-left-2 ring-1 ring-white/10">
+                  <h3 className="text-sm font-bold text-slate-200 mb-3 flex items-center gap-2">
+                    <MapIcon className="w-4 h-4 text-emerald-500" />
+                    Terrain Tools
+                  </h3>
+
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
+                    <p className="text-[10px] text-slate-400 mb-3 text-center leading-relaxed">
+                      Drag firmly on the terrain to select an area to modify.
+                    </p>
+
+                    {terrainSelection ? (
+                      <div className="space-y-3 animate-in fade-in slide-in-from-top-1">
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-bold text-slate-400">Presets</label>
+                          <div className="flex gap-2">
+                            <button onClick={() => setSelectionHeight(0)} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Flatten (0)</button>
+                            <button onClick={() => setSelectionHeight(40)} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Plateau (40)</button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                            <span>Height</span>
+                            <span className="text-emerald-400">Level {Math.round(selectionHeight ?? 0)}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0" max="200" step="10"
+                            value={selectionHeight}
+                            className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                            onChange={(e) => setSelectionHeight(parseInt(e.target.value))}
+                            onPointerDown={(e) => e.stopPropagation()}
+                          />
+                          <div className="flex justify-between text-[9px] text-slate-500 font-medium">
+                            <span>0</span>
+                            <span>200</span>
+                          </div>
+                        </div>
+
+                        <div className="pt-2 border-t border-white/5">
+                          <p className="text-[9px] text-slate-500 text-center">
+                            Changes apply immediately.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-4 text-center border-2 border-dashed border-white/10 rounded-lg">
+                        <p className="text-xs text-slate-500">No area selected</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="mt-auto flex flex-col gap-2 w-full px-2">
@@ -5186,6 +5618,8 @@ export default function SecurityPlanner() {
 
               <div className="border-t border-white/10 pt-6 space-y-4">
                 <h3 className="text-sm font-semibold text-slate-300">3D Visualization</h3>
+
+
 
                 {/* Environment & Background Control */}
                 <div className="space-y-3 mb-4 p-3 bg-white/5 rounded-lg border border-white/10">
