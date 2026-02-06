@@ -2886,9 +2886,11 @@ export default function SecurityPlanner() {
             // Update accumulated offset
             dragState.accumulatedOffset = { x: totalDx, z: totalDz };
 
-            // Calculate new position: X uses ADD, Y uses SUBTRACT (mixed inversion for correct feel)
+            // Calculate new position: ADD delta for both (Object follows mouse)
+            // If mouse moves Right (increase X), Object should move Right (increase X)
+            // If mouse moves South (increase Z), Object should move South (increase Z)
             const newX = Math.round((dragState.originalItemPos.x + totalDx) / gridSize) * gridSize;
-            const newY = Math.round((dragState.originalItemPos.y - totalDz) / gridSize) * gridSize;
+            const newY = Math.round((dragState.originalItemPos.y + totalDz) / gridSize) * gridSize;
 
             // "Local Drag" pattern: Update Three.js mesh directly for smooth 60fps performance
             // Do NOT update React state here - that causes lag
@@ -2922,7 +2924,7 @@ export default function SecurityPlanner() {
             if (dragState.isDragging && dragState.itemId && dragState.originalItemPos) {
               // Now commit the final position to React state (single update)
               const finalX = Math.round((dragState.originalItemPos.x + dragState.accumulatedOffset.x) / gridSize) * gridSize;
-              const finalY = Math.round((dragState.originalItemPos.y - dragState.accumulatedOffset.z) / gridSize) * gridSize;
+              const finalY = Math.round((dragState.originalItemPos.y + dragState.accumulatedOffset.z) / gridSize) * gridSize;
               const dragItemId = dragState.itemId;
 
               setItems(prev => prev.map(item => {
