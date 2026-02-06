@@ -2576,7 +2576,7 @@ export default function SecurityPlanner() {
         return;
       }
 
-      // Middle-click or Space+click = Pan
+      // Middle-click or Space+click = Pan (Google Earth style - camera-relative)
       if (event.button === 1 || isSpacePressedRef.current) {
         event.preventDefault();
         const start = { x: event.clientX, y: event.clientY };
@@ -2585,10 +2585,28 @@ export default function SecurityPlanner() {
           const dy = moveEvent.clientY - start.y;
           start.x = moveEvent.clientX;
           start.y = moveEvent.clientY;
+
+          // Google Earth-style pan: move along camera's local right and forward vectors
+          // projected onto the ground plane (Y=0)
           const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
-          // INVERTED: Drag left/up pulls the world in that direction
-          state.target.x += dx * panScale;
-          state.target.z -= dy * panScale;
+
+          // Get camera's right vector (for horizontal drag)
+          const right = new THREE.Vector3();
+          camera.getWorldDirection(new THREE.Vector3());
+          right.setFromMatrixColumn(camera.matrixWorld, 0); // X axis = right
+          right.y = 0; // Project onto ground plane
+          right.normalize();
+
+          // Get camera's forward vector projected onto ground (for vertical drag)
+          const forward = new THREE.Vector3();
+          camera.getWorldDirection(forward);
+          forward.y = 0; // Project onto ground plane
+          forward.normalize();
+
+          // Apply movement: drag right moves target left, drag up moves target forward
+          state.target.x -= right.x * dx * panScale + forward.x * dy * panScale;
+          state.target.z -= right.z * dx * panScale + forward.z * dy * panScale;
+
           updateCamera();
         };
         const upHandler = () => {
@@ -2747,7 +2765,7 @@ export default function SecurityPlanner() {
           window.addEventListener("pointermove", moveHandler);
           window.addEventListener("pointerup", upHandler);
         } else {
-          // Clicked on empty space - deselect and start pan
+          // Clicked on empty space - deselect and start pan (Google Earth style)
           setSelectedId(null);
 
           const start = { x: event.clientX, y: event.clientY };
@@ -2756,10 +2774,24 @@ export default function SecurityPlanner() {
             const dy = moveEvent.clientY - start.y;
             start.x = moveEvent.clientX;
             start.y = moveEvent.clientY;
+
+            // Google Earth-style pan: move along camera's local right and forward vectors
             const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
-            // INVERTED: Drag left/up pulls the world in that direction
-            state.target.x += dx * panScale;
-            state.target.z -= dy * panScale;
+
+            const right = new THREE.Vector3();
+            camera.getWorldDirection(new THREE.Vector3());
+            right.setFromMatrixColumn(camera.matrixWorld, 0);
+            right.y = 0;
+            right.normalize();
+
+            const forward = new THREE.Vector3();
+            camera.getWorldDirection(forward);
+            forward.y = 0;
+            forward.normalize();
+
+            state.target.x -= right.x * dx * panScale + forward.x * dy * panScale;
+            state.target.z -= right.z * dx * panScale + forward.z * dy * panScale;
+
             updateCamera();
           };
           const upHandler = () => {
