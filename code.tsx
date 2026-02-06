@@ -21,17 +21,23 @@ import {
   FolderOpen,
   X,
   Layers,
+  LayoutGrid,
   Plus,
 
   Undo,
-  Redo
+  Redo,
+  Maximize,
+  Minimize
 } from "lucide-react";
+import GridLayout from "react-grid-layout";
+import "react-grid-layout/css/styles.css";
+import "react-resizable/css/styles.css";
 
 // --- Types ---
 
 type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
 type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
-type ViewMode = "plan" | "iso3d";
+type ViewMode = "plan" | "iso3d" | "nvr";
 
 interface BaseItem {
   id: string;
@@ -77,6 +83,9 @@ interface BuildingItem extends BaseItem {
 interface TreeItem extends BaseItem {
   type: "tree";
   radius: number;
+  height?: number;  // Tree height (default 30)
+  width?: number;   // Canopy width multiplier (default 1)
+  treeType?: 'deciduous' | 'conifer' | 'palm' | 'bush';  // Tree type
   color: string;
 }
 
@@ -85,6 +94,7 @@ interface ParkingItem extends BaseItem {
   width: number;
   height: number;
   color: string;
+  vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'motorcycle';
 }
 
 interface LabelItem extends BaseItem {
@@ -157,9 +167,11 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
   const wheelRadius = 3;
   const color = item.color;
 
-  // Deterministic style based on ID
-  const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const type = hash % 4; // 0: Sedan, 1: SUV, 2: Truck, 3: Sports
+  // Use explicit vehicle type or fallback to hash-based for backward compatibility
+  const vehicleType = item.vehicleType ?? (() => {
+    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    return ['sedan', 'suv', 'truck', 'sports'][hash % 4] as 'sedan' | 'suv' | 'truck' | 'sports';
+  })();
 
   const chassisMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.3, flatShading: true });
   const glassMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.1, metalness: 0.9, flatShading: true });
@@ -171,31 +183,38 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
   const wheelZ = length * 0.35;
   const wheelX = width * 0.45;
 
-  const addWheels = () => {
-    [-1, 1].forEach(kx => {
+  const addWheels = (fourWheels = true) => {
+    if (fourWheels) {
+      [-1, 1].forEach(kx => {
+        [-1, 1].forEach(kz => {
+          const w = new THREE.Mesh(wheelGeo, wheelMat);
+          w.position.set(kx * wheelX, wheelRadius, kz * wheelZ);
+          w.castShadow = true;
+          group.add(w);
+        });
+      });
+    } else {
+      // Two wheels for motorcycle
       [-1, 1].forEach(kz => {
         const w = new THREE.Mesh(wheelGeo, wheelMat);
-        w.position.set(kx * wheelX, wheelRadius, kz * wheelZ);
+        w.position.set(0, wheelRadius, kz * wheelZ);
         w.castShadow = true;
         group.add(w);
       });
-    });
+    }
   };
-  addWheels();
 
   // --- Body Construction ---
-  const yBase = wheelRadius + 1; // Chassis bottom height
+  const yBase = wheelRadius + 1;
 
-  if (type === 1) { // SUV
-    // Main Body
+  if (vehicleType === 'suv') {
+    addWheels();
     const bodyH = carHeight * 0.9;
     const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
     body.position.y = yBase + bodyH / 2;
     body.castShadow = true;
-    body.receiveShadow = true;
     group.add(body);
 
-    // Upper Cabin
     const cabinH = carHeight * 0.7;
     const cabinL = length * 0.8;
     const cabinW = width * 0.85;
@@ -204,42 +223,38 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
     cabin.castShadow = true;
     group.add(cabin);
 
-    // Windows
     const glass = new THREE.Mesh(new THREE.BoxGeometry(cabinW + 0.2, cabinH * 0.7, cabinL * 0.9), glassMat);
     glass.position.copy(cabin.position);
     group.add(glass);
 
-  } else if (type === 2) { // Truck
-    // Cab
+  } else if (vehicleType === 'truck') {
+    addWheels();
     const cabL = length * 0.35;
     const bedL = length * 0.6;
     const cabH = carHeight * 1.5;
 
-    // Lower Chassis
     const base = new THREE.Mesh(new THREE.BoxGeometry(width, carHeight * 0.6, length), chassisMat);
     base.position.y = yBase + carHeight * 0.3;
     base.castShadow = true;
     group.add(base);
 
-    // Cab Unit
     const cab = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, cabH, cabL), chassisMat);
     cab.position.set(0, yBase + carHeight * 0.3 + cabH / 2, -length / 2 + cabL / 2 + 2);
     cab.castShadow = true;
     group.add(cab);
 
-    // Cab Glass
     const glass = new THREE.Mesh(new THREE.BoxGeometry(width + 0.1, cabH * 0.5, cabL * 0.7), glassMat);
     glass.position.copy(cab.position);
     glass.position.y += 2;
     group.add(glass);
 
-    // Bed Walls
     const wallH = 4;
     const bed = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, wallH, bedL), chassisMat);
     bed.position.set(0, yBase + carHeight * 0.6 + wallH / 2, length / 2 - bedL / 2);
     group.add(bed);
 
-  } else if (type === 3) { // Sports
+  } else if (vehicleType === 'sports') {
+    addWheels();
     const bodyH = carHeight * 0.7;
     const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
     body.position.y = yBase + bodyH / 2;
@@ -256,7 +271,52 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
     glass.position.copy(cabin.position);
     group.add(glass);
 
+  } else if (vehicleType === 'van') {
+    addWheels();
+    const bodyH = carHeight * 1.2;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
+    body.position.y = yBase + bodyH / 2;
+    body.castShadow = true;
+    group.add(body);
+
+    // Front windshield
+    const glassH = bodyH * 0.5;
+    const glassL = length * 0.2;
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, glassH, glassL), glassMat);
+    glass.position.set(0, yBase + bodyH - glassH / 2, -length / 2 + glassL / 2 + 2);
+    group.add(glass);
+
+    // Side windows
+    const sideGlassH = bodyH * 0.4;
+    const sideGlassL = length * 0.6;
+    const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, sideGlassH, sideGlassL), glassMat);
+    sideGlass.position.set(0, yBase + bodyH - sideGlassH / 2, 0);
+    group.add(sideGlass);
+
+  } else if (vehicleType === 'motorcycle') {
+    addWheels(false);
+    // Body/frame
+    const frameH = 6;
+    const frameL = length * 0.6;
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(width * 0.3, frameH, frameL), chassisMat);
+    frame.position.y = yBase + frameH / 2;
+    frame.castShadow = true;
+    group.add(frame);
+
+    // Seat
+    const seatH = 3;
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, seatH, length * 0.4), new THREE.MeshStandardMaterial({ color: '#1f1f1f', roughness: 0.8 }));
+    seat.position.set(0, yBase + frameH + seatH / 2, length * 0.1);
+    group.add(seat);
+
+    // Handlebars
+    const handleH = 8;
+    const handle = new THREE.Mesh(new THREE.BoxGeometry(width, 1, 2), new THREE.MeshStandardMaterial({ color: '#4a4a4a', metalness: 0.8 }));
+    handle.position.set(0, yBase + handleH, -length * 0.3);
+    group.add(handle);
+
   } else { // Sedan (Default)
+    addWheels();
     const bodyH = carHeight * 0.6;
     const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
     body.position.y = yBase + bodyH / 2;
@@ -275,20 +335,22 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
     group.add(glass);
   }
 
-  // Headlights
-  const lightGeo = new THREE.PlaneGeometry(3, 2);
-  const headLightMat = new THREE.MeshBasicMaterial({ color: '#fef3c7' });
-  const tailLightMat = new THREE.MeshBasicMaterial({ color: '#ef4444' });
+  // Headlights (skip for motorcycle)
+  if (vehicleType !== 'motorcycle') {
+    const lightGeo = new THREE.PlaneGeometry(3, 2);
+    const headLightMat = new THREE.MeshBasicMaterial({ color: '#fef3c7' });
+    const tailLightMat = new THREE.MeshBasicMaterial({ color: '#ef4444' });
 
-  const zFront = -length / 2 - 0.1;
-  const zBack = length / 2 + 0.1;
-  const yLight = yBase + carHeight * 0.6;
-  const xLight = width * 0.35;
+    const zFront = -length / 2 - 0.1;
+    const zBack = length / 2 + 0.1;
+    const yLight = yBase + carHeight * 0.6;
+    const xLight = width * 0.35;
 
-  const fl1 = new THREE.Mesh(lightGeo, headLightMat); fl1.position.set(-xLight, yLight, zFront); fl1.rotation.y = Math.PI; group.add(fl1);
-  const fl2 = new THREE.Mesh(lightGeo, headLightMat); fl2.position.set(xLight, yLight, zFront); fl2.rotation.y = Math.PI; group.add(fl2);
-  const tl1 = new THREE.Mesh(lightGeo, tailLightMat); tl1.position.set(-xLight, yLight, zBack); group.add(tl1);
-  const tl2 = new THREE.Mesh(lightGeo, tailLightMat); tl2.position.set(xLight, yLight, zBack); group.add(tl2);
+    const fl1 = new THREE.Mesh(lightGeo, headLightMat); fl1.position.set(-xLight, yLight, zFront); fl1.rotation.y = Math.PI; group.add(fl1);
+    const fl2 = new THREE.Mesh(lightGeo, headLightMat); fl2.position.set(xLight, yLight, zFront); fl2.rotation.y = Math.PI; group.add(fl2);
+    const tl1 = new THREE.Mesh(lightGeo, tailLightMat); tl1.position.set(-xLight, yLight, zBack); group.add(tl1);
+    const tl2 = new THREE.Mesh(lightGeo, tailLightMat); tl2.position.set(xLight, yLight, zBack); group.add(tl2);
+  }
 
   group.position.set(item.x, 0, item.y);
   group.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
@@ -301,69 +363,147 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
 const create3dTree = (item: TreeItem): THREE.Group => {
   const group = new THREE.Group();
 
-  // Deterministic style
-  const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const isPine = hash % 2 === 0;
+  // Get tree properties with defaults
+  const treeHeight = item.height ?? 30;
+  const widthMultiplier = item.width ?? 1;
+  const treeType = item.treeType ?? 'deciduous';
 
-  // Trunk
-  const trunkRadius = item.radius * 0.25;
-  const trunkHeight = isPine ? item.radius * 2 : item.radius * 1.5;
-  const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, trunkHeight, 6);
-  const trunkMat = new THREE.MeshStandardMaterial({ color: '#4a3728', roughness: 1.0, flatShading: true });
-  const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-  trunk.position.y = trunkHeight / 2;
-  trunk.castShadow = true;
-  trunk.receiveShadow = true;
-  group.add(trunk);
+  const trunkColor = '#4a3728';
+  const trunkMat = new THREE.MeshStandardMaterial({ color: trunkColor, roughness: 1.0, flatShading: true });
 
-  const foliageColor = isPine ? '#1e4620' : item.color; // Pines are dark green
-  const foliageMat = new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.8, flatShading: true });
+  if (treeType === 'conifer') {
+    // Conifer/Pine Tree: Stacked Cones
+    const trunkRadius = item.radius * 0.2;
+    const trunkH = treeHeight * 0.3;
+    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, trunkH, 6);
+    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+    trunk.position.y = trunkH / 2;
+    trunk.castShadow = true;
+    group.add(trunk);
 
-  if (isPine) {
-    // Pine Tree: Stacked Cones
-    const layers = 4;
-    const baseR = item.radius;
-    const layerH = item.radius * 2.5 / layers;
+    const foliageMat = new THREE.MeshStandardMaterial({ color: '#1e4620', roughness: 0.8, flatShading: true });
+    const layers = 5;
+    const canopyHeight = treeHeight * 0.8;
+    const layerH = canopyHeight / layers;
 
     for (let i = 0; i < layers; i++) {
-      const t = i / (layers - 1); // 0 to 1
-      const r = baseR * (1 - t * 0.6); // Taper
-      const y = trunkHeight * 0.3 + i * (layerH * 0.8);
+      const t = i / (layers - 1);
+      const r = item.radius * widthMultiplier * (1 - t * 0.7);
+      const y = trunkH * 0.5 + i * (layerH * 0.85);
 
       const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(r, layerH * 1.5, 7),
+        new THREE.ConeGeometry(r, layerH * 1.4, 8),
         foliageMat
       );
       cone.position.y = y;
       cone.castShadow = true;
-      cone.receiveShadow = true;
       group.add(cone);
     }
-  } else {
-    // Oak Tree: Fluffy Spheres (Icosahedrons)
-    // Main center
-    const mainGeo = new THREE.IcosahedronGeometry(item.radius * 0.8, 0);
+  } else if (treeType === 'palm') {
+    // Palm Tree: Tall thin trunk with fronds at top
+    const trunkRadius = item.radius * 0.15;
+    const trunkH = treeHeight * 0.85;
+
+    // Curved trunk segments
+    const segments = 8;
+    const segmentH = trunkH / segments;
+    for (let i = 0; i < segments; i++) {
+      const segGeo = new THREE.CylinderGeometry(
+        trunkRadius * (1 - i * 0.04),
+        trunkRadius * (1 - (i + 1) * 0.04),
+        segmentH, 6
+      );
+      const seg = new THREE.Mesh(segGeo, new THREE.MeshStandardMaterial({ color: '#8B7355', roughness: 0.9 }));
+      seg.position.y = segmentH / 2 + i * segmentH;
+      seg.castShadow = true;
+      group.add(seg);
+    }
+
+    // Palm fronds
+    const frondMat = new THREE.MeshStandardMaterial({ color: '#2d5a27', roughness: 0.7, side: THREE.DoubleSide });
+    const frondCount = 8;
+    const frondLength = item.radius * widthMultiplier * 2;
+
+    for (let i = 0; i < frondCount; i++) {
+      const angle = (i / frondCount) * Math.PI * 2;
+      const frondGeo = new THREE.ConeGeometry(frondLength * 0.15, frondLength, 4);
+      const frond = new THREE.Mesh(frondGeo, frondMat);
+      frond.position.set(
+        Math.cos(angle) * frondLength * 0.4,
+        trunkH,
+        Math.sin(angle) * frondLength * 0.4
+      );
+      frond.rotation.z = Math.PI / 2 + (Math.cos(angle) * 0.5);
+      frond.rotation.y = angle;
+      frond.castShadow = true;
+      group.add(frond);
+    }
+  } else if (treeType === 'bush') {
+    // Bush: Low rounded shrub
+    const foliageMat = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.8, flatShading: true });
+    const bushRadius = item.radius * widthMultiplier;
+    const bushHeight = treeHeight * 0.5;
+
+    // Main body - flattened sphere
+    const mainGeo = new THREE.SphereGeometry(bushRadius, 8, 6);
+    mainGeo.scale(1, bushHeight / bushRadius, 1);
     const main = new THREE.Mesh(mainGeo, foliageMat);
-    main.position.y = trunkHeight + item.radius * 0.2;
+    main.position.y = bushHeight * 0.5;
     main.castShadow = true;
-    main.receiveShadow = true;
     group.add(main);
 
-    // Random clumps
-    const clumps = 10;
-    for (let i = 0; i < clumps; i++) {
-      // Deterministic pseudo-random based on ID + i
-      const pseudoRnd = ((hash + i * 13) % 100) / 100;
-      const theta = pseudoRnd * Math.PI * 2;
-      const phi = (((hash + i * 7) % 100) / 100) * Math.PI;
+    // Extra clumps
+    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    for (let i = 0; i < 5; i++) {
+      const theta = ((hash + i * 17) % 100) / 100 * Math.PI * 2;
+      const dist = bushRadius * 0.6;
+      const size = bushRadius * 0.5;
 
-      const size = item.radius * (0.3 + ((hash + i * 3) % 5) / 10);
-      const dist = item.radius * 0.7;
+      const clump = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(size, 0),
+        foliageMat
+      );
+      clump.position.set(
+        Math.cos(theta) * dist,
+        bushHeight * 0.4,
+        Math.sin(theta) * dist
+      );
+      clump.castShadow = true;
+      group.add(clump);
+    }
+  } else {
+    // Deciduous Tree (default): Fluffy spherical canopy
+    const trunkRadius = item.radius * 0.2;
+    const trunkH = treeHeight * 0.4;
+    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.7, trunkRadius, trunkH, 6);
+    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+    trunk.position.y = trunkH / 2;
+    trunk.castShadow = true;
+    group.add(trunk);
+
+    const foliageMat = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.8, flatShading: true });
+    const canopyRadius = item.radius * widthMultiplier;
+
+    // Main center sphere
+    const mainGeo = new THREE.IcosahedronGeometry(canopyRadius * 0.9, 1);
+    const main = new THREE.Mesh(mainGeo, foliageMat);
+    main.position.y = trunkH + canopyRadius * 0.5;
+    main.castShadow = true;
+    group.add(main);
+
+    // Random clumps for fullness
+    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    const clumps = 8;
+    for (let i = 0; i < clumps; i++) {
+      const theta = ((hash + i * 13) % 100) / 100 * Math.PI * 2;
+      const phi = ((hash + i * 7) % 100) / 100 * Math.PI;
+      const size = canopyRadius * (0.35 + ((hash + i * 3) % 5) / 12);
+      const dist = canopyRadius * 0.65;
 
       const sub = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), foliageMat);
       sub.position.set(
         Math.sin(phi) * Math.cos(theta) * dist,
-        main.position.y + Math.cos(phi) * dist * 0.8,
+        main.position.y + Math.cos(phi) * dist * 0.7,
         Math.sin(phi) * Math.sin(theta) * dist
       );
       sub.castShadow = true;
@@ -372,6 +512,7 @@ const create3dTree = (item: TreeItem): THREE.Group => {
   }
 
   group.position.set(item.x, 0, item.y);
+  group.rotation.y = THREE.MathUtils.degToRad(item.rotation);
   return group;
 };
 
@@ -480,6 +621,18 @@ export default function SecurityPlanner() {
   // --- State ---
   const [items, setItems] = useState<CanvasItem[]>([]);
 
+  // Terrain State (Moved up for scope access)
+  const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
+  const [isTerrainMode, setIsTerrainMode] = useState(false);
+  const [terrainSelection, setTerrainSelection] = useState<{ x1: number, z1: number, x2: number, z2: number } | null>(null);
+  const [selectionHeight, setSelectionHeightState] = useState<number>(0);
+
+  // State Refs for History (Ensures we save latest state in async callbacks)
+  const currentItemsRef = useRef(items);
+  const terrainHeightsRef = useRef(terrainHeights);
+  useEffect(() => { currentItemsRef.current = items; }, [items]);
+  useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
+
   // Clipboard
   const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
   const clipboardRef = useRef<CanvasItem | null>(null);
@@ -497,8 +650,11 @@ export default function SecurityPlanner() {
     historyIndexRef.current = historyIndex;
   }, [history, historyIndex]);
 
-  const saveHistory = () => {
-    const currentState = JSON.stringify(items);
+  const saveHistory = (itemsOverride?: CanvasItem[], terrainHeightsOverride?: Record<string, number>) => {
+    const currentState = JSON.stringify({
+      items: itemsOverride || currentItemsRef.current,
+      terrainHeights: terrainHeightsOverride || terrainHeightsRef.current
+    });
     // Don't save if same as current top
     if (historyIndex >= 0 && history[historyIndex] === currentState) return;
 
@@ -520,7 +676,12 @@ export default function SecurityPlanner() {
       const newIndex = curIndex - 1;
       try {
         const state = JSON.parse(historyRef.current[newIndex]);
-        setItems(state);
+        if (Array.isArray(state)) {
+          setItems(state);
+        } else {
+          setItems(state.items || []);
+          setTerrainHeights(state.terrainHeights || {});
+        }
         setHistoryIndex(newIndex);
       } catch (e) {
         console.error("Undo failed", e);
@@ -534,7 +695,12 @@ export default function SecurityPlanner() {
       const newIndex = curIndex + 1;
       try {
         const state = JSON.parse(historyRef.current[newIndex]);
-        setItems(state);
+        if (Array.isArray(state)) {
+          setItems(state);
+        } else {
+          setItems(state.items || []);
+          setTerrainHeights(state.terrainHeights || {});
+        }
         setHistoryIndex(newIndex);
       } catch (e) {
         console.error("Redo failed", e);
@@ -587,11 +753,45 @@ export default function SecurityPlanner() {
     snap?: boolean;
   }>({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
 
+  // NVR Layout State
+  const [nvrLayout, setNvrLayout] = useState<any[]>([]);
+  const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
+
+  // Sync Layout with Items
+  useEffect(() => {
+    const cams = items.filter(i => i.type === 'camera');
+    const layoutIds = new Set(nvrLayout.map(l => l.i));
+    const newCams = cams.filter(c => !layoutIds.has(c.id));
+    const validIds = new Set(cams.map(c => c.id));
+
+    let nextLayout = nvrLayout.filter(l => validIds.has(l.i));
+
+    if (newCams.length > 0) {
+      newCams.forEach((cam, idx) => {
+        // Append logic - 3 cameras per row for 4:3 aspect ratio
+        const count = nextLayout.length;
+        nextLayout.push({
+          i: cam.id,
+          x: (count * 4) % 12,
+          y: Math.floor((count * 4) / 12) * 2,
+          w: 4,
+          h: 2
+        });
+      });
+      setNvrLayout(nextLayout);
+    } else if (nextLayout.length !== nvrLayout.length) {
+      setNvrLayout(nextLayout);
+    }
+  }, [items]);
+
+  const onLayoutChange = (newLayout: any) => {
+    setNvrLayout(newLayout);
+  };
+
   // Terrain State
-  const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
-  const [isTerrainMode, setIsTerrainMode] = useState(false);
-  const [terrainSelection, setTerrainSelection] = useState<{ x1: number, z1: number, x2: number, z2: number } | null>(null);
-  const [selectionHeight, setSelectionHeightState] = useState<number>(0);
+  // Terrain State moved to top
+
+
 
   const getGridHeight = (x: number, y: number) => {
     const gx = Math.round(x / gridSize) * gridSize;
@@ -601,20 +801,89 @@ export default function SecurityPlanner() {
 
   const setSelectionHeight = (height: number) => {
     setSelectionHeightState(height); // Update display
-    if (!terrainSelection) return;
+    if (!terrainSelection) {
+      // Even if no selection, we might want to return current heights?
+      return terrainHeights;
+    }
     const { x1, z1, x2, z2 } = terrainSelection;
     const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
     const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
 
-    setTerrainHeights(prev => {
-      const next = { ...prev };
-      for (let x = minX; x <= maxX; x += gridSize) {
-        for (let z = minZ; z <= maxZ; z += gridSize) {
-          next[`${x},${z}`] = height;
+    const next = { ...terrainHeights };
+    for (let x = minX; x <= maxX; x += gridSize) {
+      for (let z = minZ; z <= maxZ; z += gridSize) {
+        next[`${x},${z}`] = height;
+      }
+    }
+    setTerrainHeights(next);
+    return next;
+  };
+
+  const applyRamp = (axis: 'x' | 'z') => {
+    if (!terrainSelection) return terrainHeights;
+    const { x1, z1, x2, z2 } = terrainSelection;
+    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+
+    const next = { ...terrainHeights };
+
+    if (axis === 'x') {
+      for (let z = minZ; z <= maxZ; z += gridSize) {
+        const startH = getGridHeight(minX, z);
+        const endH = getGridHeight(maxX, z);
+        const dist = maxX - minX;
+        if (dist === 0) continue;
+
+        for (let x = minX; x <= maxX; x += gridSize) {
+          const t = (x - minX) / dist;
+          next[`${x},${z}`] = startH + (endH - startH) * t;
         }
       }
-      return next;
-    });
+    } else {
+      for (let x = minX; x <= maxX; x += gridSize) {
+        const startH = getGridHeight(x, minZ);
+        const endH = getGridHeight(x, maxZ);
+        const dist = maxZ - minZ;
+        if (dist === 0) continue;
+
+        for (let z = minZ; z <= maxZ; z += gridSize) {
+          const t = (z - minZ) / dist;
+          next[`${x},${z}`] = startH + (endH - startH) * t;
+        }
+      }
+    }
+    setTerrainHeights(next);
+    return next;
+  };
+
+  const applySmooth = () => {
+    if (!terrainSelection) return terrainHeights;
+    const { x1, z1, x2, z2 } = terrainSelection;
+    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+
+    const next = { ...terrainHeights };
+
+    for (let x = minX; x <= maxX; x += gridSize) {
+      for (let z = minZ; z <= maxZ; z += gridSize) {
+        let sum = 0;
+        let count = 0;
+        for (let dx = -gridSize; dx <= gridSize; dx += gridSize) {
+          for (let dz = -gridSize; dz <= gridSize; dz += gridSize) {
+            const key = `${x + dx},${z + dz}`;
+            if (terrainHeights[key] !== undefined) {
+              sum += terrainHeights[key];
+            } else {
+              sum += 0;
+            }
+            count++;
+          }
+        }
+        next[`${x},${z}`] = count > 0 ? sum / count : 0;
+      }
+    }
+    setTerrainHeights(next);
+    return next;
   };
 
   // Refs
@@ -708,6 +977,7 @@ export default function SecurityPlanner() {
         if (data.frustumSettings) setFrustumSettings(data.frustumSettings);
         if (data.sceneBackgroundImg) setSceneBackgroundImg(data.sceneBackgroundImg);
         if (data.backgroundMode) setBackgroundMode(data.backgroundMode);
+        if (data.nvrLayout) setNvrLayout(data.nvrLayout);
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -726,7 +996,8 @@ export default function SecurityPlanner() {
           projectName,
           frustumSettings,
           sceneBackgroundImg,
-          backgroundMode
+          backgroundMode,
+          nvrLayout
         };
         localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
       } catch (err: any) {
@@ -1312,62 +1583,108 @@ export default function SecurityPlanner() {
     }]);
   };
 
-  // Render a camera's perspective view to data URL
+  // Render a camera's perspective view to data URL - MATCHES Camera Preview Panel exactly
   const renderCameraViewToDataUrl = (cam: CameraItem): string => {
-    const width = 640;
-    const height = 480;
+    const width = 1280;
+    const height = 720;
 
     const camPos = getCameraPlanPosition(cam);
+    const camTerrainH = getGridHeight(camPos.x, camPos.y); // Terrain adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
     const range = cam.range;
     const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#87CEEB');
-    scene.fog = new THREE.Fog('#87CEEB', range * 0.3, range * 1.2);
+    // Calculate vertical FOV from horizontal FOV and aspect ratio to match 2D cone
+    const aspect = width / height;
+    const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
+    const vFov = THREE.MathUtils.radToDeg(vFovRad);
 
-    const perspCam = new THREE.PerspectiveCamera(hFov, width / height, 1, range * 2);
-    perspCam.position.set(camPos.x, camHeight, camPos.y);
+    // Create mini Three.js scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#09090b');
+    scene.fog = new THREE.Fog('#09090b', range * 0.3, range * 1.2);
+
+    // Perspective camera at security camera position (Terrain Adjusted)
+    const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 1, range * 2);
+    perspCam.position.set(camPos.x, camTerrainH + camHeight, camPos.y);
 
     const pitchRad = THREE.MathUtils.degToRad(pitch);
     const lookAt = new THREE.Vector3(
       camPos.x + Math.cos(rotAngle) * 100,
-      camHeight + Math.tan(pitchRad) * 100,
+      camTerrainH + camHeight + Math.tan(pitchRad) * 100,
       camPos.y + Math.sin(rotAngle) * 100
     );
     perspCam.lookAt(lookAt);
 
+    // Lighting
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
     dirLight.position.set(100, 200, 50);
     scene.add(dirLight);
 
-    // Ground
+    // Ground with Terrain Height
+    const groundW = canvasSize.width * 2;
+    const groundH = canvasSize.height * 2;
+    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, 64, 64);
+
+    // Apply terrain height to ground geometry
+    const pos = groundGeo.attributes.position;
+    const centerX = canvasSize.width / 2;
+    const centerY = canvasSize.height / 2;
+
+    for (let i = 0; i < pos.count; i++) {
+      const lx = pos.getX(i);
+      const ly = pos.getY(i);
+      const wx = lx + centerX;
+      const wy = centerY - ly;
+      const h = getGridHeight(wx, wy);
+      pos.setZ(i, h);
+    }
+    groundGeo.computeVertexNormals();
+
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(canvasSize.width * 2, canvasSize.height * 2),
+      groundGeo,
       new THREE.MeshStandardMaterial({ color: '#6B8E23', roughness: 0.9 })
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(canvasSize.width / 2, 0, canvasSize.height / 2);
+    ground.position.set(centerX, 0, centerY);
     scene.add(ground);
 
-    // Background image
+    // Background image (terrain deformed)
     if (bgImageRef.current) {
       const tex = new THREE.CanvasTexture(bgImageRef.current);
       tex.colorSpace = THREE.SRGBColorSpace;
+
+      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
+      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
+      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
+
+      const mapPosAttr = mapGeometry.attributes.position;
+      for (let i = 0; i < mapPosAttr.count; i++) {
+        const lx = mapPosAttr.getX(i);
+        const ly = mapPosAttr.getY(i);
+        const wx = bgSettings.x + bgSettings.width / 2 + lx;
+        const wy = bgSettings.y + bgSettings.height / 2 - ly;
+        const h = getGridHeight(wx, wy);
+        mapPosAttr.setZ(i, h + 0.1);
+      }
+      mapGeometry.computeVertexNormals();
+
       const mapPlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(bgSettings.width, bgSettings.height),
+        mapGeometry,
         new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity })
       );
       mapPlane.rotation.x = -Math.PI / 2;
-      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0.1, bgSettings.y + bgSettings.height / 2);
+      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
       scene.add(mapPlane);
     }
 
-    // Add items
+    // Add items (Terrain Aware)
     items.forEach(item => {
+      const itemH = getGridHeight(item.x, item.y);
+
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const pts = getBuildingPoints(bld);
@@ -1375,43 +1692,78 @@ export default function SecurityPlanner() {
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 60, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
         const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: bld.color, side: THREE.DoubleSide }));
-        mesh.position.set(bld.x, 0, bld.y);
+        mesh.position.set(bld.x, itemH, bld.y);
         mesh.rotation.y = -THREE.MathUtils.degToRad(bld.rotation);
         scene.add(mesh);
       }
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
+        tree.position.set(item.x, itemH, item.y);
         scene.add(tree);
       }
       if (item.type === "parking") {
         const car = create3dCar(item as ParkingItem);
+        car.position.set(item.x, itemH, item.y);
         scene.add(car);
       }
     });
 
+    // Render
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setSize(width, height);
-    renderer.render(scene, perspCam);
 
-    // Add overlay
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(0, 0, width, 30);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 14px sans-serif';
-      ctx.fillText(`📷 ${cam.label}`, 10, 20);
-      ctx.font = '12px sans-serif';
-      ctx.fillStyle = '#94a3b8';
-      const info = `FOV: ${hFov.toFixed(0)}° | Pitch: ${pitch}° | Range: ${range}px`;
-      ctx.fillText(info, width - ctx.measureText(info).width - 10, 20);
+    // Apply PBR Lighting (RoomEnvironment) to fix black models in preview
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+
+    // Load scene background image if present (same as Camera Preview Panel)
+    if (sceneBackgroundImg) {
+      try {
+        // Load texture synchronously by creating an image and converting it
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = sceneBackgroundImg;
+        // If image is already loaded (cached), use it
+        if (img.complete && img.naturalWidth > 0) {
+          const bgTexture = new THREE.Texture(img);
+          bgTexture.needsUpdate = true;
+          scene.background = bgTexture;
+        }
+      } catch (e) {
+        // Fallback - texture will load async, not available for this render
+      }
     }
 
-    const dataUrl = canvas.toDataURL('image/png');
+    renderer.render(scene, perspCam);
+
+    // Copy WebGL canvas to a 2D canvas for overlay (WebGL and 2D contexts can't coexist on same canvas)
+    const outputCanvas = document.createElement('canvas');
+    outputCanvas.width = width;
+    outputCanvas.height = height;
+    const ctx = outputCanvas.getContext('2d');
+    if (ctx) {
+      // Draw the WebGL render first
+      ctx.drawImage(canvas, 0, 0);
+
+      // Top bar with camera name only
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, 0, width, 40);
+
+      // Camera icon and label
+      ctx.fillStyle = '#10b981';
+      ctx.font = 'bold 24px system-ui, sans-serif';
+      ctx.fillText('📷', 16, 28);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 22px system-ui, sans-serif';
+      ctx.fillText(cam.label, 56, 28);
+    }
+
+    const dataUrl = outputCanvas.toDataURL('image/png');
     renderer.dispose();
+    pmremGenerator.dispose();
     return dataUrl;
   };
 
@@ -1854,6 +2206,7 @@ export default function SecurityPlanner() {
       } else if (item.type === "tree") {
         const tree = item as TreeItem;
         obj.position.set(tree.x, h, tree.y);
+        obj.rotation.y = -THREE.MathUtils.degToRad(tree.rotation);
         needsRender = true;
       } else if (item.type === "camera") {
         const cam = item as CameraItem;
@@ -1911,11 +2264,22 @@ export default function SecurityPlanner() {
         if (prevB.color !== nextB.color) return true;
       }
 
-      // For trees, check radius change
+      // For trees, check radius, height, width, treeType, rotation, color change
       if (nextItem.type === "tree") {
         const prevT = prevItem as TreeItem;
         const nextT = nextItem as TreeItem;
         if (prevT.radius !== nextT.radius || prevT.color !== nextT.color) return true;
+        if (prevT.height !== nextT.height || prevT.width !== nextT.width) return true;
+        if (prevT.treeType !== nextT.treeType) return true;
+      }
+
+      // For parking/cars, check dimensions, color, vehicleType, rotation
+      if (nextItem.type === "parking") {
+        const prevP = prevItem as ParkingItem;
+        const nextP = nextItem as ParkingItem;
+        if (prevP.width !== nextP.width || prevP.height !== nextP.height) return true;
+        if (prevP.color !== nextP.color || prevP.vehicleType !== nextP.vehicleType) return true;
+        // if (prevP.rotation !== nextP.rotation) return true;
       }
 
       // For cameras, check if range/fov changed (frustum geometry)
@@ -2011,11 +2375,10 @@ export default function SecurityPlanner() {
 
     // Background image
     if (backgroundImg) {
-      const mapPlaneMaterial = new THREE.MeshStandardMaterial({
+      const mapPlaneMaterial = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: bgSettings.opacity,
-        roughness: 0.9
+        opacity: bgSettings.opacity
       });
       new THREE.TextureLoader().load(backgroundImg, texture => {
         texture.colorSpace = THREE.SRGBColorSpace;
@@ -2235,29 +2598,30 @@ export default function SecurityPlanner() {
           if (shouldShow) {
             // Frustum geometry calc
             const aspect = 1.33;
+            const displayRange = Math.min(range, 50); // Cap visual range to avoid clutter
             const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
-            const farHeight = 2 * Math.tan(vFovRad / 2) * range;
+            const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
             const farWidth = farHeight * aspect;
 
             const vertices = [
               0, 0, 0,
-              range, farHeight / 2, -farWidth / 2,
-              range, -farHeight / 2, -farWidth / 2,
+              displayRange, farHeight / 2, -farWidth / 2,
+              displayRange, -farHeight / 2, -farWidth / 2,
               0, 0, 0,
-              range, -farHeight / 2, -farWidth / 2,
-              range, -farHeight / 2, farWidth / 2,
+              displayRange, -farHeight / 2, -farWidth / 2,
+              displayRange, -farHeight / 2, farWidth / 2,
               0, 0, 0,
-              range, -farHeight / 2, farWidth / 2,
-              range, farHeight / 2, farWidth / 2,
+              displayRange, -farHeight / 2, farWidth / 2,
+              displayRange, farHeight / 2, farWidth / 2,
               0, 0, 0,
-              range, farHeight / 2, farWidth / 2,
-              range, farHeight / 2, -farWidth / 2,
-              range, -farHeight / 2, farWidth / 2,
-              range, -farHeight / 2, -farWidth / 2,
-              range, farHeight / 2, -farWidth / 2,
-              range, farHeight / 2, farWidth / 2,
-              range, -farHeight / 2, farWidth / 2,
-              range, farHeight / 2, -farWidth / 2
+              displayRange, farHeight / 2, farWidth / 2,
+              displayRange, farHeight / 2, -farWidth / 2,
+              displayRange, -farHeight / 2, farWidth / 2,
+              displayRange, -farHeight / 2, -farWidth / 2,
+              displayRange, farHeight / 2, -farWidth / 2,
+              displayRange, farHeight / 2, farWidth / 2,
+              displayRange, -farHeight / 2, farWidth / 2,
+              displayRange, farHeight / 2, -farWidth / 2
             ];
 
             // Render Volume (Cone)
@@ -2282,14 +2646,14 @@ export default function SecurityPlanner() {
               group.add(frustumMesh);
 
               const edgeVertices = [
-                0, 0, 0, range, farHeight / 2, -farWidth / 2,
-                0, 0, 0, range, -farHeight / 2, -farWidth / 2,
-                0, 0, 0, range, -farHeight / 2, farWidth / 2,
-                0, 0, 0, range, farHeight / 2, farWidth / 2,
-                range, farHeight / 2, -farWidth / 2, range, farHeight / 2, farWidth / 2,
-                range, farHeight / 2, farWidth / 2, range, -farHeight / 2, farWidth / 2,
-                range, -farHeight / 2, farWidth / 2, range, -farHeight / 2, -farWidth / 2,
-                range, -farHeight / 2, -farWidth / 2, range, farHeight / 2, -farWidth / 2
+                0, 0, 0, displayRange, farHeight / 2, -farWidth / 2,
+                0, 0, 0, displayRange, -farHeight / 2, -farWidth / 2,
+                0, 0, 0, displayRange, -farHeight / 2, farWidth / 2,
+                0, 0, 0, displayRange, farHeight / 2, farWidth / 2,
+                displayRange, farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, farWidth / 2,
+                displayRange, farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, farWidth / 2,
+                displayRange, -farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, -farWidth / 2,
+                displayRange, -farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, -farWidth / 2
               ];
               const edgeGeometry = new THREE.BufferGeometry();
               edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgeVertices, 3));
@@ -2421,11 +2785,7 @@ export default function SecurityPlanner() {
       }
     });
 
-    // Update camera target and position
-    state.target.set(canvasSize.width / 2, 0, canvasSize.height / 2);
-    if (state.orbit) {
-      state.orbit.distance = Math.max(canvasSize.width, canvasSize.height) * 0.85;
-    }
+    // Update camera position from existing orbit state (preserve user's view)
     if (state.orbit) {
       const { azimuth, polar, distance } = state.orbit;
       const x = state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance;
@@ -2586,17 +2946,16 @@ export default function SecurityPlanner() {
     if (sceneBackgroundImg) {
       new THREE.TextureLoader().load(sceneBackgroundImg, (texture) => {
         texture.colorSpace = THREE.SRGBColorSpace;
+
+        // Always keep background dark/hidden as requested
+        scene.background = new THREE.Color("#09090b");
+
+        // Use image for lighting (Reflections) if it's a panorama
         if (backgroundMode === 'panorama') {
           texture.mapping = THREE.EquirectangularReflectionMapping;
-        } else {
-          texture.mapping = THREE.UVMapping;
-        }
-        scene.background = texture;
-        // Set environment for reflections if using panorama
-        if (backgroundMode === 'panorama') {
           scene.environment = texture;
         } else {
-          // Use RoomEnvironment for flat/missing backgrounds to support PBR (fix black cars)
+          // Fallback to Studio Lighting for flat images
           const pmremGenerator = new THREE.PMREMGenerator(renderer);
           scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
           pmremGenerator.dispose();
@@ -2862,7 +3221,7 @@ export default function SecurityPlanner() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMappingExposure = 1.3;
     container.appendChild(renderer.domElement);
 
     // Scene setup with improved atmosphere
@@ -2878,11 +3237,11 @@ export default function SecurityPlanner() {
     // Raycaster for 3D selection and placement
     const raycaster = new THREE.Raycaster();
 
-    // Improved lighting setup
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
+    // Improved lighting setup: Hemisphere for nice gradients + Strong Solar Directional Light
+    const hemiLight = new THREE.HemisphereLight(0xddeeff, 0x202020, 0.6);
+    scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    const dirLight = new THREE.DirectionalLight(0xfffee0, 2.0);
     dirLight.position.set(50, 100, 50);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.width = 2048;
@@ -3000,6 +3359,48 @@ export default function SecurityPlanner() {
         return;
       }
 
+      // Middle-click or Space+click = Pan (Google Earth style - camera-relative)
+      if (event.button === 1 || isSpacePressedRef.current) {
+        event.preventDefault();
+        const start = { x: event.clientX, y: event.clientY };
+        const moveHandler = (moveEvent: PointerEvent) => {
+          const dx = moveEvent.clientX - start.x;
+          const dy = moveEvent.clientY - start.y;
+          start.x = moveEvent.clientX;
+          start.y = moveEvent.clientY;
+
+          // Google Earth-style pan: move along camera's local right and forward vectors
+          // projected onto the ground plane (Y=0)
+          const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
+
+          // Get camera's right vector (for horizontal drag)
+          const right = new THREE.Vector3();
+          camera.getWorldDirection(new THREE.Vector3());
+          right.setFromMatrixColumn(camera.matrixWorld, 0); // X axis = right
+          right.y = 0; // Project onto ground plane
+          right.normalize();
+
+          // Get camera's forward vector projected onto ground (for vertical drag)
+          const forward = new THREE.Vector3();
+          camera.getWorldDirection(forward);
+          forward.y = 0; // Project onto ground plane
+          forward.normalize();
+
+          // Apply movement: world follows mouse (grab-and-drag)
+          state.target.x += -right.x * dx * panScale + forward.x * dy * panScale;
+          state.target.z += -right.z * dx * panScale + forward.z * dy * panScale;
+
+          updateCamera();
+        };
+        const upHandler = () => {
+          window.removeEventListener("pointermove", moveHandler);
+          window.removeEventListener("pointerup", upHandler);
+        };
+        window.addEventListener("pointermove", moveHandler);
+        window.addEventListener("pointerup", upHandler);
+        return;
+      }
+
       // Terrain Edit Mode (Selection Logic)
       if (isTerrainModeRef.current) {
         raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
@@ -3089,47 +3490,7 @@ export default function SecurityPlanner() {
       // I'll replace lines 2900 
 
 
-      // Middle-click or Space+click = Pan (Google Earth style - camera-relative)
-      if (event.button === 1 || isSpacePressedRef.current) {
-        event.preventDefault();
-        const start = { x: event.clientX, y: event.clientY };
-        const moveHandler = (moveEvent: PointerEvent) => {
-          const dx = moveEvent.clientX - start.x;
-          const dy = moveEvent.clientY - start.y;
-          start.x = moveEvent.clientX;
-          start.y = moveEvent.clientY;
 
-          // Google Earth-style pan: move along camera's local right and forward vectors
-          // projected onto the ground plane (Y=0)
-          const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
-
-          // Get camera's right vector (for horizontal drag)
-          const right = new THREE.Vector3();
-          camera.getWorldDirection(new THREE.Vector3());
-          right.setFromMatrixColumn(camera.matrixWorld, 0); // X axis = right
-          right.y = 0; // Project onto ground plane
-          right.normalize();
-
-          // Get camera's forward vector projected onto ground (for vertical drag)
-          const forward = new THREE.Vector3();
-          camera.getWorldDirection(forward);
-          forward.y = 0; // Project onto ground plane
-          forward.normalize();
-
-          // Apply movement: world follows mouse (grab-and-drag)
-          state.target.x += -right.x * dx * panScale + forward.x * dy * panScale;
-          state.target.z += -right.z * dx * panScale + forward.z * dy * panScale;
-
-          updateCamera();
-        };
-        const upHandler = () => {
-          window.removeEventListener("pointermove", moveHandler);
-          window.removeEventListener("pointerup", upHandler);
-        };
-        window.addEventListener("pointermove", moveHandler);
-        window.addEventListener("pointerup", upHandler);
-        return;
-      }
 
       // Left-click handling
       if (event.button === 0) {
@@ -3402,7 +3763,7 @@ export default function SecurityPlanner() {
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       // FIXED: Scroll up (negative deltaY) = zoom in (larger zoom value)
-      const nextZoom = clamp(state.zoom * (event.deltaY < 0 ? 1.1 : 0.9), 0.4, 3.5);
+      const nextZoom = clamp(state.zoom * (event.deltaY < 0 ? 1.1 : 0.9), 0.1, 20.0);
       state.zoom = nextZoom;
       camera.zoom = state.zoom;
       camera.updateProjectionMatrix();
@@ -3858,7 +4219,7 @@ export default function SecurityPlanner() {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
       const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-      updateItem(interactionState.itemId, { rotation: angle });
+      updateItem(interactionState.itemId, { rotation: angle + 90 });
     } else if (interactionState.type === "fov" && item.type === "camera") {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
@@ -4192,6 +4553,8 @@ export default function SecurityPlanner() {
             <Layers className="w-5 h-5" />
           </button>
 
+
+
           {viewMode === "iso3d" && (
             <div className="relative group">
               <button
@@ -4220,9 +4583,14 @@ export default function SecurityPlanner() {
                         <div className="space-y-1">
                           <label className="text-[10px] uppercase font-bold text-slate-400">Presets</label>
                           <div className="flex gap-2">
-                            <button onClick={() => setSelectionHeight(0)} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Flatten (0)</button>
-                            <button onClick={() => setSelectionHeight(40)} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Plateau (40)</button>
+                            <button onClick={() => { const next = applyRamp('x'); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/30 rounded text-xs font-medium text-emerald-300 transition-colors">Ramp X</button>
+                            <button onClick={() => { const next = applyRamp('z'); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/30 rounded text-xs font-medium text-emerald-300 transition-colors">Ramp Z</button>
+                            <button onClick={() => { const next = applySmooth(); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/30 rounded text-xs font-medium text-blue-300 transition-colors">Smooth</button>
                           </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => { const next = setSelectionHeight(0); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Flatten (0)</button>
+                          <button onClick={() => { const next = setSelectionHeight(40); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Plateau (40)</button>
                         </div>
 
                         <div className="space-y-1">
@@ -4232,14 +4600,15 @@ export default function SecurityPlanner() {
                           </div>
                           <input
                             type="range"
-                            min="0" max="200" step="10"
+                            min="-100" max="200" step="10"
                             value={selectionHeight}
                             className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                             onChange={(e) => setSelectionHeight(parseInt(e.target.value))}
                             onPointerDown={(e) => e.stopPropagation()}
+                            onPointerUp={(e) => { e.stopPropagation(); saveHistory(undefined, terrainHeights); }}
                           />
                           <div className="flex justify-between text-[9px] text-slate-500 font-medium">
-                            <span>0</span>
+                            <span>-100</span>
                             <span>200</span>
                           </div>
                         </div>
@@ -4300,6 +4669,10 @@ export default function SecurityPlanner() {
           <input type="file" ref={projectInputRef} className="hidden" accept=".json" onChange={handleLoadProject} />
           <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
 
+          <button onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
+            <LayoutGrid className="w-4 h-4" />
+            <span>NVR</span>
+          </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <Upload className="w-4 h-4" />
             <span>Map</span>
@@ -4470,6 +4843,23 @@ export default function SecurityPlanner() {
                               {(b as BuildingItem).label}
                             </text>
                           )}
+                          {isSelected && (
+                            <g className="cursor-alias">
+                              <line x1="0" y1={-b.height / 2} x2="0" y2={-b.height / 2 - 25} stroke="#3b82f6" strokeWidth="2" />
+                              <circle
+                                cx="0"
+                                cy={-b.height / 2 - 25}
+                                r="6"
+                                fill="#fff"
+                                stroke="#3b82f6"
+                                strokeWidth="2"
+                                onMouseDown={e => {
+                                  e.stopPropagation();
+                                  handleMouseDown(e, b.id, "rotate");
+                                }}
+                              />
+                            </g>
+                          )}
                         </g>
                       );
                     }
@@ -4479,7 +4869,7 @@ export default function SecurityPlanner() {
                       return (
                         <g
                           key={t.id}
-                          transform={`translate(${t.x}, ${t.y})`}
+                          transform={`translate(${t.x}, ${t.y}) rotate(${t.rotation})`}
                           onMouseDown={e => handleMouseDown(e, t.id, "move")}
                           onClick={e => e.stopPropagation()}
                           className="cursor-move"
@@ -4492,6 +4882,23 @@ export default function SecurityPlanner() {
                             stroke={isSelected ? "#3b82f6" : t.color}
                             strokeWidth={isSelected ? 3 : 0}
                           />
+                          {isSelected && (
+                            <g className="cursor-alias">
+                              <line x1="0" y1={-t.radius} x2="0" y2={-t.radius - 20} stroke="#3b82f6" strokeWidth="2" />
+                              <circle
+                                cx="0"
+                                cy={-t.radius - 20}
+                                r="6"
+                                fill="#fff"
+                                stroke="#3b82f6"
+                                strokeWidth="2"
+                                onMouseDown={e => {
+                                  e.stopPropagation();
+                                  handleMouseDown(e, t.id, "rotate");
+                                }}
+                              />
+                            </g>
+                          )}
                           <circle r={t.radius * 0.5} fill="black" fillOpacity="0.1" />
                         </g>
                       );
@@ -4543,6 +4950,23 @@ export default function SecurityPlanner() {
                               filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none"
                             }}
                           />
+                          {isSelected && (
+                            <g className="cursor-alias">
+                              <line x1="0" y1={-img.height / 2} x2="0" y2={-img.height / 2 - 25} stroke="#3b82f6" strokeWidth="2" />
+                              <circle
+                                cx="0"
+                                cy={-img.height / 2 - 25}
+                                r="6"
+                                fill="#fff"
+                                stroke="#3b82f6"
+                                strokeWidth="2"
+                                onMouseDown={e => {
+                                  e.stopPropagation();
+                                  handleMouseDown(e, img.id, "rotate");
+                                }}
+                              />
+                            </g>
+                          )}
                         </g>
                       );
                     }
@@ -4855,13 +5279,13 @@ export default function SecurityPlanner() {
                   })}
                 </g>
               </svg>
-            ) : (
+            ) : viewMode === "iso3d" ? (
               <div
                 className="relative flex-1"
                 style={{ minWidth: canvasSize.width, minHeight: canvasSize.height }}
               >
                 <div ref={threeContainerRef} className="absolute inset-0" />
-                <div className="absolute top-24 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-30 pointer-events-none">
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-30 pointer-events-none">
                   <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-300 shadow border border-white/10 pointer-events-auto">
                     Drag to pan · Right-click to rotate · Scroll to zoom
                   </div>
@@ -4898,6 +5322,71 @@ export default function SecurityPlanner() {
                       Reset View
                     </button>
                   </div>
+                </div>
+              </div>
+            ) : (
+              <div className="relative bg-zinc-950 flex flex-col overflow-auto" style={{ width: canvasSize.width, height: canvasSize.height }}>
+                <div className="w-full h-full p-4 overflow-auto custom-scrollbar">
+                  {items.filter(i => i.type === 'camera').length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                      <LayoutGrid className="w-12 h-12 mb-4 opacity-20" />
+                      <p>No cameras found. Add cameras to see NVR view.</p>
+                    </div>
+                  ) : (
+                    <>
+                      {/* @ts-ignore */}
+                      <GridLayout
+                        className="layout"
+                        layout={nvrLayout}
+                        cols={12}
+                        rowHeight={120}
+                        width={canvasSize.width - 32}
+                        onLayoutChange={onLayoutChange}
+                        isDraggable={viewMode === 'nvr'}
+                        isResizable={viewMode === 'nvr'}
+                        draggableCancel=".no-drag"
+                        margin={[16, 16]}
+                      >
+                        {items.filter(i => i.type === 'camera').map(cam => (
+                          <div key={cam.id} className="relative group">
+                            <NVRCard
+                              camera={cam as CameraItem}
+                              renderFn={renderCameraViewToDataUrl}
+                              onMaximize={() => setMaximizedCamId(cam.id)}
+                              onExport={() => addCameraViewToExportList(cam as CameraItem)}
+                            />
+                          </div>
+                        ))}
+                      </GridLayout>
+                      {maximizedCamId && (
+                        <div className="absolute inset-0 z-50 bg-black flex flex-col animate-in fade-in duration-200">
+                          {(() => {
+                            const cam = items.find(i => i.id === maximizedCamId);
+                            if (!cam) return null;
+                            return (
+                              <>
+                                <div className="flex items-center justify-between p-4 bg-zinc-900 border-b border-white/10 shrink-0">
+                                  <div className="flex items-center gap-3">
+                                    <Camera className="w-5 h-5 text-emerald-400" />
+                                    <span className="font-bold text-slate-200 text-lg">{cam.label}</span>
+                                    <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono font-bold border border-red-500/30">LIVE</span>
+                                  </div>
+                                  <button onClick={() => setMaximizedCamId(null)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors">
+                                    <Minimize className="w-5 h-5" />
+                                  </button>
+                                </div>
+                                <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
+                                  <div className="w-full h-full relative">
+                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} isMaximized={true} />
+                                  </div>
+                                </div>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -4964,7 +5453,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && (
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && (
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
@@ -5038,6 +5527,82 @@ export default function SecurityPlanner() {
                           : updateItem(selectedItem.id, { height: parseInt(e.target.value) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {selectedItem.type === "parking" && (
+                <div className="space-y-4 mt-4">
+                  {/* Vehicle Type Selector */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Vehicle Type</label>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(['sedan', 'suv', 'truck', 'sports', 'van', 'motorcycle'] as const).map(type => (
+                        <button
+                          key={type}
+                          onClick={() => updateItem(selectedItem.id, { vehicleType: type })}
+                          className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${((selectedItem as ParkingItem).vehicleType ?? 'sedan') === type
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                        >
+                          {type === 'sedan' ? '🚗' : type === 'suv' ? '🚙' : type === 'truck' ? '🛻' : type === 'sports' ? '🏎️' : type === 'van' ? '🚐' : '🏍️'} {type}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Vehicle Colors */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Color</label>
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        '#1f2937', '#374151', '#6b7280', '#f3f4f6', // Grays
+                        '#dc2626', '#ef4444', '#f97316', '#f59e0b', // Reds/Oranges
+                        '#84cc16', '#22c55e', '#10b981', '#14b8a6', // Greens
+                        '#0891b2', '#0ea5e9', '#3b82f6', '#6366f1', // Blues
+                        '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', // Purples/Pinks
+                        '#78350f', '#92400e', '#854d0e', '#fbbf24', // Browns/Golds
+                      ].map(color => (
+                        <button
+                          key={color}
+                          onClick={() => updateItem(selectedItem.id, { color })}
+                          className={`w-6 h-6 rounded-full border-2 transition-transform hover:scale-110 ${(selectedItem as ParkingItem).color === color ? 'border-white scale-110' : 'border-transparent'
+                            }`}
+                          style={{ backgroundColor: color }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Rotation Quick Buttons */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Rotation</span>
+                      <span>{(selectedItem as ParkingItem).rotation}°</span>
+                    </label>
+                    <div className="flex gap-1">
+                      {[0, 45, 90, 135, 180, 225, 270, 315].map(angle => (
+                        <button
+                          key={angle}
+                          onClick={() => updateItem(selectedItem.id, { rotation: angle })}
+                          className={`flex-1 py-1 text-xs rounded transition-colors ${(selectedItem as ParkingItem).rotation === angle
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                        >
+                          {angle}°
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      value={(selectedItem as ParkingItem).rotation}
+                      onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
                     />
                   </div>
                 </div>
@@ -5160,16 +5725,74 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "tree" && (
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Canopy Size</label>
-                  <input
-                    type="range"
-                    min="10"
-                    max="100"
-                    value={(selectedItem as TreeItem).radius}
-                    onChange={e => updateItem(selectedItem.id, { radius: parseInt(e.target.value) })}
-                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                  />
+                <div className="space-y-4">
+                  {/* Tree Type Selector */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Tree Type</label>
+                    <div className="grid grid-cols-4 gap-1">
+                      {(['deciduous', 'conifer', 'palm', 'bush'] as const).map(type => (
+                        <button
+                          key={type}
+                          onClick={() => updateItem(selectedItem.id, { treeType: type })}
+                          className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${((selectedItem as TreeItem).treeType ?? 'deciduous') === type
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                        >
+                          {type === 'deciduous' ? '🌳' : type === 'conifer' ? '🌲' : type === 'palm' ? '🌴' : '🌿'} {type}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Height Slider */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Height</span>
+                      <span>{(selectedItem as TreeItem).height ?? 30}</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="5"
+                      max="300"
+                      value={(selectedItem as TreeItem).height ?? 30}
+                      onChange={e => updateItem(selectedItem.id, { height: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  {/* Width Multiplier Slider */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Canopy Width</span>
+                      <span>{((selectedItem as TreeItem).width ?? 1).toFixed(1)}x</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2.5"
+                      step="0.1"
+                      value={(selectedItem as TreeItem).width ?? 1}
+                      onChange={e => updateItem(selectedItem.id, { width: parseFloat(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  {/* Canopy Size (Radius) Slider */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Canopy Size</span>
+                      <span>{(selectedItem as TreeItem).radius}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
+                      value={(selectedItem as TreeItem).radius}
+                      onChange={e => updateItem(selectedItem.id, { radius: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
                 </div>
               )}
 
@@ -5432,7 +6055,7 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
-              {selectedItem.type !== "image" && COLORS[selectedItem.type as keyof typeof COLORS] && (
+              {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Color Code</label>
                   <div className="flex flex-wrap gap-2">
@@ -5786,3 +6409,80 @@ export default function SecurityPlanner() {
     </div>
   );
 }
+
+const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized }: { camera: CameraItem, renderFn: (c: CameraItem) => string, onMaximize?: () => void, onExport?: () => void, isMaximized?: boolean }) => {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    const tid = setTimeout(() => {
+      setSrc(renderFn(camera));
+    }, 10);
+    return () => clearTimeout(tid);
+  }, [camera, renderFn]);
+
+  const handleDownload = () => {
+    if (!src) return;
+    const link = document.createElement("a");
+    link.href = src;
+    link.download = `nvr_snapshot_${camera.label}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  return (
+    <div className={`w-full h-full bg-zinc-900/90 backdrop-blur-xl rounded-xl overflow-hidden border border-white/10 relative group shadow-2xl flex flex-col ${isMaximized ? '' : 'hover:ring-1 hover:ring-indigo-500 ring-1 ring-black/50'}`}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5 shrink-0">
+        <div className="flex items-center gap-2">
+          <Camera className="w-4 h-4 text-emerald-400" />
+          <span className="text-sm font-medium text-slate-200 truncate">{camera.label}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5 bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/30">
+            <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
+            <span className="text-[10px] text-red-400 font-bold tracking-tight">LIVE</span>
+          </div>
+          {!isMaximized && onMaximize && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onMaximize(); }}
+              className="no-drag text-slate-400 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
+              title="Expand View"
+              onMouseDown={e => e.stopPropagation()}
+            >
+              <Maximize className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Camera View */}
+      <div className="flex-1 relative overflow-hidden bg-slate-800">
+        {src ? (
+          <img src={src} className="w-full h-full object-cover select-none" draggable={false} />
+        ) : (
+          <div className="animate-pulse bg-zinc-800 w-full h-full flex items-center justify-center opacity-50">
+            <LayoutGrid className="w-8 h-8" />
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between border-t border-white/5 shrink-0">
+        <div className="flex gap-3">
+          <span>H-FOV: {(camera.hFov ?? camera.fov).toFixed(0)}°</span>
+          <span>V-FOV: {(camera.vFov ?? 45).toFixed(0)}°</span>
+        </div>
+        <button
+          onClick={(e) => { e.stopPropagation(); onExport?.(); }}
+          className="no-drag px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1 transition-colors"
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <Plus className="w-3 h-3" />
+          + Export
+        </button>
+      </div>
+    </div>
+  );
+};
+
