@@ -1323,7 +1323,7 @@ export default function SecurityPlanner() {
   };
 
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
-    setItems(items.map(item => (item.id === id ? { ...item, ...updates } : item)));
+    setItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)));
   };
 
   const updateCameraMount = (cameraId: string, updates: Partial<NonNullable<CameraItem["mount"]>>) => {
@@ -1412,8 +1412,8 @@ export default function SecurityPlanner() {
   };
 
   const deleteItem = (id: string) => {
-    setItems(items.filter(i => i.id !== id));
-    if (selectedId === id) setSelectedId(null);
+    setItems(prev => prev.filter(i => i.id !== id));
+    setSelectedId(prev => (prev === id ? null : prev));
   };
 
   const handleClearCanvas = () => {
