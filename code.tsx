@@ -2038,7 +2038,7 @@ export default function SecurityPlanner() {
         threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
         group.add(mesh);
 
-        // Building roof (slightly darker)
+        // Building roof (child of mesh for grouped transforms)
         const roofMaterial = new THREE.MeshStandardMaterial({
           color: adjustColor(building.color, -20),
           roughness: 0.7,
@@ -2047,17 +2047,20 @@ export default function SecurityPlanner() {
         const roofShape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
         const roofGeometry = new THREE.ShapeGeometry(roofShape);
         roofGeometry.rotateX(-Math.PI / 2);
+
         const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-        roof.position.set(building.x, buildingHeight + 0.1, building.y);
-        roof.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
+        roof.position.set(0, buildingHeight, 0); // Local space
+        roof.name = "building-roof";
+        roof.userData.itemId = building.id;
+        roof.userData.isRoof = true;
         roof.receiveShadow = true;
-        group.add(roof);
+        mesh.add(roof);
 
         // Building label
         const label = createTextSprite(building.label);
         if (label) {
-          label.position.set(building.x, buildingHeight + 15, building.y);
-          group.add(label);
+          label.position.set(0, buildingHeight + 15, 0);
+          mesh.add(label);
         }
       }
 
@@ -2602,55 +2605,49 @@ export default function SecurityPlanner() {
         }
       });
 
-      // 3. Add Height Handle if active and building
+      // 3. Add Corner Handles for Height Adjustment
       if (active) {
         const item = items.find(i => i.id === id);
         if (item && item.type === "building") {
-          // Create Green Cone Handle
-          const info = createHeightHandle(obj, id);
-          if (info) obj.add(info);
+          createCornerHandles(obj, item as BuildingItem);
         }
       }
     };
 
-    const createHeightHandle = (obj: THREE.Object3D, id: string) => {
-      // Find the mesh to get bounding box
-      let mesh: THREE.Mesh | null = null;
-      obj.traverse(c => {
-        if (c instanceof THREE.Mesh && !mesh) mesh = c;
+    const createCornerHandles = (obj: THREE.Object3D, building: BuildingItem) => {
+      const roof = obj.getObjectByName("building-roof") as THREE.Mesh;
+      if (!roof) return;
+
+      const points = building.points || [];
+      if (points.length === 0) return; // Should have points if valid building
+
+      // Clean old
+      const oldGroup = roof.getObjectByName("corner-handles_group");
+      if (oldGroup) roof.remove(oldGroup);
+
+      const group = new THREE.Group();
+      group.name = "corner-handles_group";
+
+      points.forEach(p => {
+        const geometry = new THREE.BoxGeometry(5, 5, 5);
+        const material = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          toneMapped: false,
+          depthTest: false,
+          transparent: true,
+          opacity: 0.9
+        });
+        const handle = new THREE.Mesh(geometry, material);
+        // Position relative to Roof (Local Space where Y is up relative to Wall Geom, but Roof Geom is Rotated)
+        // Based on previous analysis: p.x, 0, p.y maps correctly to corner
+        handle.position.set(p.x, 0, p.y);
+        handle.name = "height-corner-handle";
+        handle.userData.itemId = building.id;
+        handle.userData.isHandle = true;
+        group.add(handle);
       });
 
-      if (!mesh) return null;
-
-      const targetMesh = mesh as THREE.Mesh;
-      if (!targetMesh.geometry.boundingBox) targetMesh.geometry.computeBoundingBox();
-      const bbox = targetMesh.geometry.boundingBox;
-      if (!bbox) return null;
-
-      const center = new THREE.Vector3();
-      bbox.getCenter(center);
-      const topZ = bbox.max.z;
-
-      const geometry = new THREE.ConeGeometry(6, 18, 16);
-      const material = new THREE.MeshBasicMaterial({
-        color: 0x10b981,
-        depthTest: false,
-        transparent: true,
-        opacity: 0.9,
-        toneMapped: false
-      });
-      const handle = new THREE.Mesh(geometry, material);
-      handle.name = "height-handle";
-
-      // Position
-      handle.position.set(center.x, center.y, topZ + 12);
-      handle.rotation.x = Math.PI / 2;
-
-      // CRITICAL: Add userData for Raycasting
-      handle.userData.itemId = id;
-      handle.userData.isHandle = true;
-
-      return handle;
+      roof.add(group);
     };
 
     // Update all objects
@@ -2662,7 +2659,6 @@ export default function SecurityPlanner() {
     const handlePointerMove = (e: PointerEvent) => {
       if (!threeStateRef.current) return;
 
-      // Local helper for NDC
       const rect = threeStateRef.current.renderer.domElement.getBoundingClientRect();
       const ndc = {
         x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -2673,9 +2669,13 @@ export default function SecurityPlanner() {
       raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), threeStateRef.current.camera);
       const intersects = raycaster.intersectObjects(threeStateRef.current.scene.children, true);
 
-      const hitHandle = intersects.find(h => h.object.name === "height-handle");
-      if (hitHandle) {
+      // Check for Corner Handle
+      const hitHandle = intersects.find(h => h.object.name === "height-corner-handle");
+
+      if (hitHandle && hitHandle.object.userData.itemId === selectedId) {
         document.body.style.cursor = "ns-resize";
+        // Optional: Highlight the specific handle?
+        // hitHandle.object.material.color.set(0x...);
       } else {
         document.body.style.cursor = "default";
       }
@@ -2989,17 +2989,14 @@ export default function SecurityPlanner() {
           // Get the clicked item's current position
           const clickedItem = itemsRef.current.find(i => i.id === clickedItemId);
 
-          // Check for Height Handle interaction
+          // Check for Corner Handle Interaction (Height Resize)
           let isResizingHeight = false;
           raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
           const intersects = raycaster.intersectObjects(group.children, true);
           const hit = intersects.find(h => {
-            // Verify it belongs to clicked item
-            let p = h.object;
-            while (p) { if (p.userData.itemId === clickedItemId) return true; p = p.parent; }
-            return false;
+            return h.object.name === "height-corner-handle" && h.object.userData.itemId === clickedItemId;
           });
-          if (hit && hit.object.name === "height-handle") {
+          if (hit) {
             isResizingHeight = true;
           }
 
