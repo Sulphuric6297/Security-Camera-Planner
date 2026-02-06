@@ -2539,12 +2539,14 @@ export default function SecurityPlanner() {
   }, [sceneBackgroundImg, backgroundMode]);
 
 
-  // Refs for 3D interaction state
+  // Refs for 3D interaction state - enhanced for "local drag" pattern
   const threeDragStateRef = useRef<{
     isDragging: boolean;
     itemId: string | null;
-    startPos: { x: number; z: number } | null;
-  }>({ isDragging: false, itemId: null, startPos: null });
+    startPos: { x: number; z: number } | null;  // Starting raycast position
+    originalItemPos: { x: number; y: number } | null;  // Original item position at drag start
+    accumulatedOffset: { x: number; z: number };  // Accumulated offset for smooth dragging
+  }>({ isDragging: false, itemId: null, startPos: null, originalItemPos: null, accumulatedOffset: { x: 0, z: 0 } });
 
   // Refs to track current items and mode in 3D event handlers
   const itemsRef = useRef(items);
@@ -2851,46 +2853,93 @@ export default function SecurityPlanner() {
         if (clickedItemId) {
           setSelectedId(clickedItemId);
 
-          // Start dragging if clicking on already selected item, or just select
+          // Get the clicked item's current position
+          const clickedItem = itemsRef.current.find(i => i.id === clickedItemId);
           const groundPos = raycastToGround(ndc);
-          if (groundPos) {
+
+          if (groundPos && clickedItem) {
+            // Initialize drag state with original item position
             threeDragStateRef.current = {
               isDragging: true,
               itemId: clickedItemId,
-              startPos: groundPos
+              startPos: groundPos,
+              originalItemPos: { x: clickedItem.x, y: clickedItem.y },
+              accumulatedOffset: { x: 0, z: 0 }
             };
           }
 
           const moveHandler = (moveEvent: PointerEvent) => {
-            if (!threeDragStateRef.current.isDragging || !threeDragStateRef.current.itemId) return;
+            const dragState = threeDragStateRef.current;
+            if (!dragState.isDragging || !dragState.itemId || !dragState.startPos || !dragState.originalItemPos) return;
 
             const moveNdc = getNDC(moveEvent);
             const newGroundPos = raycastToGround(moveNdc);
-            if (!newGroundPos || !threeDragStateRef.current.startPos) return;
+            if (!newGroundPos) return;
 
-            const dx = newGroundPos.x - threeDragStateRef.current.startPos.x;
-            const dz = newGroundPos.z - threeDragStateRef.current.startPos.z;
+            // Calculate delta from ORIGINAL start position (not accumulated)
+            const totalDx = newGroundPos.x - dragState.startPos.x;
+            const totalDz = newGroundPos.z - dragState.startPos.z;
 
-            // Update the item position
-            const dragItemId = threeDragStateRef.current.itemId;
-            setItems(prev => prev.map(item => {
-              if (item.id === dragItemId) {
-                // Snap to grid
-                const newX = Math.round((item.x + dx) / gridSize) * gridSize;
-                const newY = Math.round((item.y + dz) / gridSize) * gridSize;
-                return { ...item, x: newX, y: newY };
+            // Update accumulated offset
+            dragState.accumulatedOffset = { x: totalDx, z: totalDz };
+
+            // Calculate new position from original + offset (with grid snapping)
+            const newX = Math.round((dragState.originalItemPos.x + totalDx) / gridSize) * gridSize;
+            const newY = Math.round((dragState.originalItemPos.y + totalDz) / gridSize) * gridSize;
+
+            // "Local Drag" pattern: Update Three.js mesh directly for smooth 60fps performance
+            // Do NOT update React state here - that causes lag
+            const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
+            if (cachedObj) {
+              // Find the item type to determine correct positioning
+              const itemType = itemsRef.current.find(i => i.id === dragState.itemId)?.type;
+
+              if (itemType === "camera") {
+                // Camera uses getCameraPlanPosition which we need to handle specially
+                // For now, just update position directly
+                const item = itemsRef.current.find(i => i.id === dragState.itemId) as CameraItem | undefined;
+                const camHeight = item?.mount?.height ?? item?.height ?? 10;
+                cachedObj.position.set(newX, camHeight, newY);
+              } else if (itemType === "tree" || itemType === "parking" || itemType === "building") {
+                cachedObj.position.set(newX, 0, newY);
+              } else if (itemType === "image") {
+                cachedObj.position.set(newX, 0.25, newY);
+              } else if (itemType === "label") {
+                cachedObj.position.set(newX, 8, newY);
               }
-              return item;
-            }));
 
-            threeDragStateRef.current.startPos = newGroundPos;
+              // Render immediately for smooth visual feedback
+              state.renderer.render(state.scene, state.camera);
+            }
           };
 
           const upHandler = () => {
-            if (threeDragStateRef.current.isDragging) {
+            const dragState = threeDragStateRef.current;
+
+            if (dragState.isDragging && dragState.itemId && dragState.originalItemPos) {
+              // Now commit the final position to React state (single update)
+              const finalX = Math.round((dragState.originalItemPos.x + dragState.accumulatedOffset.x) / gridSize) * gridSize;
+              const finalY = Math.round((dragState.originalItemPos.y + dragState.accumulatedOffset.z) / gridSize) * gridSize;
+              const dragItemId = dragState.itemId;
+
+              setItems(prev => prev.map(item => {
+                if (item.id === dragItemId) {
+                  return { ...item, x: finalX, y: finalY };
+                }
+                return item;
+              }));
+
               setTimeout(() => saveHistory(), 50);
             }
-            threeDragStateRef.current = { isDragging: false, itemId: null, startPos: null };
+
+            // Reset drag state
+            threeDragStateRef.current = {
+              isDragging: false,
+              itemId: null,
+              startPos: null,
+              originalItemPos: null,
+              accumulatedOffset: { x: 0, z: 0 }
+            };
             window.removeEventListener("pointermove", moveHandler);
             window.removeEventListener("pointerup", upHandler);
           };
