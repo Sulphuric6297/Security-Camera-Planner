@@ -603,6 +603,20 @@ export default function SecurityPlanner() {
     size: { width: number; height: number };
     orbit?: { azimuth: number; polar: number; distance: number };
   } | null>(null);
+
+  // 3D Object cache for differential updates (avoid full scene rebuilds)
+  const threeObjectCacheRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  // Cache for static scene elements (ground, grid, boundary) that don't need rebuilding
+  const threeStaticElementsRef = useRef<THREE.Object3D[]>([]);
+  // Previous items state for diffing
+  const prevItemsRef = useRef<CanvasItem[]>([]);
+
+  // Camera preview renderer cache (prevent memory leaks from frequent recreation)
+  const cameraPreviewRendererRef = useRef<{
+    renderer: THREE.WebGLRenderer | null;
+    pmremGenerator: THREE.PMREMGenerator | null;
+    envTexture: THREE.Texture | null;
+  }>({ renderer: null, pmremGenerator: null, envTexture: null });
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
@@ -1783,11 +1797,115 @@ export default function SecurityPlanner() {
     return pathPoints;
   };
 
+  // Fast position-only update for 3D objects (used during dragging to avoid full rebuilds)
+  const updateThreeScenePositions = () => {
+    const state = threeStateRef.current;
+    if (!state) return;
+
+    const cache = threeObjectCacheRef.current;
+    let needsRender = false;
+
+    items.forEach(item => {
+      const obj = cache.get(item.id);
+      if (!obj) return;
+
+      if (item.type === "building" || item.type === "parking") {
+        obj.position.set(item.x, 0, item.y);
+        obj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
+        needsRender = true;
+      } else if (item.type === "tree") {
+        const tree = item as TreeItem;
+        obj.position.set(tree.x, 0, tree.y);
+        needsRender = true;
+      } else if (item.type === "camera") {
+        const cam = item as CameraItem;
+        const camPos = getCameraPlanPosition(cam);
+        const camHeight = cam.mount?.height ?? cam.height ?? 10;
+        obj.position.set(camPos.x, camHeight, camPos.y);
+        obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
+        obj.rotation.x = THREE.MathUtils.degToRad(cam.pitch ?? 0);
+        needsRender = true;
+      } else if (item.type === "image") {
+        const img = item as ImageItem;
+        obj.position.set(img.x, 0.25, img.y);
+        obj.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        needsRender = true;
+      } else if (item.type === "label") {
+        obj.position.set(item.x, 8, item.y);
+        needsRender = true;
+      }
+    });
+
+    if (needsRender) {
+      state.renderer.render(state.scene, state.camera);
+    }
+  };
+
+  // Check if items have structural changes requiring full rebuild
+  const needsFullRebuild = (prev: CanvasItem[], next: CanvasItem[]): boolean => {
+    if (prev.length !== next.length) return true;
+
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+
+    // Check for added/removed items
+    for (const id of nextIds) {
+      if (!prevIds.has(id)) return true;
+    }
+    for (const id of prevIds) {
+      if (!nextIds.has(id)) return true;
+    }
+
+    // Check for type changes or significant property changes that require geometry rebuild
+    for (const nextItem of next) {
+      const prevItem = prev.find(p => p.id === nextItem.id);
+      if (!prevItem) return true;
+      if (prevItem.type !== nextItem.type) return true;
+
+      // For buildings, check if points/size changed (requires geometry rebuild)
+      if (nextItem.type === "building") {
+        const prevB = prevItem as BuildingItem;
+        const nextB = nextItem as BuildingItem;
+        if (prevB.width !== nextB.width || prevB.height !== nextB.height) return true;
+        if (JSON.stringify(prevB.points) !== JSON.stringify(nextB.points)) return true;
+        if (prevB.color !== nextB.color) return true;
+      }
+
+      // For trees, check radius change
+      if (nextItem.type === "tree") {
+        const prevT = prevItem as TreeItem;
+        const nextT = nextItem as TreeItem;
+        if (prevT.radius !== nextT.radius || prevT.color !== nextT.color) return true;
+      }
+
+      // For cameras, check if range/fov changed (frustum geometry)
+      if (nextItem.type === "camera") {
+        const prevC = prevItem as CameraItem;
+        const nextC = nextItem as CameraItem;
+        if (prevC.range !== nextC.range || prevC.fov !== nextC.fov || prevC.hFov !== nextC.hFov) return true;
+        if (prevC.color !== nextC.color) return true;
+      }
+    }
+
+    return false;
+  };
+
   const rebuildThreeScene = () => {
     const state = threeStateRef.current;
     if (!state) return;
 
     const { group, scene, renderer } = state;
+
+    // Check if we can do a fast position-only update
+    const prevItems = prevItemsRef.current;
+    if (prevItems.length > 0 && !needsFullRebuild(prevItems, items)) {
+      updateThreeScenePositions();
+      prevItemsRef.current = [...items];
+      return;
+    }
+
+    // Full rebuild needed - clear cache and group
+    threeObjectCacheRef.current.clear();
     disposeGroup(group);
 
     // Improved ground plane with subtle gradient effect
@@ -1826,7 +1944,7 @@ export default function SecurityPlanner() {
       })
     );
     canvasPlane.rotation.x = -Math.PI / 2;
-    canvasPlane.position.set(canvasSize.width / 2, 0.02, canvasSize.height / 2);
+    canvasPlane.position.set(canvasSize.width / 2, 0.05, canvasSize.height / 2); // Z-fighting fix: clear separation from ground
     canvasPlane.receiveShadow = true;
     group.add(canvasPlane);
 
@@ -1871,7 +1989,7 @@ export default function SecurityPlanner() {
       mapPlane.rotation.x = -Math.PI / 2;
       mapPlane.position.set(
         bgSettings.x + bgSettings.width / 2,
-        0.08,
+        0.15, // Z-fighting fix: above canvas plane
         bgSettings.y + bgSettings.height / 2
       );
       mapPlane.receiveShadow = true;
@@ -1915,7 +2033,8 @@ export default function SecurityPlanner() {
         mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        mesh.userData.itemId = building.id; // For raycasting selection
+        mesh.userData.itemId = building.id;
+        threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
         group.add(mesh);
 
         // Building roof (slightly darker)
@@ -1944,14 +2063,16 @@ export default function SecurityPlanner() {
       // Cars (Parking Items treated as cars)
       if (item.type === "parking") {
         const car = create3dCar(item as ParkingItem);
-        car.userData.itemId = item.id; // For raycasting selection
+        car.userData.itemId = item.id;
+        threeObjectCacheRef.current.set(item.id, car); // Cache for position updates
         group.add(car);
       }
 
       // Trees
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
-        tree.userData.itemId = item.id; // For raycasting selection
+        tree.userData.itemId = item.id;
+        threeObjectCacheRef.current.set(item.id, tree); // Cache for position updates
         group.add(tree);
       }
 
@@ -2007,9 +2128,14 @@ export default function SecurityPlanner() {
         cameraGroup.add(light);
 
         // Position and rotate camera body
+        // For a camera facing +X locally:
+        // - Y rotation controls azimuth (horizontal direction)
+        // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
         cameraGroup.position.set(cameraPos.x, cameraHeight, cameraPos.y);
+        cameraGroup.rotation.order = 'YXZ'; // Apply Y (azimuth) first, then X (pitch)
         cameraGroup.rotation.y = rotAngle;
-        cameraGroup.rotation.z = pitchRad;
+        cameraGroup.rotation.x = pitchRad; // Pitch: positive = look up, negative = look down
+        threeObjectCacheRef.current.set(cameraItem.id, cameraGroup); // Cache for position updates
         group.add(cameraGroup);
 
         // Mounting pole
@@ -2075,8 +2201,9 @@ export default function SecurityPlanner() {
 
               const frustumMesh = new THREE.Mesh(geometry, frustumMaterial);
               frustumMesh.position.set(cameraPos.x, cameraHeight, cameraPos.y);
+              frustumMesh.rotation.order = 'YXZ';
               frustumMesh.rotation.y = rotAngle;
-              frustumMesh.rotation.z = pitchRad;
+              frustumMesh.rotation.x = pitchRad;
               group.add(frustumMesh);
 
               const edgeVertices = [
@@ -2097,8 +2224,9 @@ export default function SecurityPlanner() {
                 opacity: frustumSettings.edgeOpacity
               }));
               edges.position.set(cameraPos.x, cameraHeight, cameraPos.y);
+              edges.rotation.order = 'YXZ';
               edges.rotation.y = rotAngle;
-              edges.rotation.z = pitchRad;
+              edges.rotation.x = pitchRad;
               group.add(edges);
             }
 
@@ -2122,7 +2250,7 @@ export default function SecurityPlanner() {
                 Math.sin(angles.v),
                 Math.cos(angles.v) * Math.sin(angles.h)
               ).normalize();
-              const euler = new THREE.Euler(0, rotAngle, pitchRad, 'YZX');
+              const euler = new THREE.Euler(pitchRad, rotAngle, 0, 'YXZ'); // Match camera rotation order
               localDir.applyEuler(euler);
               if (localDir.y < -0.01) {
                 const t = -cameraHeight / localDir.y;
@@ -2200,7 +2328,8 @@ export default function SecurityPlanner() {
         mesh.rotation.x = -Math.PI / 2;
         mesh.position.set(img.x, 0.25, img.y);
         mesh.rotation.z = THREE.MathUtils.degToRad(img.rotation);
-        mesh.userData.itemId = img.id; // For raycasting selection
+        mesh.userData.itemId = img.id;
+        threeObjectCacheRef.current.set(img.id, mesh); // Cache for position updates
         group.add(mesh);
       }
 
@@ -2210,7 +2339,8 @@ export default function SecurityPlanner() {
         const label = createTextSprite(labelItem.text);
         if (label) {
           label.position.set(labelItem.x, 8, labelItem.y);
-          label.userData.itemId = labelItem.id; // For raycasting selection
+          label.userData.itemId = labelItem.id;
+          threeObjectCacheRef.current.set(labelItem.id, label); // Cache for position updates
           group.add(label);
         }
       }
@@ -2230,6 +2360,9 @@ export default function SecurityPlanner() {
       state.camera.lookAt(state.target);
     }
     renderer.render(scene, state.camera);
+
+    // Update previous items ref for next diff comparison
+    prevItemsRef.current = [...items];
   };
 
   const handleCaptureSnapshot = () => {
@@ -2829,6 +2962,9 @@ export default function SecurityPlanner() {
       renderer.dispose();
       container.removeChild(renderer.domElement);
       threeStateRef.current = null;
+      // Clear object cache on cleanup
+      threeObjectCacheRef.current.clear();
+      prevItemsRef.current = [];
     };
   }, [canvasSize.height, canvasSize.width, viewMode]);
 
