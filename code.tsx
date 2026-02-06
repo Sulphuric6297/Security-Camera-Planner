@@ -68,6 +68,7 @@ interface BuildingItem extends BaseItem {
   type: "building";
   width: number;
   height: number;
+  wallHeight?: number; // Vertical height in 3D
   label: string;
   color: string;
   points?: { x: number; y: number }[];
@@ -2003,7 +2004,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const building = item as BuildingItem;
         const points = getBuildingPoints(building);
-        const buildingHeight = 60;
+        const buildingHeight = building.wallHeight ?? 60;
 
         // Create extruded building shape
         // IMPORTANT: Negate Y because rotateX(-PI/2) will negate it again, 
@@ -2547,6 +2548,10 @@ export default function SecurityPlanner() {
     itemId: string | null;
     dragOffset: { x: number; z: number } | null;
     originalItemPos?: { x: number; y: number };
+    interactionType?: "move" | "resize-height";
+    startHeight?: number;
+    startMouseY?: number;
+    currentHeight?: number;
   }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
@@ -2565,28 +2570,29 @@ export default function SecurityPlanner() {
     if (!scene || !cache) return;
 
     // Helper to Apply Highlight
-    const setHighlight = (obj: THREE.Object3D, active: boolean) => {
+    const setHighlight = (obj: THREE.Object3D, active: boolean, id: string) => {
+      // 1. Cleanup existing handles
+      const existing = obj.getObjectByName("height-handle");
+      if (existing) obj.remove(existing);
+
+      // 2. Emissive Glow Logic
       obj.traverse((child) => {
         if (child instanceof THREE.Mesh && child.material) {
-          // Handle single material or array
           const materials = Array.isArray(child.material) ? child.material : [child.material];
 
           materials.forEach(mat => {
             if ('emissive' in mat) {
-              // Save original emissive if not saved
               if (!child.userData.originalEmissive) {
                 child.userData.originalEmissive = mat.emissive.clone();
               }
 
               if (active) {
-                // Set glowing blue emissive
                 mat.emissive.setHex(0x4444ff);
                 mat.emissiveIntensity = 0.5;
               } else {
-                // Restore original
                 if (child.userData.originalEmissive) {
                   mat.emissive.copy(child.userData.originalEmissive);
-                  mat.emissiveIntensity = 1; // Default or saved
+                  mat.emissiveIntensity = 1;
                 } else {
                   mat.emissive.setHex(0x000000);
                 }
@@ -2595,11 +2601,45 @@ export default function SecurityPlanner() {
           });
         }
       });
+
+      // 3. Add Height Handle if active and building
+      if (active) {
+        const item = items.find(i => i.id === id);
+        if (item && item.type === "building") {
+          const building = item as BuildingItem;
+          const h = building.wallHeight ?? 60;
+
+          // Create Green Cone Handle
+          // Positions: at top of building.
+          const geometry = new THREE.ConeGeometry(5, 15, 8);
+          const material = new THREE.MeshBasicMaterial({
+            color: 0x10b981,
+            depthTest: false,
+            transparent: true,
+            opacity: 0.9,
+            toneMapped: false
+          });
+          const handle = new THREE.Mesh(geometry, material);
+          handle.name = "height-handle";
+
+          // ExtrudeGeometry is rotated X -90.
+          // Local Z is height. 
+          // Position at Z = h + offset. 
+          handle.position.set(0, 0, h + 10);
+
+          // Rotate Cone to point along Z?
+          // Cone default is Y-up.
+          // We want it pointing +Z?
+          handle.rotation.x = Math.PI / 2;
+
+          obj.add(handle);
+        }
+      }
     };
 
     // Update all objects
     cache.forEach((obj, id) => {
-      setHighlight(obj, id === selectedId);
+      setHighlight(obj, id === selectedId, id);
     });
 
     threeStateRef.current?.renderer.render(threeStateRef.current.scene, threeStateRef.current.camera);
@@ -2852,6 +2892,7 @@ export default function SecurityPlanner() {
                   type: "building",
                   width: 100,
                   height: 80,
+                  wallHeight: 60,
                   label: "Building",
                   color: COLORS.building[0],
                   points: rectanglePoints(100, 80)
@@ -2903,15 +2944,31 @@ export default function SecurityPlanner() {
 
           // Get the clicked item's current position
           const clickedItem = itemsRef.current.find(i => i.id === clickedItemId);
+
+          // Check for Height Handle interaction
+          let isResizingHeight = false;
+          raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+          const intersects = raycaster.intersectObjects(group.children, true);
+          const hit = intersects.find(h => {
+            // Verify it belongs to clicked item
+            let p = h.object;
+            while (p) { if (p.userData.itemId === clickedItemId) return true; p = p.parent; }
+            return false;
+          });
+          if (hit && hit.object.name === "height-handle") {
+            isResizingHeight = true;
+          }
+
           const groundPos = raycastToGround(ndc);
 
           if (groundPos && clickedItem) {
-            // "Hit Offset" Pattern:
-            // Calculate vector from Hit Point on Ground to Object Center
-            // ObjectCenter = HitPoint + Offset
+            // "Hit Offset" Pattern
             threeDragStateRef.current = {
               isDragging: true,
               itemId: clickedItemId,
+              interactionType: isResizingHeight ? "resize-height" : "move",
+              startHeight: (clickedItem as BuildingItem).wallHeight ?? 60,
+              startMouseY: event.clientY,
               dragOffset: {
                 x: clickedItem.x - groundPos.x,
                 z: clickedItem.y - groundPos.z
@@ -2920,17 +2977,31 @@ export default function SecurityPlanner() {
           }
 
           const moveHandler = (moveEvent: PointerEvent) => {
-            const dragState = threeDragStateRef.current as any;
+            const dragState = threeDragStateRef.current;
             if (!dragState.isDragging || !dragState.itemId) return;
 
+            // HANDLE RESIZE
+            if (dragState.interactionType === "resize-height") {
+              const dy = (dragState.startMouseY || 0) - moveEvent.clientY;
+              const startH = dragState.startHeight || 60;
+              // Min height 10
+              const newH = Math.max(10, startH + dy);
+              dragState.currentHeight = newH;
+
+              const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
+              if (cachedObj) {
+                cachedObj.scale.y = newH / startH;
+                // Also update handle visual if needed (Handle scales with parent, so valid)
+                state.renderer.render(state.scene, state.camera);
+              }
+              return;
+            }
+
+            // HANDLE MOVE
             const moveNdc = getNDC(moveEvent);
             const newGroundPos = raycastToGround(moveNdc);
-            if (!newGroundPos) return;
+            if (!newGroundPos || !dragState.dragOffset) return;
 
-            // Calculate new position using Hit Offset logic
-            // NewPos = NewHitPoint + Offset
-            // This guarantees the object stays rigidly attached to the mouse cursor
-            // regardless of camera rotation or angle.
             const rawX = newGroundPos.x + dragState.dragOffset.x;
             const rawY = newGroundPos.z + dragState.dragOffset.z;
 
@@ -2962,20 +3033,26 @@ export default function SecurityPlanner() {
           const upHandler = () => {
             const dragState = threeDragStateRef.current;
 
-            if (dragState.isDragging && dragState.itemId && dragState.dragOffset) {
-              const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
-              if (cachedObj) {
-                const finalX = cachedObj.position.x;
-                const finalY = cachedObj.position.z; // Z is Y in 2D
-
-                const dragItemId = dragState.itemId;
-                setItems(prev => prev.map(item => {
-                  if (item.id === dragItemId) {
-                    return { ...item, x: finalX, y: finalY };
-                  }
-                  return item;
-                }));
-                setTimeout(() => saveHistory(), 50);
+            if (dragState.isDragging && dragState.itemId) {
+              // Commit changes
+              if (dragState.interactionType === "resize-height" && dragState.currentHeight !== undefined) {
+                updateItem(dragState.itemId, { wallHeight: dragState.currentHeight });
+                saveHistory();
+              } else if (dragState.interactionType !== "resize-height") {
+                // Commit Position
+                const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
+                if (cachedObj) {
+                  const finalX = cachedObj.position.x;
+                  const finalY = cachedObj.position.z;
+                  const dragItemId = dragState.itemId;
+                  setItems(prev => prev.map(item => {
+                    if (item.id === dragItemId) {
+                      return { ...item, x: finalX, y: finalY };
+                    }
+                    return item;
+                  }));
+                  setTimeout(() => saveHistory(), 50);
+                }
               }
             }
 
@@ -2983,7 +3060,9 @@ export default function SecurityPlanner() {
             threeDragStateRef.current = {
               isDragging: false,
               itemId: null,
-              dragOffset: null
+              dragOffset: null,
+              interactionType: undefined,
+              currentHeight: undefined
             };
             window.removeEventListener("pointermove", moveHandler);
             window.removeEventListener("pointerup", upHandler);
@@ -4486,6 +4565,31 @@ export default function SecurityPlanner() {
                           : updateItem(selectedItem.id, { height: parseInt(e.target.value) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {selectedItem.type === "building" && (
+                <div className="space-y-2 mt-4">
+                  <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                    <span>Wall Height</span>
+                    <span>{(selectedItem as BuildingItem).wallHeight ?? 60} units</span>
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="range"
+                      min="10"
+                      max="300"
+                      value={(selectedItem as BuildingItem).wallHeight ?? 60}
+                      onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600 self-center"
+                    />
+                    <input
+                      type="number"
+                      value={(selectedItem as BuildingItem).wallHeight ?? 60}
+                      onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
+                      className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>
                 </div>
