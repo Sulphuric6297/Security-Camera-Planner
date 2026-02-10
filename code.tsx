@@ -4,6 +4,7 @@ import * as THREE from "three";
 import JSZip from "jszip";
 
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry';
 import {
   Camera,
   Square,
@@ -115,7 +116,7 @@ interface ParkingItem extends BaseItem {
   width: number;
   height: number;
   color: string;
-  vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'motorcycle';
+  vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'hatchback';
   vehicleHeight?: number;
 }
 
@@ -207,9 +208,15 @@ const getPointsBounds = (points: { x: number; y: number }[]) => {
 };
 
 const resolveVehicleType = (item: ParkingItem): ParkingItem['vehicleType'] => {
-  if (item.vehicleType) return item.vehicleType;
+  const rawType = (item as ParkingItem & { vehicleType?: string }).vehicleType;
+  if (rawType) {
+    if (rawType === 'motorcycle') return 'hatchback';
+    if (['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'].includes(rawType)) {
+      return rawType as ParkingItem['vehicleType'];
+    }
+  }
   const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  return ['sedan', 'suv', 'truck', 'sports'][hash % 4] as ParkingItem['vehicleType'];
+  return ['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'][hash % 6] as ParkingItem['vehicleType'];
 };
 
 const getCarSignature = (item: ParkingItem) =>
@@ -231,222 +238,309 @@ const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
 // Create a detailed 3D car model with variations
 const create3dCar = (item: ParkingItem): THREE.Group => {
   const group = new THREE.Group();
+  const bodyGroup = new THREE.Group();
+  const shellGroup = new THREE.Group();
+  const detailGroup = new THREE.Group();
+  bodyGroup.add(shellGroup);
+  bodyGroup.add(detailGroup);
+  group.add(bodyGroup);
   const width = Math.max(item.width, 8);
   const length = Math.max(item.height, 16);
   const carHeight = Math.max(item.vehicleHeight ?? 12, 6);
-  const wheelRadius = clamp(Math.min(width, length) * 0.18, 2.5, carHeight * 0.45);
-  const wheelWidth = clamp(width * 0.22, 2, 6);
+  const wheelRadius = clamp(Math.min(width, length) * 0.15, 2.2, carHeight * 0.38);
+  const wheelWidth = clamp(width * 0.2, 1.8, 5.5);
   const color = item.color;
 
   const vehicleType = resolveVehicleType(item);
 
-  const chassisMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.35, metalness: 0.25 });
-  const glassMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.05, metalness: 0.9, transparent: true, opacity: 0.65 });
-  const wheelMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.7 });
-  const trimMat = new THREE.MeshStandardMaterial({ color: '#374151', roughness: 0.6, metalness: 0.2 });
+  const baseColor = new THREE.Color(color);
+  const roofColor = baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.14);
+  const accentColor = baseColor.clone().lerp(new THREE.Color('#000000'), 0.28);
+
+  const chassisMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.32, metalness: 0.3 });
+  const roofMat = new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.28, metalness: 0.25 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.6, metalness: 0.15 });
+  const glassMat = new THREE.MeshStandardMaterial({
+    color: '#0f172a',
+    roughness: 0.05,
+    metalness: 0.9,
+    transparent: true,
+    opacity: 0.55,
+    side: THREE.DoubleSide
+  });
+  const wheelMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.75 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: '#374151', roughness: 0.6, metalness: 0.25 });
+  const hubMat = new THREE.MeshStandardMaterial({ color: '#9ca3af', metalness: 0.7, roughness: 0.3 });
+  const bumperMat = new THREE.MeshStandardMaterial({ color: '#1f2937', roughness: 0.8, metalness: 0.15 });
   const lightMat = new THREE.MeshStandardMaterial({ color: '#fef3c7', emissive: '#fef3c7', emissiveIntensity: 0.6 });
-  const tailMat = new THREE.MeshStandardMaterial({ color: '#ef4444', emissive: '#ef4444', emissiveIntensity: 0.5 });
+  const tailMat = new THREE.MeshStandardMaterial({ color: '#ef4444', emissive: '#ef4444', emissiveIntensity: 0.55 });
+
+  const roundedBox = (w: number, h: number, d: number, radius = 0.6, segments = 2) => {
+    const safeRadius = clamp(radius, 0.05, Math.min(w, h, d) * 0.45);
+    return new RoundedBoxGeometry(w, h, d, segments, safeRadius);
+  };
+
+  const addRounded = (
+    w: number,
+    h: number,
+    d: number,
+    x: number,
+    y: number,
+    z: number,
+    mat = chassisMat,
+    r = 0.6,
+    parent: THREE.Object3D = shellGroup
+  ) => {
+    const mesh = new THREE.Mesh(roundedBox(w, h, d, r), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  const addBox = (
+    w: number,
+    h: number,
+    d: number,
+    x: number,
+    y: number,
+    z: number,
+    mat = trimMat,
+    parent: THREE.Object3D = shellGroup
+  ) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
 
   // --- Wheel Setup ---
   const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 18);
   wheelGeo.rotateZ(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(wheelRadius * 0.6, wheelRadius * 0.6, wheelWidth * 0.6, 12);
+  const rimGeo = new THREE.CylinderGeometry(wheelRadius * 0.65, wheelRadius * 0.65, wheelWidth * 0.55, 12);
   rimGeo.rotateZ(Math.PI / 2);
-  const wheelZ = length * 0.35;
+  const hubGeo = new THREE.CylinderGeometry(wheelRadius * 0.28, wheelRadius * 0.28, wheelWidth * 0.7, 10);
+  hubGeo.rotateZ(Math.PI / 2);
+  const wheelZ = length * 0.34;
   const wheelX = width * 0.5 - wheelWidth * 0.6;
+
+  const addWheelAt = (x: number, z: number) => {
+    const tire = new THREE.Mesh(wheelGeo, wheelMat);
+    tire.position.set(x, wheelRadius, z);
+    tire.castShadow = true;
+    group.add(tire);
+
+    const rim = new THREE.Mesh(rimGeo, trimMat);
+    rim.position.copy(tire.position);
+    rim.castShadow = true;
+    group.add(rim);
+
+    const hub = new THREE.Mesh(hubGeo, hubMat);
+    hub.position.copy(tire.position);
+    hub.castShadow = true;
+    group.add(hub);
+  };
 
   const addWheels = (fourWheels = true) => {
     if (fourWheels) {
       [-1, 1].forEach(kx => {
-        [-1, 1].forEach(kz => {
-          const w = new THREE.Mesh(wheelGeo, wheelMat);
-          w.position.set(kx * wheelX, wheelRadius, kz * wheelZ);
-          w.castShadow = true;
-          group.add(w);
-          const rim = new THREE.Mesh(rimGeo, trimMat);
-          rim.position.copy(w.position);
-          rim.castShadow = true;
-          group.add(rim);
-        });
+        [-1, 1].forEach(kz => addWheelAt(kx * wheelX, kz * wheelZ));
       });
     } else {
-      // Two wheels for motorcycle
-      [-1, 1].forEach(kz => {
-        const w = new THREE.Mesh(wheelGeo, wheelMat);
-        w.position.set(0, wheelRadius, kz * wheelZ);
-        w.castShadow = true;
-        group.add(w);
-        const rim = new THREE.Mesh(rimGeo, trimMat);
-        rim.position.copy(w.position);
-        rim.castShadow = true;
-        group.add(rim);
-      });
+      [-1, 1].forEach(kz => addWheelAt(0, kz * wheelZ));
     }
   };
 
-  // --- Body Construction ---
   const yBase = wheelRadius + 0.6;
+  const baseRadius = Math.min(width, carHeight, length) * 0.08;
+
+  const addGlassPlane = (w: number, h: number, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0) => {
+    const pane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), glassMat);
+    pane.position.set(x, y, z);
+    pane.rotation.set(rx, ry, rz);
+    pane.castShadow = true;
+    shellGroup.add(pane);
+    return pane;
+  };
+
+  const addFenders = () => {
+    const fenderW = width * 0.22;
+    const fenderH = carHeight * 0.2;
+    const fenderL = length * 0.14;
+    const y = yBase + carHeight * 0.18;
+    const x = width * 0.37;
+    const z = length * 0.32;
+    [-1, 1].forEach(kx => {
+      [-1, 1].forEach(kz => {
+        addRounded(fenderW, fenderH, fenderL, kx * x, y, kz * z, accentMat, baseRadius * 0.6, detailGroup);
+      });
+    });
+  };
+
+  // --- Body Construction ---
+  // yBase/baseRadius defined above for helper access
 
   if (vehicleType === 'suv') {
     addWheels();
-    const bodyH = carHeight * 0.5;
-    const bodyL = length * 0.72;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
-    body.position.set(0, yBase + bodyH / 2, 0);
-    body.castShadow = true;
-    group.add(body);
+    const bodyH = carHeight * 0.52;
+    const bodyL = length * 0.74;
+    const bodyW = width * 0.96;
+    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius);
+    addRounded(bodyW * 0.6, bodyH * 0.12, bodyL * 0.5, 0, yBase + bodyH * 0.75, 0, roofMat, baseRadius * 0.5);
 
-    const cabinH = carHeight * 0.55;
-    const cabinL = length * 0.55;
+    const cabinH = carHeight * 0.52;
+    const cabinL = length * 0.5;
     const cabinW = width * 0.86;
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(cabinW, cabinH, cabinL), chassisMat);
-    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 1, -length * 0.05);
-    cabin.castShadow = true;
-    group.add(cabin);
+    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.4, -length * 0.04, roofMat, baseRadius * 0.9);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(cabinW + 0.15, cabinH * 0.65, cabinL * 0.85), glassMat);
-    glass.position.copy(cabin.position);
-    group.add(glass);
+    addRounded(cabinW * 0.98, cabinH * 0.68, cabinL * 0.86, 0, cabin.position.y + cabinH * 0.02, cabin.position.z, glassMat, baseRadius * 0.6);
+    addRounded(cabinW * 0.7, cabinH * 0.14, cabinL * 0.6, 0, cabin.position.y + cabinH * 0.32, cabin.position.z, roofMat, baseRadius * 0.5);
+    addGlassPlane(cabinW * 0.78, cabinH * 0.55, 0, cabin.position.y + cabinH * 0.1, cabin.position.z - cabinL * 0.48, -0.38);
+    addGlassPlane(cabinW * 0.72, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.12, cabin.position.z + cabinL * 0.48, 0.3);
+    addGlassPlane(cabinL * 0.62, cabinH * 0.45, cabinW * 0.52, cabin.position.y + cabinH * 0.06, cabin.position.z, 0, Math.PI / 2);
+    addGlassPlane(cabinL * 0.62, cabinH * 0.45, -cabinW * 0.52, cabin.position.y + cabinH * 0.06, cabin.position.z, 0, -Math.PI / 2);
+    addBox(bodyW * 0.92, carHeight * 0.12, length * 0.08, 0, yBase + carHeight * 0.2, -length * 0.43, bumperMat, detailGroup);
+    addBox(bodyW * 0.85, carHeight * 0.1, length * 0.05, 0, yBase + carHeight * 0.2, length * 0.44, bumperMat, detailGroup);
+    addFenders();
 
   } else if (vehicleType === 'truck') {
     addWheels();
-    const cabL = length * 0.35;
-    const bedL = length * 0.55;
-    const cabH = carHeight * 0.9;
+    const baseH = carHeight * 0.36;
+    const baseL = length * 0.82;
+    const baseW = width * 0.96;
+    addRounded(baseW, baseH, baseL, 0, yBase + baseH / 2, 0, chassisMat, baseRadius);
 
-    const base = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, carHeight * 0.35, length * 0.85), chassisMat);
-    base.position.y = yBase + carHeight * 0.175;
-    base.castShadow = true;
-    group.add(base);
+    const cabL = length * 0.36;
+    const cabH = carHeight * 0.75;
+    const cabW = width * 0.88;
+    const cab = addRounded(cabW, cabH, cabL, 0, yBase + baseH + cabH / 2 - 0.4, -length * 0.26, roofMat, baseRadius * 0.8);
 
-    const cab = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, cabH, cabL), chassisMat);
-    cab.position.set(0, yBase + carHeight * 0.35 + cabH / 2, -length * 0.25);
-    cab.castShadow = true;
-    group.add(cab);
+    addRounded(cabW * 0.95, cabH * 0.48, cabL * 0.6, 0, cab.position.y + cabH * 0.05, cab.position.z, glassMat, baseRadius * 0.5);
+    addRounded(cabW * 0.65, cabH * 0.14, cabL * 0.5, 0, cab.position.y + cabH * 0.3, cab.position.z, roofMat, baseRadius * 0.4);
+    addGlassPlane(cabW * 0.75, cabH * 0.5, 0, cab.position.y + cabH * 0.08, cab.position.z - cabL * 0.45, -0.35);
+    addGlassPlane(cabL * 0.5, cabH * 0.42, cabW * 0.52, cab.position.y + cabH * 0.02, cab.position.z - cabL * 0.05, 0, Math.PI / 2);
+    addGlassPlane(cabL * 0.5, cabH * 0.42, -cabW * 0.52, cab.position.y + cabH * 0.02, cab.position.z - cabL * 0.05, 0, -Math.PI / 2);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.92, cabH * 0.45, cabL * 0.6), glassMat);
-    glass.position.copy(cab.position);
-    glass.position.y += 1;
-    group.add(glass);
-
-    const bedWallH = carHeight * 0.18;
-    const bed = new THREE.Mesh(new THREE.BoxGeometry(width * 0.92, bedWallH, bedL), chassisMat);
-    bed.position.set(0, yBase + carHeight * 0.35 + bedWallH / 2, length * 0.2);
-    group.add(bed);
+    const bedL = length * 0.48;
+    const bedH = carHeight * 0.22;
+    addRounded(baseW * 0.92, bedH, bedL, 0, yBase + baseH + bedH / 2 - 0.2, length * 0.2, chassisMat, baseRadius * 0.6);
+    addBox(baseW * 0.9, bedH * 0.6, bedL * 0.05, 0, yBase + baseH + bedH * 0.55, length * 0.44, bumperMat, detailGroup);
+    addFenders();
 
   } else if (vehicleType === 'sports') {
     addWheels();
     const bodyH = carHeight * 0.28;
-    const bodyL = length * 0.75;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
-    body.position.set(0, yBase + bodyH / 2, 0);
-    body.castShadow = true;
-    group.add(body);
+    const bodyL = length * 0.78;
+    const bodyW = width * 0.95;
+    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.7);
 
-    const cabinH = carHeight * 0.32;
-    const cabinL = length * 0.35;
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.7, cabinH, cabinL), chassisMat);
-    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 0.5, -length * 0.08);
-    group.add(cabin);
+    const cabinH = carHeight * 0.28;
+    const cabinL = length * 0.36;
+    const cabinW = width * 0.72;
+    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.2, -length * 0.08, roofMat, baseRadius * 0.6);
+    addRounded(cabinW * 0.98, cabinH * 0.75, cabinL * 0.88, 0, cabin.position.y + cabinH * 0.05, cabin.position.z, glassMat, baseRadius * 0.4);
+    addGlassPlane(cabinW * 0.7, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.05, cabin.position.z - cabinL * 0.45, -0.4);
+    addGlassPlane(cabinL * 0.5, cabinH * 0.4, cabinW * 0.48, cabin.position.y + cabinH * 0.02, cabin.position.z, 0, Math.PI / 2);
+    addGlassPlane(cabinL * 0.5, cabinH * 0.4, -cabinW * 0.48, cabin.position.y + cabinH * 0.02, cabin.position.z, 0, -Math.PI / 2);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.72, cabinH * 0.75, cabinL * 0.85), glassMat);
-    glass.position.copy(cabin.position);
-    group.add(glass);
+    addBox(bodyW * 0.6, carHeight * 0.08, length * 0.04, 0, yBase + bodyH + cabinH * 0.9, length * 0.34, trimMat, detailGroup);
+    addFenders();
 
   } else if (vehicleType === 'van') {
     addWheels();
-    const bodyH = carHeight * 0.7;
-    const bodyL = length * 0.8;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
-    body.position.set(0, yBase + bodyH / 2, 0);
-    body.castShadow = true;
-    group.add(body);
+    const bodyH = carHeight * 0.72;
+    const bodyL = length * 0.82;
+    const bodyW = width * 0.96;
+    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius);
 
-    // Front windshield
-    const glassH = bodyH * 0.45;
-    const glassL = length * 0.2;
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, glassH, glassL), glassMat);
-    glass.position.set(0, yBase + bodyH - glassH / 2, -length * 0.33);
-    group.add(glass);
+    // Front windshield and side windows
+    const glassH = bodyH * 0.48;
+    const glassW = bodyW * 0.86;
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(glassW, glassH), glassMat);
+    glass.position.set(0, yBase + bodyH * 0.72, -length * 0.4);
+    glass.rotation.x = -Math.PI * 0.2;
+    glass.castShadow = true;
+    shellGroup.add(glass);
 
-    // Side windows
-    const sideGlassH = bodyH * 0.4;
-    const sideGlassL = length * 0.55;
-    const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.98, sideGlassH, sideGlassL), glassMat);
-    sideGlass.position.set(0, yBase + bodyH - sideGlassH / 2, 0);
-    group.add(sideGlass);
+    addRounded(bodyW * 0.96, bodyH * 0.38, bodyL * 0.55, 0, yBase + bodyH * 0.62, length * 0.02, glassMat, baseRadius * 0.5);
+    addFenders();
 
-  } else if (vehicleType === 'motorcycle') {
-    addWheels(false);
-    // Body/frame
-    const frameH = carHeight * 0.25;
-    const frameL = length * 0.55;
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(width * 0.3, frameH, frameL), chassisMat);
-    frame.position.y = yBase + frameH / 2;
-    frame.castShadow = true;
-    group.add(frame);
+  } else if (vehicleType === 'hatchback') {
+    addWheels();
+    const bodyH = carHeight * 0.34;
+    const bodyL = length * 0.7;
+    const bodyW = width * 0.94;
+    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.8);
 
-    // Seat
-    const seatH = carHeight * 0.18;
-    const seat = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, seatH, length * 0.35), new THREE.MeshStandardMaterial({ color: '#1f1f1f', roughness: 0.8 }));
-    seat.position.set(0, yBase + frameH + seatH / 2, length * 0.1);
-    group.add(seat);
-
-    // Handlebars
-    const handleH = carHeight * 0.6;
-    const handle = new THREE.Mesh(new THREE.BoxGeometry(width, 1, 2), new THREE.MeshStandardMaterial({ color: '#4a4a4a', metalness: 0.8 }));
-    handle.position.set(0, yBase + handleH, -length * 0.3);
-    group.add(handle);
+    const cabinH = carHeight * 0.5;
+    const cabinL = length * 0.55;
+    const cabinW = width * 0.8;
+    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.25, -length * 0.02, roofMat, baseRadius * 0.65);
+    addRounded(cabinW * 0.98, cabinH * 0.7, cabinL * 0.9, 0, cabin.position.y + cabinH * 0.04, cabin.position.z, glassMat, baseRadius * 0.4);
+    addGlassPlane(cabinW * 0.7, cabinH * 0.55, 0, cabin.position.y + cabinH * 0.08, cabin.position.z - cabinL * 0.48, -0.38);
+    addGlassPlane(cabinW * 0.62, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.1, cabin.position.z + cabinL * 0.46, 0.45);
+    addGlassPlane(cabinL * 0.6, cabinH * 0.45, cabinW * 0.52, cabin.position.y + cabinH * 0.05, cabin.position.z, 0, Math.PI / 2);
+    addGlassPlane(cabinL * 0.6, cabinH * 0.45, -cabinW * 0.52, cabin.position.y + cabinH * 0.05, cabin.position.z, 0, -Math.PI / 2);
+    addRounded(cabinW * 0.6, cabinH * 0.12, cabinL * 0.5, 0, cabin.position.y + cabinH * 0.32, cabin.position.z + cabinL * 0.08, roofMat, baseRadius * 0.4);
+    addBox(bodyW * 0.7, carHeight * 0.08, length * 0.04, 0, yBase + bodyH + cabinH * 0.88, length * 0.34, trimMat, detailGroup);
+    addFenders();
 
   } else { // Sedan (Default)
     addWheels();
-    const bodyH = carHeight * 0.35;
-    const bodyL = length * 0.7;
-    const hoodL = length * 0.22;
-    const trunkL = length * 0.18;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
-    body.position.set(0, yBase + bodyH / 2, 0);
-    body.castShadow = true;
-    group.add(body);
+    const bodyH = carHeight * 0.34;
+    const bodyL = length * 0.72;
+    const bodyW = width * 0.95;
+    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.9);
 
-    const hood = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, carHeight * 0.22, hoodL), chassisMat);
-    hood.position.set(0, yBase + carHeight * 0.12, -length / 2 + hoodL / 2 + 1);
-    hood.castShadow = true;
-    group.add(hood);
+    const hoodL = length * 0.24;
+    addRounded(bodyW * 0.9, carHeight * 0.2, hoodL, 0, yBase + carHeight * 0.12, -length * 0.42, chassisMat, baseRadius * 0.6);
+    addRounded(bodyW * 0.9, carHeight * 0.18, length * 0.18, 0, yBase + carHeight * 0.12, length * 0.4, chassisMat, baseRadius * 0.5);
 
-    const trunk = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, carHeight * 0.22, trunkL), chassisMat);
-    trunk.position.set(0, yBase + carHeight * 0.12, length / 2 - trunkL / 2 - 1);
-    trunk.castShadow = true;
-    group.add(trunk);
-
-    const cabinH = carHeight * 0.45;
+    const cabinH = carHeight * 0.42;
     const cabinL = length * 0.42;
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.8, cabinH, cabinL), chassisMat);
-    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 0.5, -length * 0.05);
-    cabin.castShadow = true;
-    group.add(cabin);
-
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.82, cabinH * 0.7, cabinL * 0.85), glassMat);
-    glass.position.copy(cabin.position);
-    group.add(glass);
+    const cabinW = width * 0.78;
+    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.35, -length * 0.06, roofMat, baseRadius * 0.7);
+    addRounded(cabinW * 0.98, cabinH * 0.7, cabinL * 0.85, 0, cabin.position.y + cabinH * 0.03, cabin.position.z, glassMat, baseRadius * 0.4);
+    addRounded(cabinW * 0.7, cabinH * 0.12, cabinL * 0.55, 0, cabin.position.y + cabinH * 0.3, cabin.position.z, roofMat, baseRadius * 0.4);
+    addGlassPlane(cabinW * 0.72, cabinH * 0.52, 0, cabin.position.y + cabinH * 0.06, cabin.position.z - cabinL * 0.45, -0.36);
+    addGlassPlane(cabinW * 0.6, cabinH * 0.45, 0, cabin.position.y + cabinH * 0.1, cabin.position.z + cabinL * 0.45, 0.28);
+    addGlassPlane(cabinL * 0.58, cabinH * 0.42, cabinW * 0.52, cabin.position.y + cabinH * 0.03, cabin.position.z, 0, Math.PI / 2);
+    addGlassPlane(cabinL * 0.58, cabinH * 0.42, -cabinW * 0.52, cabin.position.y + cabinH * 0.03, cabin.position.z, 0, -Math.PI / 2);
+    addFenders();
   }
 
-  // Headlights (skip for motorcycle)
-  if (vehicleType !== 'motorcycle') {
-    const lightW = Math.max(2, width * 0.12);
-    const lightH = Math.max(1.5, carHeight * 0.12);
+  // Mirrors + skirts
+  addBox(width * 0.12, carHeight * 0.08, length * 0.05, width * 0.47, yBase + carHeight * 0.45, -length * 0.14, trimMat, detailGroup);
+  addBox(width * 0.12, carHeight * 0.08, length * 0.05, -width * 0.47, yBase + carHeight * 0.45, -length * 0.14, trimMat, detailGroup);
+  addBox(width * 0.9, carHeight * 0.06, length * 0.78, 0, yBase + carHeight * 0.08, 0, accentMat, detailGroup);
+  addBox(width * 0.86, carHeight * 0.08, length * 0.75, 0, yBase + carHeight * 0.03, 0, bumperMat, detailGroup);
+
+  // Headlights / taillights
+  {
+    const lightW = Math.max(2, width * 0.1);
+    const lightH = Math.max(1.4, carHeight * 0.12);
     const lightD = Math.max(0.6, length * 0.02);
     const lightGeo = new THREE.BoxGeometry(lightW, lightH, lightD);
 
-    const zFront = -length / 2 - lightD / 2;
-    const zBack = length / 2 + lightD / 2;
-    const yLight = yBase + carHeight * 0.35;
-    const xLight = width * 0.32;
+    shellGroup.updateMatrixWorld(true);
+    const bodyBounds = new THREE.Box3().setFromObject(shellGroup);
+    const bodyCenter = new THREE.Vector3();
+    bodyBounds.getCenter(bodyCenter);
+    const bodyWidth = Math.max(0.1, bodyBounds.max.x - bodyBounds.min.x);
+    const bodyHeight = Math.max(0.1, bodyBounds.max.y - bodyBounds.min.y);
 
-    const fl1 = new THREE.Mesh(lightGeo, lightMat); fl1.position.set(-xLight, yLight, zFront); group.add(fl1);
-    const fl2 = new THREE.Mesh(lightGeo, lightMat); fl2.position.set(xLight, yLight, zFront); group.add(fl2);
-    const tl1 = new THREE.Mesh(lightGeo, tailMat); tl1.position.set(-xLight, yLight, zBack); group.add(tl1);
-    const tl2 = new THREE.Mesh(lightGeo, tailMat); tl2.position.set(xLight, yLight, zBack); group.add(tl2);
+    const zFront = bodyBounds.min.z - lightD * 0.15;
+    const zBack = bodyBounds.max.z + lightD * 0.15;
+    const yLight = bodyBounds.min.y + bodyHeight * 0.4;
+    const xLight = clamp(bodyWidth * 0.3, lightW * 0.6, bodyWidth * 0.45);
+
+    const fl1 = new THREE.Mesh(lightGeo, lightMat); fl1.position.set(bodyCenter.x - xLight, yLight, zFront); detailGroup.add(fl1);
+    const fl2 = new THREE.Mesh(lightGeo, lightMat); fl2.position.set(bodyCenter.x + xLight, yLight, zFront); detailGroup.add(fl2);
+    const tl1 = new THREE.Mesh(lightGeo, tailMat); tl1.position.set(bodyCenter.x - xLight, yLight, zBack); detailGroup.add(tl1);
+    const tl2 = new THREE.Mesh(lightGeo, tailMat); tl2.position.set(bodyCenter.x + xLight, yLight, zBack); detailGroup.add(tl2);
+
+    addBox(width * 0.26, carHeight * 0.08, length * 0.02, 0, yBase + carHeight * 0.22, -length * 0.48, new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.8 }), detailGroup);
   }
 
   group.position.set(item.x, 0, item.y);
@@ -714,6 +808,20 @@ const hFovFromV = (v: number, aspect: number) => {
   return (hRad * 180) / Math.PI;
 };
 
+const getCameraAspectValue = (camera?: CameraItem | null) => {
+  if (!camera) return 16 / 9;
+  if (camera.aspect && camera.aspect > 0) return camera.aspect;
+  const h = camera.hFov ?? camera.fov;
+  const v = camera.vFov;
+  if (v && v > 0) {
+    const hRad = (h * Math.PI) / 180;
+    const vRad = (v * Math.PI) / 180;
+    const aspect = Math.tan(hRad / 2) / Math.tan(vRad / 2);
+    return aspect || 16 / 9;
+  }
+  return 16 / 9;
+};
+
 export default function SecurityPlanner() {
   // --- State ---
   const [items, setItems] = useState<CanvasItem[]>([]);
@@ -902,15 +1010,21 @@ export default function SecurityPlanner() {
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useState<any[]>([]);
   const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
+  const nvrContainerRef = useRef<HTMLDivElement>(null);
+  const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
+  const nvrAspect = useMemo(() => {
+    const cams = items.filter(i => i.type === "camera") as CameraItem[];
+    return getCameraAspectValue(cams[0]);
+  }, [items]);
   const nvrRowHeight = useMemo(() => {
-    const gridWidth = Math.max(320, canvasSize.width - 32);
+    const gridWidth = Math.max(320, (nvrSize.width || canvasSize.width) - 32);
     const colWidth = (gridWidth - NVR_MARGIN * (NVR_COLS + 1)) / NVR_COLS;
     const itemWidth = colWidth * NVR_DEFAULT_W + NVR_MARGIN * (NVR_DEFAULT_W - 1);
-    const imageHeight = itemWidth / NVR_ASPECT;
+    const imageHeight = itemWidth / nvrAspect;
     const totalHeight = imageHeight + NVR_HEADER_FOOTER;
     const rowHeight = (totalHeight - NVR_MARGIN * (NVR_DEFAULT_H - 1)) / NVR_DEFAULT_H;
     return Math.max(NVR_MIN_ROW_HEIGHT, rowHeight);
-  }, [canvasSize.width]);
+  }, [canvasSize.width, nvrSize.width, nvrAspect]);
 
   // Sync Layout with Items
   useEffect(() => {
@@ -942,6 +1056,23 @@ export default function SecurityPlanner() {
   const onLayoutChange = (newLayout: any) => {
     setNvrLayout(newLayout);
   };
+
+  useEffect(() => {
+    if (!nvrContainerRef.current) return;
+    const el = nvrContainerRef.current;
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      setNvrSize({ width: rect.width, height: rect.height });
+    };
+    updateSize();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(updateSize);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+    window.addEventListener("resize", updateSize);
+    return () => window.removeEventListener("resize", updateSize);
+  }, [viewMode, isRightPanelOpen]);
 
   // Terrain State
   // Terrain State moved to top
@@ -1202,6 +1333,13 @@ export default function SecurityPlanner() {
     pmremGenerator: THREE.PMREMGenerator | null;
     envTexture: THREE.Texture | null;
   }>({ renderer: null, pmremGenerator: null, envTexture: null });
+
+  const cameraSnapshotRendererRef = useRef<{
+    renderer: THREE.WebGLRenderer | null;
+    pmremGenerator: THREE.PMREMGenerator | null;
+    envTexture: THREE.Texture | null;
+    canvas: HTMLCanvasElement | null;
+  }>({ renderer: null, pmremGenerator: null, envTexture: null, canvas: null });
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
@@ -2004,10 +2142,26 @@ export default function SecurityPlanner() {
     }]);
   };
 
+  const getCameraSnapshotRenderer = (width: number, height: number) => {
+    let cache = cameraSnapshotRendererRef.current;
+    if (!cache.renderer || !cache.canvas) {
+      const canvas = document.createElement("canvas");
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+      cameraSnapshotRendererRef.current = { renderer, pmremGenerator, envTexture, canvas };
+      cache = cameraSnapshotRendererRef.current;
+    }
+    cache.renderer.setSize(width, height, false);
+    return cache;
+  };
+
   // Render a camera's perspective view to data URL - MATCHES Camera Preview Panel exactly
   const renderCameraViewToDataUrl = (cam: CameraItem): string => {
+    const aspect = getCameraAspectValue(cam);
     const width = 1280;
-    const height = 720;
+    const height = Math.max(360, Math.round(width / aspect));
 
     const camPos = getCameraPlanPosition(cam);
     const camTerrainH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Terrain adjusted height
@@ -2018,7 +2172,6 @@ export default function SecurityPlanner() {
     const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
 
     // Calculate vertical FOV from horizontal FOV and aspect ratio to match 2D cone
-    const aspect = width / height;
     const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
     const vFov = THREE.MathUtils.radToDeg(vFovRad);
 
@@ -2128,15 +2281,12 @@ export default function SecurityPlanner() {
     });
 
     // Render
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setSize(width, height);
+    const snapshot = getCameraSnapshotRenderer(width, height);
+    const renderer = snapshot.renderer;
+    const canvas = snapshot.canvas!;
 
     // Apply PBR Lighting (RoomEnvironment) to fix black models in preview
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+    scene.environment = snapshot.envTexture ?? null;
 
     // Load scene background image if present (same as Camera Preview Panel)
     if (sceneBackgroundImg) {
@@ -2181,8 +2331,6 @@ export default function SecurityPlanner() {
     }
 
     const dataUrl = outputCanvas.toDataURL('image/png');
-    renderer.dispose();
-    pmremGenerator.dispose();
     return dataUrl;
   };
 
@@ -4702,6 +4850,22 @@ export default function SecurityPlanner() {
     }
   }, [viewMode]);
 
+  useEffect(() => {
+    return () => {
+      const snapshot = cameraSnapshotRendererRef.current;
+      if (snapshot?.renderer) {
+        snapshot.renderer.dispose();
+      }
+      if (snapshot?.pmremGenerator) {
+        snapshot.pmremGenerator.dispose();
+      }
+      if (snapshot?.envTexture) {
+        snapshot.envTexture.dispose();
+      }
+      cameraSnapshotRendererRef.current = { renderer: null, pmremGenerator: null, envTexture: null, canvas: null };
+    };
+  }, []);
+
   // Preload background image for camera preview
   useEffect(() => {
     if (backgroundImg) {
@@ -5251,7 +5415,9 @@ export default function SecurityPlanner() {
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
   const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
-  const cameraAspect = selectedCamera?.aspect ?? 16 / 9;
+  const cameraAspect = getCameraAspectValue(selectedCamera);
+  const cameraPreviewWidth = 320;
+  const cameraPreviewHeight = Math.round(cameraPreviewWidth / cameraAspect);
   const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
   const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
   const cameraDiag = selectedCamera ? diagonalFromHv(cameraHFov, cameraVFov) : 90;
@@ -5265,9 +5431,10 @@ export default function SecurityPlanner() {
   const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
   const rightPanelOffset = isRightPanelOpen ? "lg:right-[22rem]" : "lg:right-4";
   const workspaceRightPadding = isRightPanelOpen ? "pr-80" : "pr-6";
-  const workspaceLayoutClass = viewMode === "iso3d" || viewMode === "plan"
+  const workspaceLayoutClass = viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr"
     ? "items-stretch justify-stretch pt-16 pl-20 pb-4"
     : "items-center justify-center pt-20 pl-24 pb-6";
+  const nvrGridWidth = Math.max(320, (nvrSize.width || canvasSize.width) - 32);
   const demOverlayTransform = demPreview ? {
     x: demTransform.x,
     y: demTransform.y,
@@ -6097,7 +6264,7 @@ export default function SecurityPlanner() {
       <div className="absolute inset-0 z-0 overflow-hidden">
         {/* --- Main Workspace --- */}
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
-          <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan") ? "w-full h-full" : ""}`}>
+          <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr") ? "w-full h-full" : ""}`}>
             {viewMode === "plan" ? (
               <svg
                 ref={svgRef}
@@ -6881,7 +7048,7 @@ export default function SecurityPlanner() {
                 </div>
               </div>
             ) : (
-              <div className="relative bg-zinc-950 flex flex-col overflow-auto" style={{ width: canvasSize.width, height: canvasSize.height }}>
+              <div ref={nvrContainerRef} className="relative bg-zinc-950 flex flex-col overflow-hidden w-full h-full">
                 <div className="w-full h-full p-4 overflow-auto custom-scrollbar">
                   {items.filter(i => i.type === 'camera').length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-500">
@@ -6896,7 +7063,7 @@ export default function SecurityPlanner() {
                         layout={nvrLayout}
                         cols={NVR_COLS}
                         rowHeight={nvrRowHeight}
-                        width={canvasSize.width - 32}
+                        width={nvrGridWidth}
                         onLayoutChange={onLayoutChange}
                         isDraggable={viewMode === 'nvr'}
                         isResizable={viewMode === 'nvr'}
@@ -6916,6 +7083,7 @@ export default function SecurityPlanner() {
                             <NVRCard
                               camera={cam as CameraItem}
                               renderFn={renderCameraViewToDataUrl}
+                              aspect={getCameraAspectValue(cam as CameraItem)}
                               onMaximize={() => {
                                 setSelectedId(cam.id);
                                 setRightPanelMode("properties");
@@ -6962,8 +7130,8 @@ export default function SecurityPlanner() {
             </div>
             <canvas
               ref={cameraPreviewRef}
-              width={320}
-              height={180}
+              width={cameraPreviewWidth}
+              height={cameraPreviewHeight}
               className="w-full"
             />
             <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between border-t border-white/5">
@@ -6984,8 +7152,14 @@ export default function SecurityPlanner() {
         )}
 
         {maximizedCamId && (
-          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="absolute left-4 right-4 top-16 bottom-4 lg:left-20 lg:right-8 lg:top-20 lg:bottom-8">
+          <div
+            className="fixed left-0 top-0 bottom-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200"
+            style={{ right: isRightPanelOpen ? "22rem" : "0" }}
+          >
+            <div
+              className="absolute left-4 top-16 bottom-4 lg:left-20 lg:top-20 lg:bottom-8"
+              style={{ right: "1rem" }}
+            >
               {(() => {
                 const cam = items.find(i => i.id === maximizedCamId);
                 if (!cam) return null;
@@ -7003,7 +7177,7 @@ export default function SecurityPlanner() {
                     </div>
                     <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
                       <div className="w-full h-full relative">
-                        <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} isMaximized={true} />
+                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} aspect={getCameraAspectValue(cam as CameraItem)} isMaximized={true} />
                       </div>
                     </div>
                   </div>
@@ -7128,11 +7302,11 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Vehicle Type</label>
                     <div className="grid grid-cols-3 gap-1">
-                      {(['sedan', 'suv', 'truck', 'sports', 'van', 'motorcycle'] as const).map(type => (
+                      {(['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'] as const).map(type => (
                         <button
                           key={type}
                           onClick={() => updateItem(selectedItem.id, { vehicleType: type })}
-                          className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${((selectedItem as ParkingItem).vehicleType ?? 'sedan') === type
+                          className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${resolveVehicleType(selectedItem as ParkingItem) === type
                             ? 'bg-blue-600 text-white'
                             : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                             }`}
@@ -8202,15 +8376,44 @@ export default function SecurityPlanner() {
   );
 }
 
-const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized }: { camera: CameraItem, renderFn: (c: CameraItem) => string, onMaximize?: () => void, onExport?: () => void, isMaximized?: boolean }) => {
+const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized, aspect }: { camera: CameraItem, renderFn: (c: CameraItem) => string, onMaximize?: () => void, onExport?: () => void, isMaximized?: boolean, aspect?: number }) => {
   const [src, setSrc] = useState<string | null>(null);
+  const viewAspect = aspect && aspect > 0 ? aspect : 16 / 9;
+  const renderBusyRef = useRef(false);
+  const renderQueuedRef = useRef(false);
+  const renderFrame = () => {
+    if (renderBusyRef.current) {
+      renderQueuedRef.current = true;
+      return;
+    }
+    renderBusyRef.current = true;
+    try {
+      const next = renderFn(camera);
+      if (next) setSrc(next);
+    } catch (err) {
+      console.error("Camera render failed", err);
+    } finally {
+      renderBusyRef.current = false;
+      if (renderQueuedRef.current) {
+        renderQueuedRef.current = false;
+        renderFrame();
+      }
+    }
+  };
 
   useEffect(() => {
+    if (isMaximized) {
+      renderFrame();
+      const interval = window.setInterval(() => {
+        renderFrame();
+      }, 150);
+      return () => window.clearInterval(interval);
+    }
     const tid = setTimeout(() => {
-      setSrc(renderFn(camera));
+      renderFrame();
     }, 10);
     return () => clearTimeout(tid);
-  }, [camera, renderFn]);
+  }, [camera, renderFn, isMaximized]);
 
   const handleDownload = () => {
     if (!src) return;
@@ -8249,9 +8452,12 @@ const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized }: { came
       </div>
 
       {/* Camera View */}
-      <div className="relative w-full aspect-video overflow-hidden bg-slate-800">
+      <div
+        className="relative w-full overflow-hidden bg-slate-800"
+        style={{ aspectRatio: `${viewAspect}` }}
+      >
         {src ? (
-          <img src={src} className="w-full h-full object-cover select-none" draggable={false} />
+          <img src={src} className="w-full h-full object-contain select-none" draggable={false} />
         ) : (
           <div className="animate-pulse bg-zinc-800 w-full h-full flex items-center justify-center opacity-50">
             <LayoutGrid className="w-8 h-8" />
