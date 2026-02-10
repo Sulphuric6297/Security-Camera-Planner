@@ -3105,6 +3105,131 @@ export default function SecurityPlanner() {
     return tree;
   };
 
+  const ensureNamedGroup = (parent: THREE.Object3D, name: string) => {
+    let group = parent.getObjectByName(name) as THREE.Group | null;
+    if (!group) {
+      group = new THREE.Group();
+      group.name = name;
+      parent.add(group);
+    }
+    return group;
+  };
+
+  const updateCameraFrustum = (
+    cameraGroup: THREE.Group,
+    cameraItem: CameraItem,
+    cameraPos: { x: number; y: number },
+    absHeight: number,
+    pitchRad: number,
+    rotAngle: number,
+    hFov: number,
+    range: number,
+    state: { group: THREE.Group }
+  ) => {
+    const shouldShow = frustumSettings.visible && ((frustumSettings.showAll !== false) || cameraItem.id === selectedId);
+    const staleLocalFrustum = cameraGroup.getObjectByName("camera-frustum") as THREE.Group | null;
+    if (staleLocalFrustum) {
+      disposeGroup(staleLocalFrustum);
+      staleLocalFrustum.parent?.remove(staleLocalFrustum);
+    }
+    const frustumGroup = ensureNamedGroup(state.group, `camera-frustum-${cameraItem.id}`);
+    const staleFloor = state.group.getObjectByName(`camera-floor-${cameraItem.id}`) as THREE.Group | null;
+    if (staleFloor) {
+      disposeGroup(staleFloor);
+      staleFloor.parent?.remove(staleFloor);
+    }
+
+    frustumGroup.visible = shouldShow;
+
+    if (frustumGroup.visible) {
+      disposeGroup(frustumGroup);
+      const lensOffset = (cameraGroup.userData?.lensOffset as number | undefined) ?? 0;
+      const yaw = THREE.MathUtils.degToRad(cameraItem.rotation);
+      const forward = new THREE.Vector3(
+        Math.cos(yaw) * Math.cos(pitchRad),
+        Math.sin(pitchRad),
+        Math.sin(yaw) * Math.cos(pitchRad)
+      ).normalize();
+      const up = new THREE.Vector3(0, 1, 0);
+      const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+      const correctedUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+
+      const basis = new THREE.Matrix4().makeBasis(forward, correctedUp, right);
+      frustumGroup.quaternion.setFromRotationMatrix(basis);
+
+      frustumGroup.position.set(
+        cameraPos.x + forward.x * lensOffset,
+        absHeight + forward.y * lensOffset,
+        cameraPos.y + forward.z * lensOffset
+      );
+
+      const aspect = cameraItem.aspect ?? 16 / 9;
+      const displayRange = Math.max(1, Math.min(range, 50));
+      const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
+      const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
+      const farWidth = farHeight * aspect;
+
+      const vertices = [
+        0, 0, 0,
+        displayRange, farHeight / 2, -farWidth / 2,
+        displayRange, -farHeight / 2, -farWidth / 2,
+        0, 0, 0,
+        displayRange, -farHeight / 2, -farWidth / 2,
+        displayRange, -farHeight / 2, farWidth / 2,
+        0, 0, 0,
+        displayRange, -farHeight / 2, farWidth / 2,
+        displayRange, farHeight / 2, farWidth / 2,
+        0, 0, 0,
+        displayRange, farHeight / 2, farWidth / 2,
+        displayRange, farHeight / 2, -farWidth / 2,
+        displayRange, -farHeight / 2, farWidth / 2,
+        displayRange, -farHeight / 2, -farWidth / 2,
+        displayRange, farHeight / 2, -farWidth / 2,
+        displayRange, farHeight / 2, farWidth / 2,
+        displayRange, -farHeight / 2, farWidth / 2,
+        displayRange, farHeight / 2, -farWidth / 2
+      ];
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.computeVertexNormals();
+
+      const frustumMaterial = new THREE.MeshBasicMaterial({
+        color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
+        transparent: true,
+        opacity: frustumSettings.opacity,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+
+      const frustumMesh = new THREE.Mesh(geometry, frustumMaterial);
+      frustumGroup.add(frustumMesh);
+
+      const edgeVertices = [
+        0, 0, 0, displayRange, farHeight / 2, -farWidth / 2,
+        0, 0, 0, displayRange, -farHeight / 2, -farWidth / 2,
+        0, 0, 0, displayRange, -farHeight / 2, farWidth / 2,
+        0, 0, 0, displayRange, farHeight / 2, farWidth / 2,
+        displayRange, farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, farWidth / 2,
+        displayRange, farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, farWidth / 2,
+        displayRange, -farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, -farWidth / 2,
+        displayRange, -farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, -farWidth / 2
+      ];
+      const edgeGeometry = new THREE.BufferGeometry();
+      edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgeVertices, 3));
+      const edges = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({
+        color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
+        transparent: true,
+        opacity: frustumSettings.edgeOpacity
+      }));
+      frustumGroup.add(edges);
+    } else {
+      disposeGroup(frustumGroup);
+    }
+
+    // Floor projection removed
+  };
+
   // Fast position-only update for 3D objects (used during dragging)
   const updateThreeScenePositions = () => {
     const state = threeStateRef.current;
@@ -3151,6 +3276,17 @@ export default function SecurityPlanner() {
         obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
         obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
         obj.rotation.x = THREE.MathUtils.degToRad(cam.pitch ?? 0);
+        updateCameraFrustum(
+          obj as THREE.Group,
+          cam,
+          camPos,
+          camH + camMountHeight,
+          THREE.MathUtils.degToRad(cam.pitch ?? 0),
+          -THREE.MathUtils.degToRad(cam.rotation),
+          cam.hFov ?? cam.fov,
+          cam.range,
+          state
+        );
         needsRender = true;
       } else if (item.type === "image") {
         const img = item as ImageItem;
@@ -3507,38 +3643,84 @@ export default function SecurityPlanner() {
         const rotAngle = -THREE.MathUtils.degToRad(cameraItem.rotation);
         const pitchRad = THREE.MathUtils.degToRad(pitch);
 
-        // Camera body - box with lens
+        // Camera body - Unifi-style bullet camera (smaller, no pedestal)
         const cameraGroup = new THREE.Group();
         cameraGroup.userData.itemId = cameraItem.id; // For raycasting selection
         cameraGroup.renderOrder = 1;
 
-        // Main camera body
-        const bodyGeometry = new THREE.BoxGeometry(14, 10, 10);
+        const cameraScale = 0.6;
+        const bodyRadius = 4.2 * cameraScale;
+        const bodyLength = 16 * cameraScale;
+        const bezelLength = 3.2 * cameraScale;
+        const lensRadius = 2.1 * cameraScale;
+
         const bodyMaterial = new THREE.MeshStandardMaterial({
-          color: "#1e293b",
+          color: "#e2e8f0",
+          roughness: 0.45,
+          metalness: 0.2
+        });
+        const bezelMaterial = new THREE.MeshStandardMaterial({
+          color: "#0f172a",
           roughness: 0.3,
           metalness: 0.5
         });
+        const lensMaterial = new THREE.MeshStandardMaterial({
+          color: "#0b1220",
+          roughness: 0.2,
+          metalness: 0.8
+        });
+        const accentMaterial = new THREE.MeshStandardMaterial({
+          color: "#1f2937",
+          roughness: 0.6,
+          metalness: 0.2
+        });
+
+        // Main cylindrical body
+        const bodyGeometry = new THREE.CylinderGeometry(bodyRadius, bodyRadius, bodyLength, 20);
+        bodyGeometry.rotateZ(Math.PI / 2);
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.castShadow = true;
         cameraGroup.add(body);
 
-        // Camera lens
-        const lensGeometry = new THREE.CylinderGeometry(3.5, 4, 8, 16);
+        // Front bezel and lens
+        const bezelGeometry = new THREE.CylinderGeometry(bodyRadius * 0.95, bodyRadius * 0.95, bezelLength, 20);
+        bezelGeometry.rotateZ(Math.PI / 2);
+        const bezel = new THREE.Mesh(bezelGeometry, bezelMaterial);
+        bezel.position.set(bodyLength / 2 - bezelLength / 2, 0, 0);
+        bezel.castShadow = true;
+        cameraGroup.add(bezel);
+
+        const lensGeometry = new THREE.CylinderGeometry(lensRadius * 0.9, lensRadius, 2.2 * cameraScale, 16);
         lensGeometry.rotateZ(Math.PI / 2);
-        const lensMaterial = new THREE.MeshStandardMaterial({
-          color: "#0f172a",
-          roughness: 0.2,
-          metalness: 0.7
-        });
         const lens = new THREE.Mesh(lensGeometry, lensMaterial);
-        lens.position.set(10, 0, 0);
+        lens.position.set(bodyLength / 2 + 0.6 * cameraScale, 0, 0);
+        lens.castShadow = true;
         cameraGroup.add(lens);
+        cameraGroup.userData.lensOffset = bodyLength / 2 + 1.4 * cameraScale;
+
+        // Mount collar + short arm (no pedestal)
+        const collarGeometry = new THREE.TorusGeometry(bodyRadius * 0.7, bodyRadius * 0.12, 10, 20);
+        const collar = new THREE.Mesh(collarGeometry, accentMaterial);
+        collar.position.set(-bodyLength / 2 + bodyRadius * 0.25, 0, 0);
+        collar.rotation.y = Math.PI / 2;
+        cameraGroup.add(collar);
+
+        const armGeometry = new THREE.CylinderGeometry(bodyRadius * 0.22, bodyRadius * 0.28, 2.8 * cameraScale, 12);
+        const arm = new THREE.Mesh(armGeometry, accentMaterial);
+        arm.position.set(-bodyLength / 2 + bodyRadius * 0.35, -bodyRadius * 0.6, 0);
+        arm.castShadow = true;
+        cameraGroup.add(arm);
+
+        const mountPuck = new THREE.Mesh(new THREE.CylinderGeometry(bodyRadius * 0.55, bodyRadius * 0.6, 1.1 * cameraScale, 16), accentMaterial);
+        mountPuck.position.set(-bodyLength / 2 + bodyRadius * 0.35, -bodyRadius * 1.05, 0);
+        mountPuck.castShadow = true;
+        cameraGroup.add(mountPuck);
 
         // Indicator light
-        const lightGeometry = new THREE.SphereGeometry(1.5, 8, 8);
+        const lightGeometry = new THREE.SphereGeometry(1.2 * cameraScale, 8, 8);
         const lightMaterial = new THREE.MeshBasicMaterial({ color: cameraItem.color });
         const light = new THREE.Mesh(lightGeometry, lightMaterial);
-        light.position.set(-5, 4, 0);
+        light.position.set(-bodyLength * 0.1, bodyRadius * 0.65, bodyRadius * 0.2);
         cameraGroup.add(light);
 
         // Position and rotate camera body
@@ -3554,167 +3736,21 @@ export default function SecurityPlanner() {
         threeObjectCacheRef.current.set(cameraItem.id, cameraGroup); // Cache for position updates
         group.add(cameraGroup);
 
-        // Mounting pole
-        const poleGeometry = new THREE.CylinderGeometry(2, 2.5, cameraHeight, 8);
-        const poleMaterial = new THREE.MeshStandardMaterial({
-          color: "#475569",
-          roughness: 0.6,
-          metalness: 0.3
-        });
-        const pole = new THREE.Mesh(poleGeometry, poleMaterial);
-        pole.renderOrder = 1;
-        pole.position.set(cameraPos.x, camTerrainH + cameraMountHeight / 2, cameraPos.y);
-        pole.castShadow = true;
-        group.add(pole);
+        // No pedestal/pole for the refined camera model
 
 
 
-        // Frustum Visualization Logic
-        if (frustumSettings.visible) {
-          const shouldShow = (frustumSettings.showAll !== false) || item.id === selectedId;
-          const showVolume = (frustumSettings.mode || 'volume') === 'volume';
-
-          if (shouldShow) {
-            // Frustum geometry calc
-            const aspect = 1.33;
-            const displayRange = Math.min(range, 50); // Cap visual range to avoid clutter
-            const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
-            const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
-            const farWidth = farHeight * aspect;
-
-            const vertices = [
-              0, 0, 0,
-              displayRange, farHeight / 2, -farWidth / 2,
-              displayRange, -farHeight / 2, -farWidth / 2,
-              0, 0, 0,
-              displayRange, -farHeight / 2, -farWidth / 2,
-              displayRange, -farHeight / 2, farWidth / 2,
-              0, 0, 0,
-              displayRange, -farHeight / 2, farWidth / 2,
-              displayRange, farHeight / 2, farWidth / 2,
-              0, 0, 0,
-              displayRange, farHeight / 2, farWidth / 2,
-              displayRange, farHeight / 2, -farWidth / 2,
-              displayRange, -farHeight / 2, farWidth / 2,
-              displayRange, -farHeight / 2, -farWidth / 2,
-              displayRange, farHeight / 2, -farWidth / 2,
-              displayRange, farHeight / 2, farWidth / 2,
-              displayRange, -farHeight / 2, farWidth / 2,
-              displayRange, farHeight / 2, -farWidth / 2
-            ];
-
-            // Render Volume (Cone)
-            if (showVolume) {
-              const geometry = new THREE.BufferGeometry();
-              geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-              geometry.computeVertexNormals();
-
-              const frustumMaterial = new THREE.MeshBasicMaterial({
-                color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
-                transparent: true,
-                opacity: frustumSettings.opacity,
-                side: THREE.DoubleSide,
-                depthWrite: false
-              });
-
-              const frustumMesh = new THREE.Mesh(geometry, frustumMaterial);
-              frustumMesh.position.set(cameraPos.x, cameraHeight, cameraPos.y);
-              frustumMesh.rotation.order = 'YXZ';
-              frustumMesh.rotation.y = rotAngle;
-              frustumMesh.rotation.x = pitchRad;
-              group.add(frustumMesh);
-
-              const edgeVertices = [
-                0, 0, 0, displayRange, farHeight / 2, -farWidth / 2,
-                0, 0, 0, displayRange, -farHeight / 2, -farWidth / 2,
-                0, 0, 0, displayRange, -farHeight / 2, farWidth / 2,
-                0, 0, 0, displayRange, farHeight / 2, farWidth / 2,
-                displayRange, farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, farWidth / 2,
-                displayRange, farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, farWidth / 2,
-                displayRange, -farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, -farWidth / 2,
-                displayRange, -farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, -farWidth / 2
-              ];
-              const edgeGeometry = new THREE.BufferGeometry();
-              edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgeVertices, 3));
-              const edges = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({
-                color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
-                transparent: true,
-                opacity: frustumSettings.edgeOpacity
-              }));
-              edges.position.set(cameraPos.x, cameraHeight, cameraPos.y);
-              edges.rotation.order = 'YXZ';
-              edges.rotation.y = rotAngle;
-              edges.rotation.x = pitchRad;
-              group.add(edges);
-            }
-
-            // Ground Projection
-            const groundProjectionPoints: THREE.Vector3[] = [];
-            const halfAngleH = THREE.MathUtils.degToRad(hFov) / 2;
-            // Recalculate vFov for projection logic matching aspect
-            const vFovRadProj = 2 * Math.atan(Math.tan(halfAngleH) / aspect);
-            const halfAngleV = vFovRadProj / 2;
-
-            const testPoints = [
-              { h: halfAngleH, v: halfAngleV },
-              { h: -halfAngleH, v: halfAngleV },
-              { h: -halfAngleH, v: -halfAngleV },
-              { h: halfAngleH, v: -halfAngleV }
-            ];
-
-            testPoints.forEach(angles => {
-              const localDir = new THREE.Vector3(
-                Math.cos(angles.v) * Math.cos(angles.h),
-                Math.sin(angles.v),
-                Math.cos(angles.v) * Math.sin(angles.h)
-              ).normalize();
-              const euler = new THREE.Euler(pitchRad, rotAngle, 0, 'YXZ'); // Match camera rotation order
-              localDir.applyEuler(euler);
-              if (localDir.y < -0.01) {
-                const t = -cameraHeight / localDir.y;
-                const groundX = cameraPos.x + localDir.x * t;
-                const groundZ = cameraPos.y + localDir.z * t;
-                groundProjectionPoints.push(new THREE.Vector3(groundX, 0.15, groundZ));
-              }
-            });
-
-            if (groundProjectionPoints.length >= 3) {
-              const projShape = new THREE.Shape();
-              projShape.moveTo(groundProjectionPoints[0].x - cameraPos.x, -(groundProjectionPoints[0].z - cameraPos.y));
-              for (let i = 1; i < groundProjectionPoints.length; i++) {
-                projShape.lineTo(groundProjectionPoints[i].x - cameraPos.x, -(groundProjectionPoints[i].z - cameraPos.y));
-              }
-              projShape.closePath();
-              const projGeometry = new THREE.ShapeGeometry(projShape);
-              projGeometry.rotateX(-Math.PI / 2);
-              const projMaterial = new THREE.MeshBasicMaterial({
-                color: cameraItem.color,
-                transparent: true,
-                opacity: showVolume ? 0.1 : 0.4,
-                side: THREE.DoubleSide
-              });
-              const projMesh = new THREE.Mesh(projGeometry, projMaterial);
-              projMesh.position.set(cameraPos.x, 0.12, cameraPos.y);
-              group.add(projMesh);
-
-              const outlineGeometry = new THREE.BufferGeometry();
-              const outlineVertices: number[] = [];
-              groundProjectionPoints.forEach((p, i) => {
-                outlineVertices.push(p.x, p.y, p.z);
-                const next = groundProjectionPoints[(i + 1) % groundProjectionPoints.length];
-                outlineVertices.push(next.x, next.y, next.z);
-              });
-              outlineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(outlineVertices, 3));
-              const outlineMaterial = new THREE.LineBasicMaterial({
-                color: cameraItem.color,
-                transparent: true,
-                opacity: showVolume ? 0.4 : 0.8
-              });
-              const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial);
-              group.add(outline);
-            }
-          }
-        }
+        updateCameraFrustum(
+          cameraGroup,
+          cameraItem,
+          cameraPos,
+          absHeight,
+          pitchRad,
+          rotAngle,
+          hFov,
+          range,
+          state
+        );
 
 
 
@@ -4813,7 +4849,7 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (viewMode !== "iso3d") return;
     rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId, terrainHeights, buildingLabelDefaults]);
+  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, sceneBackgroundImg, backgroundMode, terrainHeights, buildingLabelDefaults]);
 
   useEffect(() => {
     if (viewMode !== "iso3d") return;
@@ -4826,6 +4862,18 @@ export default function SecurityPlanner() {
     });
     return () => window.cancelAnimationFrame(id);
   }, [items, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "iso3d") return;
+    const id = window.requestAnimationFrame(() => {
+      updateThreeScenePositions();
+      const state = threeStateRef.current;
+      if (state) {
+        state.renderer.render(state.scene, state.camera);
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [frustumSettings, selectedId, viewMode]);
 
   useEffect(() => {
     if (viewMode !== "iso3d") return;
@@ -8263,24 +8311,6 @@ export default function SecurityPlanner() {
                         />
                         <div className="w-7 h-4 bg-slate-700/50 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600"></div>
                       </label>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs text-slate-500">Style</label>
-                      <div className="bg-white/5 p-0.5 rounded-lg flex text-[10px] font-medium border border-white/10">
-                        <button
-                          onClick={() => setFrustumSettings({ ...frustumSettings, mode: 'volume' })}
-                          className={`px-2 py-1 rounded transition-colors ${(!frustumSettings.mode || frustumSettings.mode === 'volume') ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
-                        >
-                          Full
-                        </button>
-                        <button
-                          onClick={() => setFrustumSettings({ ...frustumSettings, mode: 'floor' })}
-                          className={`px-2 py-1 rounded transition-colors ${frustumSettings.mode === 'floor' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
-                        >
-                          Floor
-                        </button>
-                      </div>
                     </div>
 
                     {/* Opacity Sliders */}
