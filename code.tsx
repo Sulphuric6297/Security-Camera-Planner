@@ -56,6 +56,44 @@ type DemData = {
   max: number;
   noData?: number | null;
 };
+type HistoryState = {
+  items: CanvasItem[];
+  terrainHeights: Record<string, number>;
+  buildingLabelDefaults: BuildingLabelDefaults;
+  backgroundImg: string | null;
+  bgSettings: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    opacity: number;
+  };
+  canvasSize: { width: number; height: number };
+  gridSize: number;
+  showGrid: boolean;
+  snapToGrid: boolean;
+  frustumSettings: {
+    visible: boolean;
+    opacity: number;
+    edgeOpacity: number;
+    useCameraColor: boolean;
+    color: string;
+    showAll: boolean;
+    mode: 'volume' | 'floor';
+  };
+  sceneBackgroundImg: string | null;
+  backgroundMode: 'flat' | 'panorama';
+  nvrLayout: any[];
+  demSettings: {
+    demScale: number;
+    demOffset: number;
+    demNormalize: boolean;
+    demTransform: { x: number; y: number; scale: number; rotation: number };
+    demOverlayOpacity: number;
+    demAlignMode: boolean;
+    demAlignTool: DemAlignTool;
+  };
+};
 
 interface BaseItem {
   id: string;
@@ -226,12 +264,12 @@ const getTreeSignature = (item: TreeItem) =>
   `${item.radius}|${item.height ?? 30}|${item.width ?? 1}|${item.treeType ?? 'deciduous'}|${item.color}`;
 
 const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
-  if (type === "parking") return plural ? "Cars" : "Car";
+  if (type === "parking") return plural ? "Vehicles" : "Vehicle";
   if (type === "camera") return plural ? "Cameras" : "Camera";
   if (type === "building") return plural ? "Buildings" : "Building";
   if (type === "tree") return plural ? "Trees" : "Tree";
-  if (type === "label") return plural ? "Labels" : "Label";
-  if (type === "image") return plural ? "Images" : "Image";
+  if (type === "label") return plural ? "Text" : "Text";
+  if (type === "image") return plural ? "Overlays" : "Overlay";
   return type;
 };
 
@@ -859,100 +897,6 @@ export default function SecurityPlanner() {
   const panelSection = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-3";
   const panelSectionLoose = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-4";
 
-  // State Refs for History (Ensures we save latest state in async callbacks)
-  const currentItemsRef = useRef(items);
-  const terrainHeightsRef = useRef(terrainHeights);
-  const buildingLabelDefaultsRef = useRef(buildingLabelDefaults);
-  useEffect(() => { currentItemsRef.current = items; }, [items]);
-  useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
-  useEffect(() => { buildingLabelDefaultsRef.current = buildingLabelDefaults; }, [buildingLabelDefaults]);
-
-  // Clipboard
-  const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
-  const clipboardRef = useRef<CanvasItem | null>(null);
-  useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
-
-  // History State
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const historyRef = useRef<string[]>([]);
-  const historyIndexRef = useRef(-1);
-
-  // Sync refs for event listeners
-  useEffect(() => {
-    historyRef.current = history;
-    historyIndexRef.current = historyIndex;
-  }, [history, historyIndex]);
-
-  const saveHistory = (itemsOverride?: CanvasItem[], terrainHeightsOverride?: Record<string, number>) => {
-    const currentState = JSON.stringify({
-      items: itemsOverride || currentItemsRef.current,
-      terrainHeights: terrainHeightsOverride || terrainHeightsRef.current,
-      buildingLabelDefaults: buildingLabelDefaultsRef.current
-    });
-    // Don't save if same as current top
-    if (historyIndex >= 0 && history[historyIndex] === currentState) return;
-
-    setHistory(prev => {
-      const newHistory = prev.slice(0, historyIndex + 1);
-      newHistory.push(currentState);
-      if (newHistory.length > 30) newHistory.shift();
-      return newHistory;
-    });
-    setHistoryIndex(prev => {
-      const next = prev + 1;
-      return next >= 30 ? 29 : next;
-    });
-  };
-
-  const handleUndo = () => {
-    const curIndex = historyIndexRef.current;
-    if (curIndex > 0) {
-      const newIndex = curIndex - 1;
-      try {
-        const state = JSON.parse(historyRef.current[newIndex]);
-        if (Array.isArray(state)) {
-          setItems(state);
-        } else {
-          setItems(state.items || []);
-          setTerrainHeights(state.terrainHeights || {});
-          if (state.buildingLabelDefaults) {
-            setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
-          } else {
-            setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
-          }
-        }
-        setHistoryIndex(newIndex);
-      } catch (e) {
-        console.error("Undo failed", e);
-      }
-    }
-  };
-
-  const handleRedo = () => {
-    const curIndex = historyIndexRef.current;
-    if (curIndex < historyRef.current.length - 1) {
-      const newIndex = curIndex + 1;
-      try {
-        const state = JSON.parse(historyRef.current[newIndex]);
-        if (Array.isArray(state)) {
-          setItems(state);
-        } else {
-          setItems(state.items || []);
-          setTerrainHeights(state.terrainHeights || {});
-          if (state.buildingLabelDefaults) {
-            setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
-          } else {
-            setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
-          }
-        }
-        setHistoryIndex(newIndex);
-      } catch (e) {
-        console.error("Redo failed", e);
-      }
-    }
-  };
-
   // Canvas + Background State
   const [canvasSize, setCanvasSize] = useState(DEFAULT_CANVAS);
   const [backgroundImg, setBackgroundImg] = useState<string | null>(null);
@@ -997,6 +941,194 @@ export default function SecurityPlanner() {
     }
   }, [selectedId]);
 
+  // State Refs for History (Ensures we save latest state in async callbacks)
+  const currentItemsRef = useRef(items);
+  const terrainHeightsRef = useRef(terrainHeights);
+  const buildingLabelDefaultsRef = useRef(buildingLabelDefaults);
+  const backgroundImgRef = useRef(backgroundImg);
+  const bgSettingsRef = useRef(bgSettings);
+  const canvasSizeRef = useRef(canvasSize);
+  const gridSizeRef = useRef(gridSize);
+  const showGridRef = useRef(showGrid);
+  const snapToGridRef = useRef(snapToGrid);
+  const frustumSettingsRef = useRef({
+    visible: true,
+    opacity: 0.15,
+    edgeOpacity: 0.6,
+    useCameraColor: true,
+    color: '#3b82f6',
+    showAll: true,
+    mode: 'volume' as 'volume' | 'floor'
+  });
+  const sceneBackgroundImgRef = useRef<string | null>(null);
+  const backgroundModeRef = useRef<'flat' | 'panorama'>('flat');
+  const nvrLayoutRef = useRef<any[]>([]);
+  const demScaleRef = useRef(demScale);
+  const demOffsetRef = useRef(demOffset);
+  const demNormalizeRef = useRef(demNormalize);
+  const demTransformRef = useRef(demTransform);
+  const demOverlayOpacityRef = useRef(demOverlayOpacity);
+  const demAlignModeRef = useRef(demAlignMode);
+  const demAlignToolRef = useRef(demAlignTool);
+  const isApplyingHistoryRef = useRef(false);
+  const historySettingsTimerRef = useRef<number | null>(null);
+  const itemsHistoryTimerRef = useRef<number | null>(null);
+  useEffect(() => { currentItemsRef.current = items; }, [items]);
+  useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
+  useEffect(() => { buildingLabelDefaultsRef.current = buildingLabelDefaults; }, [buildingLabelDefaults]);
+  useEffect(() => { backgroundImgRef.current = backgroundImg; }, [backgroundImg]);
+  useEffect(() => { bgSettingsRef.current = bgSettings; }, [bgSettings]);
+  useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
+  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
+  useEffect(() => { showGridRef.current = showGrid; }, [showGrid]);
+  useEffect(() => { snapToGridRef.current = snapToGrid; }, [snapToGrid]);
+  useEffect(() => { demScaleRef.current = demScale; }, [demScale]);
+  useEffect(() => { demOffsetRef.current = demOffset; }, [demOffset]);
+  useEffect(() => { demNormalizeRef.current = demNormalize; }, [demNormalize]);
+  useEffect(() => { demTransformRef.current = demTransform; }, [demTransform]);
+  useEffect(() => { demOverlayOpacityRef.current = demOverlayOpacity; }, [demOverlayOpacity]);
+  useEffect(() => { demAlignModeRef.current = demAlignMode; }, [demAlignMode]);
+  useEffect(() => { demAlignToolRef.current = demAlignTool; }, [demAlignTool]);
+
+  // Clipboard
+  const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
+  const clipboardRef = useRef<CanvasItem | null>(null);
+  useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
+
+  // History State
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const historyRef = useRef<string[]>([]);
+  const historyIndexRef = useRef(-1);
+
+  // Sync refs for event listeners
+  useEffect(() => {
+    historyRef.current = history;
+    historyIndexRef.current = historyIndex;
+  }, [history, historyIndex]);
+
+  const saveHistory = (itemsOverride?: CanvasItem[], terrainHeightsOverride?: Record<string, number>) => {
+    if (isApplyingHistoryRef.current) return;
+    const currentState = JSON.stringify({
+      items: itemsOverride || currentItemsRef.current,
+      terrainHeights: terrainHeightsOverride || terrainHeightsRef.current,
+      buildingLabelDefaults: buildingLabelDefaultsRef.current,
+      backgroundImg: backgroundImgRef.current,
+      bgSettings: bgSettingsRef.current,
+      canvasSize: canvasSizeRef.current,
+      gridSize: gridSizeRef.current,
+      showGrid: showGridRef.current,
+      snapToGrid: snapToGridRef.current,
+      frustumSettings: frustumSettingsRef.current,
+      sceneBackgroundImg: sceneBackgroundImgRef.current,
+      backgroundMode: backgroundModeRef.current,
+      nvrLayout: nvrLayoutRef.current,
+      demSettings: {
+        demScale: demScaleRef.current,
+        demOffset: demOffsetRef.current,
+        demNormalize: demNormalizeRef.current,
+        demTransform: demTransformRef.current,
+        demOverlayOpacity: demOverlayOpacityRef.current,
+        demAlignMode: demAlignModeRef.current,
+        demAlignTool: demAlignToolRef.current
+      }
+    } as HistoryState);
+    // Don't save if same as current top
+    if (historyIndex >= 0 && history[historyIndex] === currentState) return;
+
+    setHistory(prev => {
+      const newHistory = prev.slice(0, historyIndex + 1);
+      newHistory.push(currentState);
+      if (newHistory.length > 30) newHistory.shift();
+      return newHistory;
+    });
+    setHistoryIndex(prev => {
+      const next = prev + 1;
+      return next >= 30 ? 29 : next;
+    });
+  };
+
+  const applyHistoryState = (state: any) => {
+    if (Array.isArray(state)) {
+      setItems(state);
+      return;
+    }
+    if (!state || typeof state !== "object") return;
+    if (Array.isArray(state.items)) setItems(state.items);
+    if (state.terrainHeights && typeof state.terrainHeights === "object") setTerrainHeights(state.terrainHeights);
+    if (state.buildingLabelDefaults) {
+      setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
+    } else {
+      setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
+    }
+    if (state.backgroundImg !== undefined) setBackgroundImg(state.backgroundImg);
+    if (state.bgSettings) setBgSettings(state.bgSettings);
+    if (state.canvasSize) setCanvasSize(state.canvasSize);
+    if (typeof state.gridSize === "number") setGridSize(state.gridSize);
+    if (typeof state.showGrid === "boolean") setShowGrid(state.showGrid);
+    if (typeof state.snapToGrid === "boolean") setSnapToGrid(state.snapToGrid);
+    if (state.frustumSettings) setFrustumSettings(state.frustumSettings);
+    if (state.sceneBackgroundImg !== undefined) setSceneBackgroundImg(state.sceneBackgroundImg);
+    if (state.backgroundMode) setBackgroundMode(state.backgroundMode);
+    if (Array.isArray(state.nvrLayout)) setNvrLayout(state.nvrLayout);
+    if (state.demSettings) {
+      const settings = state.demSettings;
+      if (typeof settings.demScale === "number") setDemScale(settings.demScale);
+      if (typeof settings.demOffset === "number") setDemOffset(settings.demOffset);
+      if (typeof settings.demNormalize === "boolean") setDemNormalize(settings.demNormalize);
+      if (settings.demTransform) setDemTransform(settings.demTransform);
+      if (typeof settings.demOverlayOpacity === "number") setDemOverlayOpacity(settings.demOverlayOpacity);
+      if (typeof settings.demAlignMode === "boolean") setDemAlignMode(settings.demAlignMode);
+      if (settings.demAlignTool) setDemAlignTool(settings.demAlignTool);
+    }
+  };
+
+  const handleUndo = () => {
+    const curIndex = historyIndexRef.current;
+    if (curIndex > 0) {
+      const newIndex = curIndex - 1;
+      try {
+        isApplyingHistoryRef.current = true;
+        const state = JSON.parse(historyRef.current[newIndex]);
+        applyHistoryState(state);
+        setHistoryIndex(newIndex);
+        window.setTimeout(() => {
+          isApplyingHistoryRef.current = false;
+        }, 0);
+      } catch (e) {
+        isApplyingHistoryRef.current = false;
+        console.error("Undo failed", e);
+      }
+    }
+  };
+
+  const handleRedo = () => {
+    const curIndex = historyIndexRef.current;
+    if (curIndex < historyRef.current.length - 1) {
+      const newIndex = curIndex + 1;
+      try {
+        isApplyingHistoryRef.current = true;
+        const state = JSON.parse(historyRef.current[newIndex]);
+        applyHistoryState(state);
+        setHistoryIndex(newIndex);
+        window.setTimeout(() => {
+          isApplyingHistoryRef.current = false;
+        }, 0);
+      } catch (e) {
+        isApplyingHistoryRef.current = false;
+        console.error("Redo failed", e);
+      }
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (exportNoticeTimerRef.current) {
+        window.clearTimeout(exportNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
   // Interaction State
   const [interactionState, setInteractionState] = useState<{
     type: InteractionType;
@@ -1006,9 +1138,12 @@ export default function SecurityPlanner() {
     variant?: string;
     snap?: boolean;
   }>({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
+  const interactionStateRef = useRef(interactionState);
+  useEffect(() => { interactionStateRef.current = interactionState; }, [interactionState]);
 
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useState<any[]>([]);
+  useEffect(() => { nvrLayoutRef.current = nvrLayout; }, [nvrLayout]);
   const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
   const nvrContainerRef = useRef<HTMLDivElement>(null);
   const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
@@ -1278,7 +1413,6 @@ export default function SecurityPlanner() {
   const terrainFlattenSampleRef = useRef(terrainFlattenSample);
   const demDataRef = useRef<DemData | null>(demData);
   const demPreviewRef = useRef(demPreview);
-  const demTransformRef = useRef(demTransform);
   const prevCanvasSizeRef = useRef(canvasSize);
   const prevGridSizeRef = useRef(gridSize);
   const prevBgSettingsRef = useRef(bgSettings);
@@ -1291,7 +1425,6 @@ export default function SecurityPlanner() {
   useEffect(() => { terrainFlattenSampleRef.current = terrainFlattenSample; }, [terrainFlattenSample]);
   useEffect(() => { demDataRef.current = demData; }, [demData]);
   useEffect(() => { demPreviewRef.current = demPreview; }, [demPreview]);
-  useEffect(() => { demTransformRef.current = demTransform; }, [demTransform]);
   const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
   const terrainStrokeRef = useRef<{
     active: boolean;
@@ -1352,6 +1485,12 @@ export default function SecurityPlanner() {
     dataUrl: string;
     cameraId?: string;
   }[]>([]);
+  const [exportNotice, setExportNotice] = useState<{
+    id: number;
+    message: string;
+    tone: 'success' | 'error' | 'info';
+  } | null>(null);
+  const exportNoticeTimerRef = useRef<number | null>(null);
 
   // 3D Visualization Settings
   const [frustumSettings, setFrustumSettings] = useState({
@@ -1365,8 +1504,64 @@ export default function SecurityPlanner() {
   });
   const [sceneBackgroundImg, setSceneBackgroundImg] = useState<string | null>(null);
   const [backgroundMode, setBackgroundMode] = useState<'flat' | 'panorama'>('flat'); // 'flat' = image, 'panorama' = 360° equirectangular
+  useEffect(() => { frustumSettingsRef.current = frustumSettings; }, [frustumSettings]);
+  useEffect(() => { sceneBackgroundImgRef.current = sceneBackgroundImg; }, [sceneBackgroundImg]);
+  useEffect(() => { backgroundModeRef.current = backgroundMode; }, [backgroundMode]);
 
-  // Street View Integration
+  useEffect(() => {
+    if (isApplyingHistoryRef.current) return;
+    if (historyIndexRef.current < 0) return;
+    if (historySettingsTimerRef.current) {
+      window.clearTimeout(historySettingsTimerRef.current);
+    }
+    historySettingsTimerRef.current = window.setTimeout(() => {
+      saveHistory();
+    }, 200);
+    return () => {
+      if (historySettingsTimerRef.current) {
+        window.clearTimeout(historySettingsTimerRef.current);
+      }
+    };
+  }, [
+    backgroundImg,
+    bgSettings,
+    canvasSize,
+    gridSize,
+    showGrid,
+    snapToGrid,
+    frustumSettings,
+    sceneBackgroundImg,
+    backgroundMode,
+    nvrLayout,
+    buildingLabelDefaults,
+    demScale,
+    demOffset,
+    demNormalize,
+    demTransform,
+    demOverlayOpacity,
+    demAlignMode,
+    demAlignTool
+  ]);
+
+  useEffect(() => {
+    if (isApplyingHistoryRef.current) return;
+    if (historyIndexRef.current < 0) return;
+    if (interactionStateRef.current.type) return;
+    if (threeDragStateRef.current.isDragging) return;
+    if (itemsHistoryTimerRef.current) {
+      window.clearTimeout(itemsHistoryTimerRef.current);
+    }
+    itemsHistoryTimerRef.current = window.setTimeout(() => {
+      saveHistory();
+    }, 200);
+    return () => {
+      if (itemsHistoryTimerRef.current) {
+        window.clearTimeout(itemsHistoryTimerRef.current);
+      }
+    };
+  }, [items, interactionState]);
+
+  // Environment background setup
 
 
   // 3D Model URLs (for higher quality models)
@@ -1745,7 +1940,7 @@ export default function SecurityPlanner() {
         newItem = {
           ...common,
           type: "label",
-          text: "Label",
+          text: "Text",
           fontSize: 14,
           color: COLORS.label[0]
         };
@@ -1792,7 +1987,7 @@ export default function SecurityPlanner() {
       width: 150,
       height: 150,
       src,
-      label: "Image",
+      label: "Overlay",
       aspectRatioLocked: true
     };
     setItems([...items, newItem]);
@@ -1983,10 +2178,85 @@ export default function SecurityPlanner() {
     });
   };
 
+  const showExportNotice = (message: string, tone: 'success' | 'error' | 'info' = 'success') => {
+    setExportNotice({ id: Date.now(), message, tone });
+    if (exportNoticeTimerRef.current) {
+      window.clearTimeout(exportNoticeTimerRef.current);
+    }
+    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), 2400);
+  };
+
+  const getPlanViewBox = () => {
+    const viewX = -panOffset.x / zoom;
+    const viewY = -panOffset.y / zoom;
+    const viewW = canvasSize.width / zoom;
+    const viewH = canvasSize.height / zoom;
+    return { x: viewX, y: viewY, width: viewW, height: viewH };
+  };
+
+  const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+
+  const renderPlanToDataUrl = async (options?: {
+    scale?: number;
+    includeGrid?: boolean;
+    backgroundColor?: string;
+  }) => {
+    if (!svgRef.current) {
+      throw new Error("Plan view is not ready.");
+    }
+
+    const { scale = 2, includeGrid = true, backgroundColor = "#f8fafc" } = options || {};
+    const view = getPlanViewBox();
+    const source = svgRef.current.cloneNode(true) as SVGSVGElement;
+    const panLayer = source.querySelector('g[data-pan-zoom="true"]');
+    if (panLayer) {
+      panLayer.setAttribute("transform", "translate(0 0) scale(1)");
+    }
+    if (!includeGrid) {
+      const grid = source.querySelector("#grid-bg");
+      if (grid) grid.remove();
+    }
+
+    source.setAttribute("viewBox", `${view.x} ${view.y} ${view.width} ${view.height}`);
+    source.setAttribute("width", `${canvasSize.width}`);
+    source.setAttribute("height", `${canvasSize.height}`);
+    source.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    const svgData = new XMLSerializer().serializeToString(source);
+    const blob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    try {
+      const img = await loadImageElement(url);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(canvasSize.width * scale);
+      canvas.height = Math.round(canvasSize.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("Failed to prepare export canvas.");
+      }
+      ctx.scale(scale, scale);
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
+      ctx.drawImage(img, 0, 0, canvasSize.width, canvasSize.height);
+      return canvas.toDataURL("image/png");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
   // --- Save / Load / Export ---
 
-  const handleExportPng = () => {
-    if (!svgRef.current) return;
+  const handleExportPng = async () => {
+    if (!svgRef.current) {
+      showExportNotice("Plan view is not ready yet.", "error");
+      return;
+    }
 
     const { scale, padding, includeGrid, includeLegend, includeTitle } = exportOptions;
     const timestamp = new Date().toLocaleString();
@@ -1997,66 +2267,53 @@ export default function SecurityPlanner() {
     const totalWidth = width + padding * 2;
     const totalHeight = height + padding * 2 + titleHeight + legendHeight;
 
-    const svgNS = "http://www.w3.org/2000/svg";
-    const exportSvg = document.createElementNS(svgNS, "svg");
-    exportSvg.setAttribute("xmlns", svgNS);
-    exportSvg.setAttribute("width", `${totalWidth}`);
-    exportSvg.setAttribute("height", `${totalHeight}`);
-    exportSvg.setAttribute("viewBox", `0 0 ${totalWidth} ${totalHeight}`);
-
-    const background = document.createElementNS(svgNS, "rect");
-    background.setAttribute("x", "0");
-    background.setAttribute("y", "0");
-    background.setAttribute("width", `${totalWidth}`);
-    background.setAttribute("height", `${totalHeight}`);
-    background.setAttribute("fill", "#ffffff");
-    exportSvg.appendChild(background);
+    const canvas = document.createElement("canvas");
+    canvas.width = totalWidth * scale;
+    canvas.height = totalHeight * scale;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      showExportNotice("Failed to prepare export canvas.", "error");
+      return;
+    }
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, totalWidth, totalHeight);
 
     if (includeTitle) {
-      const title = document.createElementNS(svgNS, "text");
-      title.setAttribute("x", `${padding}`);
-      title.setAttribute("y", `${padding + 24}`);
-      title.setAttribute("font-size", "20");
-      title.setAttribute("font-weight", "700");
-      title.setAttribute("fill", "#0f172a");
-      title.textContent = projectName || "Security Camera Plan";
-      exportSvg.appendChild(title);
-
-      const subtitle = document.createElementNS(svgNS, "text");
-      subtitle.setAttribute("x", `${padding}`);
-      subtitle.setAttribute("y", `${padding + 44}`);
-      subtitle.setAttribute("font-size", "12");
-      subtitle.setAttribute("fill", "#64748b");
-      subtitle.textContent = `Exported ${timestamp}`;
-      exportSvg.appendChild(subtitle);
+      ctx.fillStyle = "#0f172a";
+      ctx.font = "700 20px system-ui, sans-serif";
+      ctx.fillText(projectName || "Security Camera Plan", padding, padding + 24);
+      ctx.fillStyle = "#64748b";
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.fillText(`Exported ${timestamp}`, padding, padding + 44);
     }
 
-    const contentGroup = document.createElementNS(svgNS, "g");
+    const contentX = padding;
     const contentY = padding + titleHeight;
-    contentGroup.setAttribute("transform", `translate(${padding}, ${contentY})`);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillRect(contentX, contentY, width, height);
 
-    const source = svgRef.current.cloneNode(true) as SVGSVGElement;
-    source.removeAttribute("width");
-    source.removeAttribute("height");
-    if (!includeGrid) {
-      const grid = source.querySelector("#grid-bg");
-      if (grid) grid.remove();
+    let planImage: HTMLImageElement | null = null;
+    try {
+      const planDataUrl = await renderPlanToDataUrl({
+        scale,
+        includeGrid,
+        backgroundColor: "#f8fafc"
+      });
+      planImage = await loadImageElement(planDataUrl);
+    } catch (e) {
+      console.error("Plan export failed", e);
+      showExportNotice("Failed to render plan export.", "error");
+      return;
     }
 
-    while (source.childNodes.length > 0) {
-      contentGroup.appendChild(source.childNodes[0]);
+    if (planImage) {
+      ctx.drawImage(planImage, contentX, contentY, width, height);
     }
-    exportSvg.appendChild(contentGroup);
 
-    const frame = document.createElementNS(svgNS, "rect");
-    frame.setAttribute("x", `${padding - 1}`);
-    frame.setAttribute("y", `${contentY - 1}`);
-    frame.setAttribute("width", `${width + 2}`);
-    frame.setAttribute("height", `${height + 2}`);
-    frame.setAttribute("fill", "none");
-    frame.setAttribute("stroke", "#e2e8f0");
-    frame.setAttribute("stroke-width", "2");
-    exportSvg.appendChild(frame);
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(contentX - 1, contentY - 1, width + 2, height + 2);
 
     if (includeLegend) {
       const legendY = contentY + height + 36;
@@ -2064,82 +2321,46 @@ export default function SecurityPlanner() {
         { label: "Cameras", count: items.filter(item => item.type === "camera").length, color: COLORS.camera[0] },
         { label: "Buildings", count: items.filter(item => item.type === "building").length, color: COLORS.building[0] },
         { label: "Trees", count: items.filter(item => item.type === "tree").length, color: COLORS.tree[0] },
-        { label: "Cars", count: items.filter(item => item.type === "parking").length, color: COLORS.parking[0] },
-        { label: "Labels", count: items.filter(item => item.type === "label").length, color: COLORS.label[0] }
+        { label: "Vehicles", count: items.filter(item => item.type === "parking").length, color: COLORS.parking[0] },
+        { label: "Text", count: items.filter(item => item.type === "label").length, color: COLORS.label[0] }
       ];
 
-      const legendTitle = document.createElementNS(svgNS, "text");
-      legendTitle.setAttribute("x", `${padding}`);
-      legendTitle.setAttribute("y", `${legendY}`);
-      legendTitle.setAttribute("font-size", "12");
-      legendTitle.setAttribute("font-weight", "600");
-      legendTitle.setAttribute("fill", "#0f172a");
-      legendTitle.textContent = "Legend";
-      exportSvg.appendChild(legendTitle);
+      ctx.fillStyle = "#0f172a";
+      ctx.font = "600 12px system-ui, sans-serif";
+      ctx.fillText("Legend", padding, legendY);
 
       legendItems.forEach((entry, index) => {
         const itemX = padding + index * 150;
-        const dot = document.createElementNS(svgNS, "rect");
-        dot.setAttribute("x", `${itemX}`);
-        dot.setAttribute("y", `${legendY + 14}`);
-        dot.setAttribute("width", "10");
-        dot.setAttribute("height", "10");
-        dot.setAttribute("rx", "2");
-        dot.setAttribute("fill", entry.color);
-        exportSvg.appendChild(dot);
-
-        const label = document.createElementNS(svgNS, "text");
-        label.setAttribute("x", `${itemX + 16}`);
-        label.setAttribute("y", `${legendY + 23}`);
-        label.setAttribute("font-size", "11");
-        label.setAttribute("fill", "#475569");
-        label.textContent = `${entry.label} (${entry.count})`;
-        exportSvg.appendChild(label);
+        ctx.fillStyle = entry.color;
+        ctx.fillRect(itemX, legendY + 12, 10, 10);
+        ctx.fillStyle = "#475569";
+        ctx.font = "11px system-ui, sans-serif";
+        ctx.fillText(`${entry.label} (${entry.count})`, itemX + 16, legendY + 21);
       });
     }
 
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    canvas.width = totalWidth * scale;
-    canvas.height = totalHeight * scale;
-
-    if (ctx) {
-      ctx.scale(scale, scale);
-    }
-
-    const svgData = new XMLSerializer().serializeToString(exportSvg);
-    const img = new Image();
-    const blob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-
-    img.onload = () => {
-      if (ctx) {
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, totalWidth, totalHeight);
-        ctx.drawImage(img, 0, 0);
-
-        const pngUrl = canvas.toDataURL("image/png");
-        const downloadLink = document.createElement("a");
-        downloadLink.href = pngUrl;
-        downloadLink.download = "security_plan.png";
-        document.body.appendChild(downloadLink);
-        downloadLink.click();
-        document.body.removeChild(downloadLink);
-      }
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
+    const pngUrl = canvas.toDataURL("image/png");
+    const downloadLink = document.createElement("a");
+    downloadLink.href = pngUrl;
+    downloadLink.download = "security_plan.png";
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
   };
 
   // Add snapshot to export list
   const addToExportList = (type: 'plan' | '3d' | 'camera', label: string, dataUrl: string, cameraId?: string) => {
+    const id = typeof crypto !== "undefined" && typeof (crypto as any).randomUUID === "function"
+      ? (crypto as any).randomUUID()
+      : generateId();
     setExportList(prev => [...prev, {
-      id: crypto.randomUUID(),
+      id,
       type,
       label,
       dataUrl,
       cameraId
     }]);
+    showExportNotice(`Added to Report: ${label}`);
   };
 
   const getCameraSnapshotRenderer = (width: number, height: number) => {
@@ -2335,43 +2556,46 @@ export default function SecurityPlanner() {
   };
 
   // Add current 2D plan to export list
-  const addPlanToExportList = () => {
-    if (!svgRef.current) return;
-    const svgData = new XMLSerializer().serializeToString(svgRef.current);
-    const canvas = document.createElement('canvas');
-    canvas.width = canvasSize.width * 2;
-    canvas.height = canvasSize.height * 2;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const img = new Image();
-    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-
-    img.onload = () => {
-      ctx.scale(2, 2);
-      ctx.fillStyle = '#f8fafc';
-      ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
-      ctx.drawImage(img, 0, 0);
-      addToExportList('plan', '2D Plan View', canvas.toDataURL('image/png'));
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
+  const addPlanToExportList = async () => {
+    try {
+      const dataUrl = await renderPlanToDataUrl({
+        scale: 2,
+        includeGrid: showGrid,
+        backgroundColor: "#f8fafc"
+      });
+      addToExportList('plan', '2D Plan View', dataUrl);
+    } catch (e) {
+      console.error("Plan capture failed", e);
+      showExportNotice("Failed to capture plan view.", "error");
+    }
   };
 
   // Add current 3D view to export list
   const add3dToExportList = () => {
     const state = threeStateRef.current;
-    if (!state) return;
-    state.renderer.render(state.scene, state.camera);
-    const dataUrl = state.renderer.domElement.toDataURL('image/png');
-    addToExportList('3d', '3D Overview', dataUrl);
+    if (!state) {
+      showExportNotice("3D view is not ready yet.", "error");
+      return;
+    }
+    try {
+      state.renderer.render(state.scene, state.camera);
+      const dataUrl = state.renderer.domElement.toDataURL('image/png');
+      addToExportList('3d', '3D Overview', dataUrl);
+    } catch (e) {
+      console.error("3D export failed", e);
+      showExportNotice("Failed to capture 3D view.", "error");
+    }
   };
 
   // Add camera view to export list
   const addCameraViewToExportList = (cam: CameraItem) => {
-    const dataUrl = renderCameraViewToDataUrl(cam);
-    addToExportList('camera', `Camera: ${cam.label}`, dataUrl, cam.id);
+    try {
+      const dataUrl = renderCameraViewToDataUrl(cam);
+      addToExportList('camera', `Camera: ${cam.label}`, dataUrl, cam.id);
+    } catch (e) {
+      console.error("Camera export failed", e);
+      showExportNotice("Failed to capture camera view.", "error");
+    }
   };
 
 
@@ -2403,7 +2627,7 @@ export default function SecurityPlanner() {
   // Export comprehensive report with all items in export list
   const handleExportReportPng = async () => {
     if (exportList.length === 0) {
-      alert('Add some views to the export list first!');
+      showExportNotice("Your report is empty. Add views first.", "info");
       return;
     }
 
@@ -2422,7 +2646,10 @@ export default function SecurityPlanner() {
     canvas.width = totalWidth * scale;
     canvas.height = totalHeight * scale;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      showExportNotice("Failed to prepare report canvas.", "error");
+      return;
+    }
 
     ctx.scale(scale, scale);
     ctx.fillStyle = '#fff';
@@ -2501,13 +2728,13 @@ export default function SecurityPlanner() {
   };
   const handleExportReportPdf = () => {
     if (exportList.length === 0) {
-      alert('Add some views to the export list first!');
+      showExportNotice("Your report is empty. Add views first.", "info");
       return;
     }
 
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
-      alert('Please allow popups to export PDF');
+      showExportNotice("Popups blocked. Allow popups to export PDF.", "error");
       return;
     }
 
@@ -3953,7 +4180,7 @@ export default function SecurityPlanner() {
   }, [items, selectedId, handleSaveProject]);
 
 
-  // Effect to handle environment background updates (HDRI / Panorama / Street View)
+  // Effect to handle environment background updates (HDRI / Panorama)
   useEffect(() => {
     if (!threeStateRef.current) return;
     const { scene, renderer, camera } = threeStateRef.current;
@@ -4010,14 +4237,10 @@ export default function SecurityPlanner() {
   const itemsRef = useRef(items);
   const modeRef = useRef(mode);
   const selectedIdRef = useRef(selectedId);
-  const snapToGridRef = useRef(snapToGrid);
-  const gridSizeRef = useRef(gridSize);
 
   useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
-  useEffect(() => { snapToGridRef.current = snapToGrid; }, [snapToGrid]);
-  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
 
   // Effect: Handle 3D Selection Highlight (Emissive Glow)
   useEffect(() => {
@@ -5505,16 +5728,28 @@ export default function SecurityPlanner() {
         : "#10b981";
   const floatingPanelRight = isRightPanelOpen ? "right-96" : "right-4";
   const showProjectSettings = rightPanelMode === "project";
+  const exportNoticeTone = exportNotice?.tone ?? "success";
+  const exportNoticeClass =
+    exportNoticeTone === "error"
+      ? "border-red-500/40 bg-red-500/10 text-red-200"
+      : exportNoticeTone === "info"
+        ? "border-slate-500/40 bg-slate-500/10 text-slate-200"
+        : "border-emerald-500/40 bg-emerald-500/10 text-emerald-200";
 
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
+      {exportNotice && (
+        <div className={`absolute top-20 right-4 z-50 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-top-2`}>
+          {exportNotice.message}
+        </div>
+      )}
       {showExportPanel && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden text-slate-200">
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
               <div>
-                <p className="text-xs uppercase tracking-wide text-slate-400">Export</p>
-                <h2 className="text-lg font-semibold text-slate-200">Export Plan</h2>
+                <p className="text-xs uppercase tracking-wide text-slate-400">Report</p>
+                <h2 className="text-lg font-semibold text-slate-200">Export Report</h2>
               </div>
               <button onClick={() => setShowExportPanel(false)} className="p-2 text-slate-400 hover:text-slate-600">
                 <X className="w-5 h-5" />
@@ -5535,7 +5770,7 @@ export default function SecurityPlanner() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-slate-400 uppercase">
-                    Export List ({exportList.length} items)
+                    Report Views ({exportList.length} items)
                   </label>
                   {exportList.length > 0 && (
                     <button
@@ -5549,7 +5784,7 @@ export default function SecurityPlanner() {
                 {exportList.length === 0 ? (
                   <div className="bg-slate-50 rounded-lg p-4 text-center text-slate-400 text-sm">
                     <p>No views added yet</p>
-                    <p className="text-xs mt-1">Use "Add to Export" buttons while working</p>
+                    <p className="text-xs mt-1">Use "Add to Report" buttons while working</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
@@ -5640,7 +5875,7 @@ export default function SecurityPlanner() {
                   })}
                 </div>
               </div>
-              <p className="text-xs text-slate-400">Tip: Add views using "Add to Export" buttons, then export a client report.</p>
+              <p className="text-xs text-slate-400">Tip: Add views using "Add to Report" buttons, then export a client report.</p>
             </div>
             <div className="px-5 py-4 border-t border-white/10 bg-slate-50 flex flex-wrap justify-end gap-2">
               <button
@@ -5656,7 +5891,7 @@ export default function SecurityPlanner() {
                 }}
                 className="px-4 py-2 text-sm font-semibold bg-slate-600 hover:bg-slate-700 text-white rounded-lg"
               >
-                Plan Only
+                Plan PNG
               </button>
               <button
                 onClick={() => {
@@ -5669,7 +5904,7 @@ export default function SecurityPlanner() {
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                   }`}
               >
-                Export PNG
+                Report PNG
               </button>
               <button
                 onClick={() => {
@@ -5682,7 +5917,7 @@ export default function SecurityPlanner() {
                   : 'bg-blue-600 hover:bg-blue-700 text-white'
                   }`}
               >
-                Export PDF
+                Report PDF
               </button>
             </div>
           </div>
@@ -5748,12 +5983,12 @@ export default function SecurityPlanner() {
       <div className="absolute left-4 top-4 bottom-4 w-14 flex flex-col items-center py-4 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl z-50 gap-3 ring-1 ring-white/5">
         <div className="flex flex-col gap-2 w-full px-2">
           {[
-            { mode: "select", icon: Move, label: "Select" },
-            { mode: "add-camera", icon: Camera, label: "Camera" },
-            { mode: "add-building", icon: Square, label: "Building" },
-            { mode: "add-tree", icon: Trees, label: "Tree" },
-            { mode: "add-parking", icon: Car, label: "Cars" },
-            { mode: "add-label", icon: Type, label: "Label" }
+            { mode: "select", icon: Move, label: "Select / Move" },
+            { mode: "add-camera", icon: Camera, label: "Place Camera" },
+            { mode: "add-building", icon: Square, label: "Draw Building" },
+            { mode: "add-tree", icon: Trees, label: "Place Tree" },
+            { mode: "add-parking", icon: Car, label: "Vehicles" },
+            { mode: "add-label", icon: Type, label: "Text" }
           ].map(tool => (
             <button
               key={tool.mode}
@@ -5773,7 +6008,7 @@ export default function SecurityPlanner() {
           <button
             onClick={() => setViewMode(viewMode === "plan" ? "iso3d" : "plan")}
             className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${viewMode === "iso3d" ? "bg-indigo-600 text-white shadow-lg" : "text-slate-400 hover:text-white hover:bg-white/10"}`}
-            title="Toggle 3D View"
+            title="Switch 2D / 3D"
           >
             <Layers className="w-5 h-5" />
           </button>
@@ -5808,7 +6043,7 @@ export default function SecurityPlanner() {
                         How to Get Maps + Elevation
                       </summary>
                       <div className="mt-2 space-y-2 text-[10px] text-slate-400">
-                        <div><span className="font-semibold text-slate-300">Satellite image:</span> open your map source in a browser, take a screenshot, then click <span className="text-slate-200">Map</span> to upload.</div>
+                        <div><span className="font-semibold text-slate-300">Satellite image:</span> open your map source in a browser, take a screenshot, then click <span className="text-slate-200">Base Map</span> to upload.</div>
                         <div>
                           <span className="font-semibold text-slate-300">Elevation (GeoTIFF DEM):</span> download from USGS 3DEP (The National Map Downloader), then click <span className="text-slate-200">Upload TIF</span>.
                         </div>
@@ -6188,13 +6423,13 @@ export default function SecurityPlanner() {
           <div className="h-6 w-px bg-white/10 mx-2"></div>
 
           <div className="flex items-center gap-1">
-            <button onClick={handleNewProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="New Project">
+            <button onClick={handleNewProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="New Plan">
               <Plus className="w-5 h-5" />
             </button>
-            <button onClick={() => projectInputRef.current?.click()} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Load Project">
+            <button onClick={() => projectInputRef.current?.click()} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Open Plan">
               <FolderOpen className="w-5 h-5" />
             </button>
-            <button onClick={handleSaveProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Save Project">
+            <button onClick={handleSaveProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Save Plan">
               <Save className="w-5 h-5" />
             </button>
           </div>
@@ -6210,7 +6445,7 @@ export default function SecurityPlanner() {
 
           <button onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
             <LayoutGrid className="w-4 h-4" />
-            <span>NVR</span>
+            <span>Monitor Wall</span>
           </button>
           <button
             onClick={() => {
@@ -6220,24 +6455,24 @@ export default function SecurityPlanner() {
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all"
           >
             <MapIcon className="w-4 h-4" />
-            <span>Project</span>
+            <span>Settings</span>
           </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <Upload className="w-4 h-4" />
-            <span>Map</span>
+            <span>Base Map</span>
           </button>
           <button onClick={() => elementImageInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <ImageIcon className="w-4 h-4" />
-            <span>Image</span>
+            <span>Overlay</span>
           </button>
 
-          <button onClick={addPlanToExportList} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all" title="Add Current View">
+          <button onClick={addPlanToExportList} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all" title="Add Current View to Report">
             <Plus className="w-4 h-4" />
-            <span className="hidden sm:inline">Add View</span>
+            <span className="hidden sm:inline">Add to Report</span>
           </button>
           <button onClick={() => setShowExportPanel(true)} className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 transition-all">
             <Download className="w-4 h-4" />
-            <span>Export</span>
+            <span>Report</span>
           </button>
         </div>
       </div>
@@ -6249,7 +6484,7 @@ export default function SecurityPlanner() {
             onClick={() => setViewMode("plan")}
             className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
           >
-            Open Plan View
+            Go to Plan View
           </button>
         </div>
       )}
@@ -6329,6 +6564,16 @@ export default function SecurityPlanner() {
                 xmlns="http://www.w3.org/2000/svg"
               >
                 <defs>
+                  <style>{`
+                    @keyframes cameraFovFade {
+                      0% { opacity: 0.9; }
+                      70% { opacity: 0.35; }
+                      100% { opacity: 0.08; }
+                    }
+                    .camera-fov-fade {
+                      animation: cameraFovFade 14s ease-out forwards;
+                    }
+                  `}</style>
                   <pattern id="smallGrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
                     <path
                       d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
@@ -6339,7 +6584,7 @@ export default function SecurityPlanner() {
                   </pattern>
                 </defs>
 
-                <g transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
+                <g data-pan-zoom="true" transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
                   {showGrid && viewMode === "plan" && <rect id="grid-bg" width="100%" height="100%" fill="url(#smallGrid)" />}
 
                   {backgroundImg && viewMode === "plan" && (
@@ -6690,6 +6935,8 @@ export default function SecurityPlanner() {
                       const labelX = c.labelOffset?.x ?? 0;
                       const labelY = c.labelOffset?.y ?? 30;
                       const dash = c.connectorDashSize || 3;
+                      const fovFadeClass = isSelected ? "" : "camera-fov-fade";
+                      const fovFadeStyle = isSelected ? { opacity: 0.9 } : undefined;
 
 
                       // Visibility / Occlusion Calculation
@@ -6751,6 +6998,8 @@ export default function SecurityPlanner() {
                               stroke={`url(#grad-yellow-stroke-${c.id})`}
                               strokeWidth="1" strokeDasharray="4,4" pointerEvents="none"
                               mask={`url(#mask-${c.id})`}
+                              className={fovFadeClass}
+                              style={fovFadeStyle}
                             />
                             {/* Clear Area (Visible) */}
                             <path
@@ -6758,6 +7007,8 @@ export default function SecurityPlanner() {
                               fill={`url(#grad-blue-${c.id})`}
                               stroke={`url(#grad-blue-stroke-${c.id})`}
                               strokeWidth="1" pointerEvents="none"
+                              className={fovFadeClass}
+                              style={fovFadeStyle}
                             />
                             <g transform={`rotate(${c.rotation})`}>
                               <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
@@ -7078,13 +7329,13 @@ export default function SecurityPlanner() {
                       onClick={handleExportCurrent3d}
                       className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
                     >
-                      Export View
+                      Download Snapshot
                     </button>
                     <button
-                      onClick={() => setExportList([...exportList, { id: generateId(), type: '3d', label: '3D View', dataUrl: threeStateRef.current?.renderer.domElement.toDataURL("image/png") || '' }])}
+                      onClick={add3dToExportList}
                       className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
                     >
-                      + Add to Export
+                      + Add to Report
                     </button>
                     <button
                       onClick={handleReset3dView}
@@ -7101,7 +7352,7 @@ export default function SecurityPlanner() {
                   {items.filter(i => i.type === 'camera').length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-500">
                       <LayoutGrid className="w-12 h-12 mb-4 opacity-20" />
-                      <p>No cameras found. Add cameras to see NVR view.</p>
+                      <p>No cameras found. Add cameras to see the Monitor Wall.</p>
                     </div>
                   ) : (
                     <>
@@ -7191,9 +7442,10 @@ export default function SecurityPlanner() {
               <button
                 onClick={() => addCameraViewToExportList(selectedCamera)}
                 className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1"
+                title="Add this view to the report"
               >
                 <Plus className="w-3 h-3" />
-                Export
+                Add to Report
               </button>
             </div>
           </div>
@@ -7995,7 +8247,7 @@ export default function SecurityPlanner() {
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
                 <div className="flex items-center gap-2">
                   <MapIcon className="w-5 h-5 text-slate-400" />
-                  <h2 className="font-bold text-lg text-slate-200">Project Settings</h2>
+                  <h2 className="font-bold text-lg text-slate-200">Plan Settings</h2>
                 </div>
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
@@ -8007,7 +8259,7 @@ export default function SecurityPlanner() {
               </div>
 
               <div className={panelSection}>
-                <label className="text-xs font-semibold text-slate-400 uppercase">Project Name</label>
+                <label className="text-xs font-semibold text-slate-400 uppercase">Plan Name</label>
                 <input
                   type="text"
                   value={projectName}
@@ -8023,7 +8275,7 @@ export default function SecurityPlanner() {
                     { label: "Cameras", value: items.filter(item => item.type === "camera").length },
                     { label: "Buildings", value: items.filter(item => item.type === "building").length },
                     { label: "Trees", value: items.filter(item => item.type === "tree").length },
-                    { label: "Cars", value: items.filter(item => item.type === "parking").length }
+                    { label: "Vehicles", value: items.filter(item => item.type === "parking").length }
                   ].map(stat => (
                     <div key={stat.label} className="rounded-lg border border-white/10 bg-white/5 p-3">
                       <p className="text-xs uppercase tracking-wide text-slate-400">{stat.label}</p>
@@ -8365,7 +8617,7 @@ export default function SecurityPlanner() {
                             onClick={() => handleExportSnapshot(snapshot.dataUrl, `security_snapshot_${snapshot.id}.png`)}
                             className="mt-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700"
                           >
-                            Export
+                            Download
                           </button>
                         </div>
                       </div>
@@ -8387,7 +8639,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
               <div className={panelSectionLoose}>
-                <p className="text-sm text-slate-400">Select an item to edit its settings or open project settings.</p>
+                <p className="text-sm text-slate-400">Select an item to edit its settings or open plan settings.</p>
                 <button
                   onClick={() => {
                     setRightPanelMode("project");
@@ -8395,7 +8647,7 @@ export default function SecurityPlanner() {
                   }}
                   className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium text-slate-200 transition-colors"
                 >
-                  Open Project Settings
+                  Open Plan Settings
                 </button>
               </div>
             </div>
@@ -8505,9 +8757,10 @@ const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized, aspect }
           onClick={(e) => { e.stopPropagation(); onExport?.(); }}
           className="no-drag px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1 transition-colors"
           onMouseDown={e => e.stopPropagation()}
+          title="Add this camera view to the report"
         >
           <Plus className="w-3 h-3" />
-          + Export
+          + Add to Report
         </button>
       </div>
     </div>
