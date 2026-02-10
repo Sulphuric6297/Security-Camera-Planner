@@ -1,6 +1,7 @@
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import JSZip from "jszip";
 
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
 import {
@@ -37,7 +38,23 @@ import "react-resizable/css/styles.css";
 
 type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
 type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
+type BuildingLabelDefaults = {
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: number;
+};
 type ViewMode = "plan" | "iso3d" | "nvr";
+type TerrainTool = "sculpt" | "smooth" | "flatten";
+type DemAlignTool = "move" | "scale" | "rotate" | "pan";
+type DemData = {
+  name: string;
+  width: number;
+  height: number;
+  values: Float32Array;
+  min: number;
+  max: number;
+  noData?: number | null;
+};
 
 interface BaseItem {
   id: string;
@@ -78,6 +95,10 @@ interface BuildingItem extends BaseItem {
   label: string;
   color: string;
   points?: { x: number; y: number }[];
+  labelOffset?: { x: number; y: number };
+  labelFontFamily?: string;
+  labelFontSize?: number;
+  labelFontWeight?: number;
 }
 
 interface TreeItem extends BaseItem {
@@ -131,6 +152,33 @@ const COLORS = {
 };
 
 const DEFAULT_CANVAS = { width: 1000, height: 700 };
+const TERRAIN_BRUSH_MIN = 1;
+const TERRAIN_BRUSH_MAX = 12;
+const TERRAIN_FALLOFF_MIN = 0.5;
+const TERRAIN_FALLOFF_MAX = 4;
+const MAP_OVERLAY_OFFSET = 0.02;
+const OBJECT_ELEVATION_OFFSET = 0.08;
+const NVR_COLS = 12;
+const NVR_MARGIN = 16;
+const NVR_DEFAULT_W = 4;
+const NVR_DEFAULT_H = 2;
+const NVR_ASPECT = 16 / 9;
+const NVR_HEADER_FOOTER = 64;
+const NVR_MIN_ROW_HEIGHT = 80;
+const DEFAULT_BUILDING_LABEL: BuildingLabelDefaults = {
+  fontFamily: "Space Grotesk",
+  fontSize: 12,
+  fontWeight: 700
+};
+const FONT_FAMILIES = [
+  "Space Grotesk",
+  "Sora",
+  "Poppins",
+  "Montserrat",
+  "Roboto Slab",
+  "Inter"
+];
+const FONT_WEIGHTS = [400, 500, 600, 700, 800];
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -158,31 +206,54 @@ const getPointsBounds = (points: { x: number; y: number }[]) => {
   return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
 };
 
-// Create a detailed 3D car model
+const resolveVehicleType = (item: ParkingItem): ParkingItem['vehicleType'] => {
+  if (item.vehicleType) return item.vehicleType;
+  const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+  return ['sedan', 'suv', 'truck', 'sports'][hash % 4] as ParkingItem['vehicleType'];
+};
+
+const getCarSignature = (item: ParkingItem) =>
+  `${item.width}|${item.height}|${item.vehicleHeight ?? 12}|${resolveVehicleType(item)}|${item.color}`;
+
+const getTreeSignature = (item: TreeItem) =>
+  `${item.radius}|${item.height ?? 30}|${item.width ?? 1}|${item.treeType ?? 'deciduous'}|${item.color}`;
+
+const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
+  if (type === "parking") return plural ? "Cars" : "Car";
+  if (type === "camera") return plural ? "Cameras" : "Camera";
+  if (type === "building") return plural ? "Buildings" : "Building";
+  if (type === "tree") return plural ? "Trees" : "Tree";
+  if (type === "label") return plural ? "Labels" : "Label";
+  if (type === "image") return plural ? "Images" : "Image";
+  return type;
+};
+
 // Create a detailed 3D car model with variations
 const create3dCar = (item: ParkingItem): THREE.Group => {
   const group = new THREE.Group();
-  const width = item.width;
-  const length = item.height;
-  const carHeight = item.vehicleHeight ?? 12;
-  const wheelRadius = 3;
+  const width = Math.max(item.width, 8);
+  const length = Math.max(item.height, 16);
+  const carHeight = Math.max(item.vehicleHeight ?? 12, 6);
+  const wheelRadius = clamp(Math.min(width, length) * 0.18, 2.5, carHeight * 0.45);
+  const wheelWidth = clamp(width * 0.22, 2, 6);
   const color = item.color;
 
-  // Use explicit vehicle type or fallback to hash-based for backward compatibility
-  const vehicleType = item.vehicleType ?? (() => {
-    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-    return ['sedan', 'suv', 'truck', 'sports'][hash % 4] as 'sedan' | 'suv' | 'truck' | 'sports';
-  })();
+  const vehicleType = resolveVehicleType(item);
 
-  const chassisMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.3, flatShading: true });
-  const glassMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.1, metalness: 0.9, flatShading: true });
-  const wheelMat = new THREE.MeshStandardMaterial({ color: '#171717', roughness: 0.5, flatShading: true });
+  const chassisMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.35, metalness: 0.25 });
+  const glassMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.05, metalness: 0.9, transparent: true, opacity: 0.65 });
+  const wheelMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.7 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: '#374151', roughness: 0.6, metalness: 0.2 });
+  const lightMat = new THREE.MeshStandardMaterial({ color: '#fef3c7', emissive: '#fef3c7', emissiveIntensity: 0.6 });
+  const tailMat = new THREE.MeshStandardMaterial({ color: '#ef4444', emissive: '#ef4444', emissiveIntensity: 0.5 });
 
   // --- Wheel Setup ---
-  const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, width * 0.15, 12);
+  const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 18);
   wheelGeo.rotateZ(Math.PI / 2);
+  const rimGeo = new THREE.CylinderGeometry(wheelRadius * 0.6, wheelRadius * 0.6, wheelWidth * 0.6, 12);
+  rimGeo.rotateZ(Math.PI / 2);
   const wheelZ = length * 0.35;
-  const wheelX = width * 0.45;
+  const wheelX = width * 0.5 - wheelWidth * 0.6;
 
   const addWheels = (fourWheels = true) => {
     if (fourWheels) {
@@ -192,6 +263,10 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
           w.position.set(kx * wheelX, wheelRadius, kz * wheelZ);
           w.castShadow = true;
           group.add(w);
+          const rim = new THREE.Mesh(rimGeo, trimMat);
+          rim.position.copy(w.position);
+          rim.castShadow = true;
+          group.add(rim);
         });
       });
     } else {
@@ -201,156 +276,177 @@ const create3dCar = (item: ParkingItem): THREE.Group => {
         w.position.set(0, wheelRadius, kz * wheelZ);
         w.castShadow = true;
         group.add(w);
+        const rim = new THREE.Mesh(rimGeo, trimMat);
+        rim.position.copy(w.position);
+        rim.castShadow = true;
+        group.add(rim);
       });
     }
   };
 
   // --- Body Construction ---
-  const yBase = wheelRadius + 1;
+  const yBase = wheelRadius + 0.6;
 
   if (vehicleType === 'suv') {
     addWheels();
-    const bodyH = carHeight * 0.9;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
-    body.position.y = yBase + bodyH / 2;
+    const bodyH = carHeight * 0.5;
+    const bodyL = length * 0.72;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
+    body.position.set(0, yBase + bodyH / 2, 0);
     body.castShadow = true;
     group.add(body);
 
-    const cabinH = carHeight * 0.7;
-    const cabinL = length * 0.8;
-    const cabinW = width * 0.85;
+    const cabinH = carHeight * 0.55;
+    const cabinL = length * 0.55;
+    const cabinW = width * 0.86;
     const cabin = new THREE.Mesh(new THREE.BoxGeometry(cabinW, cabinH, cabinL), chassisMat);
-    cabin.position.y = yBase + bodyH + cabinH / 2 - 2;
+    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 1, -length * 0.05);
     cabin.castShadow = true;
     group.add(cabin);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(cabinW + 0.2, cabinH * 0.7, cabinL * 0.9), glassMat);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(cabinW + 0.15, cabinH * 0.65, cabinL * 0.85), glassMat);
     glass.position.copy(cabin.position);
     group.add(glass);
 
   } else if (vehicleType === 'truck') {
     addWheels();
     const cabL = length * 0.35;
-    const bedL = length * 0.6;
-    const cabH = carHeight * 1.5;
+    const bedL = length * 0.55;
+    const cabH = carHeight * 0.9;
 
-    const base = new THREE.Mesh(new THREE.BoxGeometry(width, carHeight * 0.6, length), chassisMat);
-    base.position.y = yBase + carHeight * 0.3;
+    const base = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, carHeight * 0.35, length * 0.85), chassisMat);
+    base.position.y = yBase + carHeight * 0.175;
     base.castShadow = true;
     group.add(base);
 
-    const cab = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, cabH, cabL), chassisMat);
-    cab.position.set(0, yBase + carHeight * 0.3 + cabH / 2, -length / 2 + cabL / 2 + 2);
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, cabH, cabL), chassisMat);
+    cab.position.set(0, yBase + carHeight * 0.35 + cabH / 2, -length * 0.25);
     cab.castShadow = true;
     group.add(cab);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width + 0.1, cabH * 0.5, cabL * 0.7), glassMat);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.92, cabH * 0.45, cabL * 0.6), glassMat);
     glass.position.copy(cab.position);
-    glass.position.y += 2;
+    glass.position.y += 1;
     group.add(glass);
 
-    const wallH = 4;
-    const bed = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, wallH, bedL), chassisMat);
-    bed.position.set(0, yBase + carHeight * 0.6 + wallH / 2, length / 2 - bedL / 2);
+    const bedWallH = carHeight * 0.18;
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(width * 0.92, bedWallH, bedL), chassisMat);
+    bed.position.set(0, yBase + carHeight * 0.35 + bedWallH / 2, length * 0.2);
     group.add(bed);
 
   } else if (vehicleType === 'sports') {
     addWheels();
-    const bodyH = carHeight * 0.7;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
-    body.position.y = yBase + bodyH / 2;
+    const bodyH = carHeight * 0.28;
+    const bodyL = length * 0.75;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
+    body.position.set(0, yBase + bodyH / 2, 0);
     body.castShadow = true;
     group.add(body);
 
-    const cabinH = carHeight * 0.5;
-    const cabinL = length * 0.5;
+    const cabinH = carHeight * 0.32;
+    const cabinL = length * 0.35;
     const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.7, cabinH, cabinL), chassisMat);
-    cabin.position.y = yBase + bodyH + cabinH / 2 - 1;
+    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 0.5, -length * 0.08);
     group.add(cabin);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.72, cabinH * 0.8, cabinL * 0.8), glassMat);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.72, cabinH * 0.75, cabinL * 0.85), glassMat);
     glass.position.copy(cabin.position);
     group.add(glass);
 
   } else if (vehicleType === 'van') {
     addWheels();
-    const bodyH = carHeight * 1.2;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
-    body.position.y = yBase + bodyH / 2;
+    const bodyH = carHeight * 0.7;
+    const bodyL = length * 0.8;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
+    body.position.set(0, yBase + bodyH / 2, 0);
     body.castShadow = true;
     group.add(body);
 
     // Front windshield
-    const glassH = bodyH * 0.5;
+    const glassH = bodyH * 0.45;
     const glassL = length * 0.2;
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, glassH, glassL), glassMat);
-    glass.position.set(0, yBase + bodyH - glassH / 2, -length / 2 + glassL / 2 + 2);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, glassH, glassL), glassMat);
+    glass.position.set(0, yBase + bodyH - glassH / 2, -length * 0.33);
     group.add(glass);
 
     // Side windows
     const sideGlassH = bodyH * 0.4;
-    const sideGlassL = length * 0.6;
-    const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, sideGlassH, sideGlassL), glassMat);
+    const sideGlassL = length * 0.55;
+    const sideGlass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.98, sideGlassH, sideGlassL), glassMat);
     sideGlass.position.set(0, yBase + bodyH - sideGlassH / 2, 0);
     group.add(sideGlass);
 
   } else if (vehicleType === 'motorcycle') {
     addWheels(false);
     // Body/frame
-    const frameH = 6;
-    const frameL = length * 0.6;
+    const frameH = carHeight * 0.25;
+    const frameL = length * 0.55;
     const frame = new THREE.Mesh(new THREE.BoxGeometry(width * 0.3, frameH, frameL), chassisMat);
     frame.position.y = yBase + frameH / 2;
     frame.castShadow = true;
     group.add(frame);
 
     // Seat
-    const seatH = 3;
-    const seat = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, seatH, length * 0.4), new THREE.MeshStandardMaterial({ color: '#1f1f1f', roughness: 0.8 }));
+    const seatH = carHeight * 0.18;
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, seatH, length * 0.35), new THREE.MeshStandardMaterial({ color: '#1f1f1f', roughness: 0.8 }));
     seat.position.set(0, yBase + frameH + seatH / 2, length * 0.1);
     group.add(seat);
 
     // Handlebars
-    const handleH = 8;
+    const handleH = carHeight * 0.6;
     const handle = new THREE.Mesh(new THREE.BoxGeometry(width, 1, 2), new THREE.MeshStandardMaterial({ color: '#4a4a4a', metalness: 0.8 }));
     handle.position.set(0, yBase + handleH, -length * 0.3);
     group.add(handle);
 
   } else { // Sedan (Default)
     addWheels();
-    const bodyH = carHeight * 0.6;
-    const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, length), chassisMat);
-    body.position.y = yBase + bodyH / 2;
+    const bodyH = carHeight * 0.35;
+    const bodyL = length * 0.7;
+    const hoodL = length * 0.22;
+    const trunkL = length * 0.18;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(width * 0.95, bodyH, bodyL), chassisMat);
+    body.position.set(0, yBase + bodyH / 2, 0);
     body.castShadow = true;
     group.add(body);
 
-    const cabinH = carHeight * 0.8;
-    const cabinL = length * 0.5;
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.85, cabinH, cabinL), chassisMat);
-    cabin.position.y = yBase + bodyH + cabinH / 2 - 1;
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, carHeight * 0.22, hoodL), chassisMat);
+    hood.position.set(0, yBase + carHeight * 0.12, -length / 2 + hoodL / 2 + 1);
+    hood.castShadow = true;
+    group.add(hood);
+
+    const trunk = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, carHeight * 0.22, trunkL), chassisMat);
+    trunk.position.set(0, yBase + carHeight * 0.12, length / 2 - trunkL / 2 - 1);
+    trunk.castShadow = true;
+    group.add(trunk);
+
+    const cabinH = carHeight * 0.45;
+    const cabinL = length * 0.42;
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(width * 0.8, cabinH, cabinL), chassisMat);
+    cabin.position.set(0, yBase + bodyH + cabinH / 2 - 0.5, -length * 0.05);
     cabin.castShadow = true;
     group.add(cabin);
 
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, cabinH * 0.8, cabinL * 0.9), glassMat);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.82, cabinH * 0.7, cabinL * 0.85), glassMat);
     glass.position.copy(cabin.position);
     group.add(glass);
   }
 
   // Headlights (skip for motorcycle)
   if (vehicleType !== 'motorcycle') {
-    const lightGeo = new THREE.PlaneGeometry(3, 2);
-    const headLightMat = new THREE.MeshBasicMaterial({ color: '#fef3c7' });
-    const tailLightMat = new THREE.MeshBasicMaterial({ color: '#ef4444' });
+    const lightW = Math.max(2, width * 0.12);
+    const lightH = Math.max(1.5, carHeight * 0.12);
+    const lightD = Math.max(0.6, length * 0.02);
+    const lightGeo = new THREE.BoxGeometry(lightW, lightH, lightD);
 
-    const zFront = -length / 2 - 0.1;
-    const zBack = length / 2 + 0.1;
-    const yLight = yBase + carHeight * 0.6;
-    const xLight = width * 0.35;
+    const zFront = -length / 2 - lightD / 2;
+    const zBack = length / 2 + lightD / 2;
+    const yLight = yBase + carHeight * 0.35;
+    const xLight = width * 0.32;
 
-    const fl1 = new THREE.Mesh(lightGeo, headLightMat); fl1.position.set(-xLight, yLight, zFront); fl1.rotation.y = Math.PI; group.add(fl1);
-    const fl2 = new THREE.Mesh(lightGeo, headLightMat); fl2.position.set(xLight, yLight, zFront); fl2.rotation.y = Math.PI; group.add(fl2);
-    const tl1 = new THREE.Mesh(lightGeo, tailLightMat); tl1.position.set(-xLight, yLight, zBack); group.add(tl1);
-    const tl2 = new THREE.Mesh(lightGeo, tailLightMat); tl2.position.set(xLight, yLight, zBack); group.add(tl2);
+    const fl1 = new THREE.Mesh(lightGeo, lightMat); fl1.position.set(-xLight, yLight, zFront); group.add(fl1);
+    const fl2 = new THREE.Mesh(lightGeo, lightMat); fl2.position.set(xLight, yLight, zFront); group.add(fl2);
+    const tl1 = new THREE.Mesh(lightGeo, tailMat); tl1.position.set(-xLight, yLight, zBack); group.add(tl1);
+    const tl2 = new THREE.Mesh(lightGeo, tailMat); tl2.position.set(xLight, yLight, zBack); group.add(tl2);
   }
 
   group.position.set(item.x, 0, item.y);
@@ -625,8 +721,32 @@ export default function SecurityPlanner() {
   // Terrain State (Moved up for scope access)
   const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
   const [isTerrainMode, setIsTerrainMode] = useState(false);
-  const [terrainSelection, setTerrainSelection] = useState<{ x1: number, z1: number, x2: number, z2: number } | null>(null);
-  const [selectionHeight, setSelectionHeightState] = useState<number>(0);
+  const [terrainTool, setTerrainTool] = useState<TerrainTool>("sculpt");
+  const [terrainBrushSize, setTerrainBrushSize] = useState(4); // in tiles
+  const [terrainBrushStrength, setTerrainBrushStrength] = useState(40); // height units per second
+  const [terrainBrushFalloff, setTerrainBrushFalloff] = useState(2);
+  const [terrainFlattenTarget, setTerrainFlattenTarget] = useState(0);
+  const [terrainFlattenSample, setTerrainFlattenSample] = useState(true);
+  const [demData, setDemData] = useState<DemData | null>(null);
+  const [demScale, setDemScale] = useState(1);
+  const [demOffset, setDemOffset] = useState(0);
+  const [demNormalize, setDemNormalize] = useState(true);
+  const [demPreview, setDemPreview] = useState<{ url: string; width: number; height: number } | null>(null);
+  const [demAlignMode, setDemAlignMode] = useState(false);
+  const [demTransform, setDemTransform] = useState({ x: DEFAULT_CANVAS.width / 2, y: DEFAULT_CANVAS.height / 2, scale: 1, rotation: 0 });
+  const [demOverlayOpacity, setDemOverlayOpacity] = useState(0.6);
+  const [demAutoApply, setDemAutoApply] = useState(true);
+  const [demAlignTool, setDemAlignTool] = useState<DemAlignTool>("move");
+  const [showDemGuide, setShowDemGuide] = useState(false);
+  const [demTransformDrag, setDemTransformDrag] = useState<{
+    mode: "move" | "scale" | "rotate";
+    startMouse: { x: number; y: number };
+    startTransform: { x: number; y: number; scale: number; rotation: number };
+  } | null>(null);
+  const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
+  const [bgDragStart, setBgDragStart] = useState({ x: 0, y: 0, bgX: 0, bgY: 0 });
+  const [mapMoveMode, setMapMoveMode] = useState(false);
+  const [buildingLabelDefaults, setBuildingLabelDefaults] = useState<BuildingLabelDefaults>(DEFAULT_BUILDING_LABEL);
 
   const panelSection = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-3";
   const panelSectionLoose = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-4";
@@ -634,8 +754,10 @@ export default function SecurityPlanner() {
   // State Refs for History (Ensures we save latest state in async callbacks)
   const currentItemsRef = useRef(items);
   const terrainHeightsRef = useRef(terrainHeights);
+  const buildingLabelDefaultsRef = useRef(buildingLabelDefaults);
   useEffect(() => { currentItemsRef.current = items; }, [items]);
   useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
+  useEffect(() => { buildingLabelDefaultsRef.current = buildingLabelDefaults; }, [buildingLabelDefaults]);
 
   // Clipboard
   const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
@@ -657,7 +779,8 @@ export default function SecurityPlanner() {
   const saveHistory = (itemsOverride?: CanvasItem[], terrainHeightsOverride?: Record<string, number>) => {
     const currentState = JSON.stringify({
       items: itemsOverride || currentItemsRef.current,
-      terrainHeights: terrainHeightsOverride || terrainHeightsRef.current
+      terrainHeights: terrainHeightsOverride || terrainHeightsRef.current,
+      buildingLabelDefaults: buildingLabelDefaultsRef.current
     });
     // Don't save if same as current top
     if (historyIndex >= 0 && history[historyIndex] === currentState) return;
@@ -685,6 +808,11 @@ export default function SecurityPlanner() {
         } else {
           setItems(state.items || []);
           setTerrainHeights(state.terrainHeights || {});
+          if (state.buildingLabelDefaults) {
+            setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
+          } else {
+            setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
+          }
         }
         setHistoryIndex(newIndex);
       } catch (e) {
@@ -704,6 +832,11 @@ export default function SecurityPlanner() {
         } else {
           setItems(state.items || []);
           setTerrainHeights(state.terrainHeights || {});
+          if (state.buildingLabelDefaults) {
+            setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
+          } else {
+            setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
+          }
         }
         setHistoryIndex(newIndex);
       } catch (e) {
@@ -725,7 +858,7 @@ export default function SecurityPlanner() {
 
   const [gridSize, setGridSize] = useState(20);
   const [showGrid, setShowGrid] = useState(true);
-  const [snapToGrid, setSnapToGrid] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(false);
   const [projectName, setProjectName] = useState("Security Camera Plan");
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
@@ -769,6 +902,15 @@ export default function SecurityPlanner() {
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useState<any[]>([]);
   const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
+  const nvrRowHeight = useMemo(() => {
+    const gridWidth = Math.max(320, canvasSize.width - 32);
+    const colWidth = (gridWidth - NVR_MARGIN * (NVR_COLS + 1)) / NVR_COLS;
+    const itemWidth = colWidth * NVR_DEFAULT_W + NVR_MARGIN * (NVR_DEFAULT_W - 1);
+    const imageHeight = itemWidth / NVR_ASPECT;
+    const totalHeight = imageHeight + NVR_HEADER_FOOTER;
+    const rowHeight = (totalHeight - NVR_MARGIN * (NVR_DEFAULT_H - 1)) / NVR_DEFAULT_H;
+    return Math.max(NVR_MIN_ROW_HEIGHT, rowHeight);
+  }, [canvasSize.width]);
 
   // Sync Layout with Items
   useEffect(() => {
@@ -780,17 +922,17 @@ export default function SecurityPlanner() {
     let nextLayout = nvrLayout.filter(l => validIds.has(l.i));
 
     if (newCams.length > 0) {
-      newCams.forEach((cam, idx) => {
-        // Append logic - 3 cameras per row for 4:3 aspect ratio
-        const count = nextLayout.length;
-        nextLayout.push({
-          i: cam.id,
-          x: (count * 4) % 12,
-          y: Math.floor((count * 4) / 12) * 2,
-          w: 4,
-          h: 2
+        newCams.forEach((cam, idx) => {
+          // Append logic - 3 cameras per row (4 columns each) for 16:9 previews
+          const count = nextLayout.length;
+          nextLayout.push({
+            i: cam.id,
+            x: (count * NVR_DEFAULT_W) % NVR_COLS,
+            y: Math.floor((count * NVR_DEFAULT_W) / NVR_COLS) * NVR_DEFAULT_H,
+            w: NVR_DEFAULT_W,
+            h: NVR_DEFAULT_H
+          });
         });
-      });
       setNvrLayout(nextLayout);
     } else if (nextLayout.length !== nvrLayout.length) {
       setNvrLayout(nextLayout);
@@ -812,103 +954,229 @@ export default function SecurityPlanner() {
     return terrainHeights[`${gx},${gy}`] || 0;
   };
 
-  const setSelectionHeight = (height: number) => {
-    setSelectionHeightState(height); // Update display
-    if (!terrainSelection) {
-      // Even if no selection, we might want to return current heights?
-      return terrainHeights;
-    }
-    const { x1, z1, x2, z2 } = terrainSelection;
-    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+  const getVertexKey = (x: number, z: number) => `${x},${z}`;
 
-    const next = { ...terrainHeights };
-    for (let x = minX; x <= maxX; x += gridSize) {
-      for (let z = minZ; z <= maxZ; z += gridSize) {
-        next[`${x},${z}`] = height;
-      }
-    }
-    setTerrainHeights(next);
-    return next;
+  const getVertexHeight = (x: number, z: number, map = terrainHeights) =>
+    map[getVertexKey(x, z)] ?? 0;
+
+  const getBrushRadius = (grid = gridSize) =>
+    Math.max(grid, clamp(terrainBrushSizeRef.current, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * grid);
+
+  const getBrushWeight = (distance: number, radius: number, falloff: number) => {
+    if (distance >= radius) return 0;
+    const t = 1 - distance / radius;
+    return Math.pow(t, clamp(falloff, TERRAIN_FALLOFF_MIN, TERRAIN_FALLOFF_MAX));
   };
 
-  const applyRamp = (axis: 'x' | 'z') => {
-    if (!terrainSelection) return terrainHeights;
-    const { x1, z1, x2, z2 } = terrainSelection;
-    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+  const applyBrushStroke = (
+    centerX: number,
+    centerZ: number,
+    tool: TerrainTool,
+    direction: 1 | -1,
+    dt: number
+  ) => {
+    const grid = gridSizeRef.current || gridSize;
+    const radius = getBrushRadius(grid);
+    const strength = clamp(terrainBrushStrengthRef.current, 1, 100);
+    const falloff = terrainBrushFalloffRef.current;
+    const source = terrainHeightsRef.current;
+    const next = { ...source };
 
-    const next = { ...terrainHeights };
+    const minX = Math.max(0, Math.floor((centerX - radius) / grid) * grid);
+    const maxX = Math.min(canvasSize.width, Math.ceil((centerX + radius) / grid) * grid);
+    const minZ = Math.max(0, Math.floor((centerZ - radius) / grid) * grid);
+    const maxZ = Math.min(canvasSize.height, Math.ceil((centerZ + radius) / grid) * grid);
 
-    if (axis === 'x') {
-      for (let z = minZ; z <= maxZ; z += gridSize) {
-        const startH = getGridHeight(minX, z);
-        const endH = getGridHeight(maxX, z);
-        const dist = maxX - minX;
-        if (dist === 0) continue;
+    const blend = clamp((strength / 100) * dt * 5, 0, 1);
+    const sculptDelta = strength * dt * direction;
+    const flattenTarget = terrainFlattenTargetRef.current;
 
-        for (let x = minX; x <= maxX; x += gridSize) {
-          const t = (x - minX) / dist;
-          next[`${x},${z}`] = startH + (endH - startH) * t;
-        }
-      }
-    } else {
-      for (let x = minX; x <= maxX; x += gridSize) {
-        const startH = getGridHeight(x, minZ);
-        const endH = getGridHeight(x, maxZ);
-        const dist = maxZ - minZ;
-        if (dist === 0) continue;
+    for (let x = minX; x <= maxX; x += grid) {
+      for (let z = minZ; z <= maxZ; z += grid) {
+        const dist = Math.hypot(x - centerX, z - centerZ);
+        const weight = getBrushWeight(dist, radius, falloff);
+        if (weight <= 0) continue;
 
-        for (let z = minZ; z <= maxZ; z += gridSize) {
-          const t = (z - minZ) / dist;
-          next[`${x},${z}`] = startH + (endH - startH) * t;
-        }
-      }
-    }
-    setTerrainHeights(next);
-    return next;
-  };
+        const key = getVertexKey(x, z);
+        const baseH = source[key] ?? 0;
+        let value = baseH;
 
-  const applySmooth = () => {
-    if (!terrainSelection) return terrainHeights;
-    const { x1, z1, x2, z2 } = terrainSelection;
-    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
-
-    const next = { ...terrainHeights };
-
-    for (let x = minX; x <= maxX; x += gridSize) {
-      for (let z = minZ; z <= maxZ; z += gridSize) {
-        let sum = 0;
-        let count = 0;
-        for (let dx = -gridSize; dx <= gridSize; dx += gridSize) {
-          for (let dz = -gridSize; dz <= gridSize; dz += gridSize) {
-            const key = `${x + dx},${z + dz}`;
-            if (terrainHeights[key] !== undefined) {
-              sum += terrainHeights[key];
-            } else {
-              sum += 0;
+        if (tool === "sculpt") {
+          value = baseH + sculptDelta * weight;
+        } else if (tool === "smooth") {
+          let sum = 0;
+          let count = 0;
+          for (let dx = -grid; dx <= grid; dx += grid) {
+            for (let dz = -grid; dz <= grid; dz += grid) {
+              sum += getVertexHeight(x + dx, z + dz, source);
+              count++;
             }
-            count++;
           }
+          const avg = count > 0 ? sum / count : baseH;
+          value = baseH + (avg - baseH) * blend * weight;
+        } else if (tool === "flatten") {
+          value = baseH + (flattenTarget - baseH) * blend * weight;
         }
-        next[`${x},${z}`] = count > 0 ? sum / count : 0;
+
+        if (Math.abs(value) < 0.001) {
+          delete next[key];
+        } else {
+          next[key] = value;
+        }
       }
     }
+
     setTerrainHeights(next);
-    return next;
+    terrainHeightsRef.current = next;
   };
+
+  const applyDemToTerrain = (data = demDataRef.current, options?: { save?: boolean }) => {
+    if (!data) return;
+    const grid = gridSizeRef.current || gridSize;
+    const next: Record<string, number> = {};
+    const minVal = data.min;
+    const maxVal = data.max;
+    if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) return;
+
+    const preview = demPreviewRef.current;
+    const transform = demTransformRef.current;
+    const previewW = preview?.width ?? data.width;
+    const previewH = preview?.height ?? data.height;
+    const centerX = transform?.x ?? canvasSize.width / 2;
+    const centerY = transform?.y ?? canvasSize.height / 2;
+    const scale = transform?.scale ?? 1;
+    const rotation = ((transform?.rotation ?? 0) * Math.PI) / 180;
+    const cos = Math.cos(-rotation);
+    const sin = Math.sin(-rotation);
+
+    for (let x = 0; x <= canvasSize.width; x += grid) {
+      for (let z = 0; z <= canvasSize.height; z += grid) {
+        const dx = x - centerX;
+        const dy = z - centerY;
+        const rx = dx * cos - dy * sin;
+        const ry = dx * sin + dy * cos;
+        const localX = rx / Math.max(scale, 0.0001) + previewW / 2;
+        const localY = ry / Math.max(scale, 0.0001) + previewH / 2;
+        if (localX < 0 || localY < 0 || localX > previewW || localY > previewH) continue;
+
+        const px = Math.round((localX / previewW) * (data.width - 1));
+        const pz = Math.round((localY / previewH) * (data.height - 1));
+        const idx = pz * data.width + px;
+        const raw = data.values[idx];
+        if (!Number.isFinite(raw)) continue;
+        if (data.noData !== null && data.noData !== undefined && raw === data.noData) continue;
+
+        let value = raw;
+        if (demNormalize) value -= minVal;
+        value = value * demScale + demOffset;
+
+        if (Math.abs(value) > 0.001) {
+          next[getVertexKey(x, z)] = value;
+        }
+      }
+    }
+
+    setTerrainHeights(next);
+    terrainHeightsRef.current = next;
+    if (options?.save !== false) {
+      saveHistory(undefined, next);
+    }
+  };
+
+  const buildDemPreview = (data: DemData) => {
+    const maxDim = 512;
+    const scale = Math.max(data.width, data.height) / maxDim;
+    const previewW = Math.max(1, Math.round(data.width / Math.max(scale, 1)));
+    const previewH = Math.max(1, Math.round(data.height / Math.max(scale, 1)));
+    const canvas = document.createElement("canvas");
+    canvas.width = previewW;
+    canvas.height = previewH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const img = ctx.createImageData(previewW, previewH);
+    const denom = data.max - data.min || 1;
+
+    for (let y = 0; y < previewH; y++) {
+      for (let x = 0; x < previewW; x++) {
+        const sx = Math.round((x / (previewW - 1 || 1)) * (data.width - 1));
+        const sy = Math.round((y / (previewH - 1 || 1)) * (data.height - 1));
+        const v = data.values[sy * data.width + sx];
+        const idx = (y * previewW + x) * 4;
+        if (!Number.isFinite(v) || (data.noData !== null && data.noData !== undefined && v === data.noData)) {
+          img.data[idx + 3] = 0;
+          continue;
+        }
+        const n = Math.max(0, Math.min(1, (v - data.min) / denom));
+        const g = Math.round(n * 255);
+        img.data[idx] = g;
+        img.data[idx + 1] = g;
+        img.data[idx + 2] = g;
+        img.data[idx + 3] = 200;
+      }
+    }
+
+    ctx.putImageData(img, 0, 0);
+    return { url: canvas.toDataURL("image/png"), width: previewW, height: previewH };
+  };
+
+  const demAutoApplyTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!demData || !demAutoApply) return;
+    if (demAutoApplyTimerRef.current) {
+      window.clearTimeout(demAutoApplyTimerRef.current);
+    }
+    demAutoApplyTimerRef.current = window.setTimeout(() => {
+      applyDemToTerrain(demData, { save: false });
+    }, 80);
+    return () => {
+      if (demAutoApplyTimerRef.current) {
+        window.clearTimeout(demAutoApplyTimerRef.current);
+        demAutoApplyTimerRef.current = null;
+      }
+    };
+  }, [demData, demScale, demOffset, demNormalize, demTransform, canvasSize.width, canvasSize.height, gridSize, demAutoApply]);
 
   // Refs
   const isTerrainModeRef = useRef(isTerrainMode);
   useEffect(() => { isTerrainModeRef.current = isTerrainMode; }, [isTerrainMode]);
+  const terrainToolRef = useRef(terrainTool);
+  const terrainBrushSizeRef = useRef(terrainBrushSize);
+  const terrainBrushStrengthRef = useRef(terrainBrushStrength);
+  const terrainBrushFalloffRef = useRef(terrainBrushFalloff);
+  const terrainFlattenTargetRef = useRef(terrainFlattenTarget);
+  const terrainFlattenSampleRef = useRef(terrainFlattenSample);
+  const demDataRef = useRef<DemData | null>(demData);
+  const demPreviewRef = useRef(demPreview);
+  const demTransformRef = useRef(demTransform);
+  const prevCanvasSizeRef = useRef(canvasSize);
+  const prevGridSizeRef = useRef(gridSize);
+  const prevBgSettingsRef = useRef(bgSettings);
+  const prevBackgroundImgRef = useRef(backgroundImg);
+  useEffect(() => { terrainToolRef.current = terrainTool; }, [terrainTool]);
+  useEffect(() => { terrainBrushSizeRef.current = terrainBrushSize; }, [terrainBrushSize]);
+  useEffect(() => { terrainBrushStrengthRef.current = terrainBrushStrength; }, [terrainBrushStrength]);
+  useEffect(() => { terrainBrushFalloffRef.current = terrainBrushFalloff; }, [terrainBrushFalloff]);
+  useEffect(() => { terrainFlattenTargetRef.current = terrainFlattenTarget; }, [terrainFlattenTarget]);
+  useEffect(() => { terrainFlattenSampleRef.current = terrainFlattenSample; }, [terrainFlattenSample]);
+  useEffect(() => { demDataRef.current = demData; }, [demData]);
+  useEffect(() => { demPreviewRef.current = demPreview; }, [demPreview]);
+  useEffect(() => { demTransformRef.current = demTransform; }, [demTransform]);
   const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
+  const terrainStrokeRef = useRef<{
+    active: boolean;
+    tool: TerrainTool;
+    direction: 1 | -1;
+    lastTime: number;
+  } | null>(null);
+  const terrainHoverRef = useRef<{ pointX: number; pointZ: number } | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const demMiniRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const elementImageInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const bg3dInputRef = useRef<HTMLInputElement>(null);
+  const demInputRef = useRef<HTMLInputElement>(null);
   const threeContainerRef = useRef<HTMLDivElement>(null);
   const threeStateRef = useRef<{
     scene: THREE.Scene;
@@ -1052,6 +1320,55 @@ export default function SecurityPlanner() {
   const getBuildingPoints = (building: BuildingItem) =>
     building.points && building.points.length >= 3 ? building.points : rectanglePoints(building.width, building.height);
 
+  const getBuildingLabelFont = (building: BuildingItem) => ({
+    fontFamily: building.labelFontFamily ?? buildingLabelDefaults.fontFamily,
+    fontSize: building.labelFontSize ?? buildingLabelDefaults.fontSize,
+    fontWeight: building.labelFontWeight ?? buildingLabelDefaults.fontWeight
+  });
+
+  const splitLabelLines = (label: string) => {
+    const clean = label.trim();
+    if (!clean) return ["Building"];
+    const words = clean.split(/\s+/);
+    if (words.length <= 1) return [clean];
+    let best = { lines: [clean], maxLen: clean.length };
+    for (let i = 1; i < words.length; i += 1) {
+      const lineA = words.slice(0, i).join(" ");
+      const lineB = words.slice(i).join(" ");
+      const maxLen = Math.max(lineA.length, lineB.length);
+      if (maxLen < best.maxLen) {
+        best = { lines: [lineA, lineB], maxLen };
+      }
+    }
+    return best.lines;
+  };
+
+  const getBuildingLabelLayout = (building: BuildingItem) => {
+    const points = getBuildingPoints(building);
+    const bounds = getPointsBounds(points);
+    const maxWidth = Math.max(bounds.width * 0.9, 24);
+    const maxHeight = Math.max(bounds.height * 0.7, 14);
+    const label = building.label?.trim() || "Building";
+    const font = getBuildingLabelFont(building);
+    const desiredSize = clamp(font.fontSize, 6, 32);
+
+    const estimateFont = (lines: string[]) => {
+      const maxChars = Math.max(...lines.map(line => Math.max(line.length, 1)));
+      const byWidth = Math.floor(maxWidth / (maxChars * 0.62));
+      const byHeight = Math.floor(maxHeight / (lines.length * 1.2));
+      return clamp(Math.min(byWidth, byHeight, desiredSize), 6, 32);
+    };
+
+    let lines = [label];
+    let fontSize = estimateFont(lines);
+    if (fontSize < 10 && label.includes(" ")) {
+      lines = splitLabelLines(label);
+      fontSize = estimateFont(lines);
+    }
+
+    return { lines, fontSize, maxWidth, fontFamily: font.fontFamily, fontWeight: font.fontWeight };
+  };
+
   const rotatePoint = (point: { x: number; y: number }, angle: number) => {
     const rad = (angle * Math.PI) / 180;
     const cos = Math.cos(rad);
@@ -1075,6 +1392,23 @@ export default function SecurityPlanner() {
   const getBuildingEdgePointsWorld = (building: BuildingItem) => {
     const points = getBuildingPoints(building);
     return points.map(point => toWorldPoint(point, building));
+  };
+
+  const getBuildingBaseHeight = (building: BuildingItem) => {
+    const centerH = getGridHeight(building.x, building.y) + OBJECT_ELEVATION_OFFSET;
+    const points = getBuildingEdgePointsWorld(building);
+    if (points.length === 0) return centerH;
+
+    let minH = centerH;
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      minH = Math.min(minH, getGridHeight(p.x, p.y) + OBJECT_ELEVATION_OFFSET);
+      const next = points[(i + 1) % points.length];
+      const mid = { x: (p.x + next.x) / 2, y: (p.y + next.y) / 2 };
+      minH = Math.min(minH, getGridHeight(mid.x, mid.y) + OBJECT_ELEVATION_OFFSET);
+    }
+
+    return minH;
   };
 
   const getCameraPlanPosition = (camera: CameraItem) => {
@@ -1263,10 +1597,10 @@ export default function SecurityPlanner() {
         newItem = {
           ...common,
           type: "parking",
-          width: 30,
-          height: 50,
+          width: 24,
+          height: 48,
           color: COLORS.parking[0],
-          vehicleHeight: 12
+          vehicleHeight: 14
         };
         break;
       case "add-label":
@@ -1474,8 +1808,25 @@ export default function SecurityPlanner() {
     setShowExportPanel(false);
     setClipboard(null);
     setIsTerrainMode(false);
-    setTerrainSelection(null);
-    setSelectionHeightState(0);
+    setTerrainTool("sculpt");
+    setTerrainBrushSize(4);
+    setTerrainBrushStrength(40);
+    setTerrainBrushFalloff(2);
+    setTerrainFlattenTarget(0);
+    setTerrainFlattenSample(true);
+    setDemData(null);
+    setDemPreview(null);
+    setDemScale(1);
+    setDemOffset(0);
+    setDemNormalize(true);
+    setDemAlignMode(false);
+    setDemTransform({ x: canvasSize.width / 2, y: canvasSize.height / 2, scale: 1, rotation: 0 });
+    setDemOverlayOpacity(0.6);
+    setDemAutoApply(true);
+    setDemAlignTool("move");
+    setDemTransformDrag(null);
+    setIsBackgroundDragging(false);
+    setMapMoveMode(false);
     setTerrainHeights({});
     setCameraPlacementPreview(null);
     setHistory([]);
@@ -1575,7 +1926,7 @@ export default function SecurityPlanner() {
         { label: "Cameras", count: items.filter(item => item.type === "camera").length, color: COLORS.camera[0] },
         { label: "Buildings", count: items.filter(item => item.type === "building").length, color: COLORS.building[0] },
         { label: "Trees", count: items.filter(item => item.type === "tree").length, color: COLORS.tree[0] },
-        { label: "Parking", count: items.filter(item => item.type === "parking").length, color: COLORS.parking[0] },
+        { label: "Cars", count: items.filter(item => item.type === "parking").length, color: COLORS.parking[0] },
         { label: "Labels", count: items.filter(item => item.type === "label").length, color: COLORS.label[0] }
       ];
 
@@ -1659,7 +2010,7 @@ export default function SecurityPlanner() {
     const height = 720;
 
     const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getGridHeight(camPos.x, camPos.y); // Terrain adjusted height
+    const camTerrainH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Terrain adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
@@ -1694,10 +2045,12 @@ export default function SecurityPlanner() {
     dirLight.position.set(100, 200, 50);
     scene.add(dirLight);
 
-    // Ground with Terrain Height
-    const groundW = canvasSize.width * 2;
-    const groundH = canvasSize.height * 2;
-    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, 64, 64);
+    // Ground with Terrain Height (match 3D terrain resolution)
+    const groundW = canvasSize.width;
+    const groundH = canvasSize.height;
+    const segW = Math.max(Math.round(canvasSize.width / gridSize), 1);
+    const segH = Math.max(Math.round(canvasSize.height / gridSize), 1);
+    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, segW, segH);
 
     // Apply terrain height to ground geometry
     const pos = groundGeo.attributes.position;
@@ -1716,7 +2069,7 @@ export default function SecurityPlanner() {
 
     const ground = new THREE.Mesh(
       groundGeo,
-      new THREE.MeshStandardMaterial({ color: '#6B8E23', roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.9, metalness: 0.1, flatShading: true })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(centerX, 0, centerY);
@@ -1738,14 +2091,15 @@ export default function SecurityPlanner() {
         const wx = bgSettings.x + bgSettings.width / 2 + lx;
         const wy = bgSettings.y + bgSettings.height / 2 - ly;
         const h = getGridHeight(wx, wy);
-        mapPosAttr.setZ(i, h + 0.1);
+        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET);
       }
       mapGeometry.computeVertexNormals();
 
       const mapPlane = new THREE.Mesh(
         mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity })
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false })
       );
+      mapPlane.renderOrder = -1;
       mapPlane.rotation.x = -Math.PI / 2;
       mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
       scene.add(mapPlane);
@@ -1753,17 +2107,12 @@ export default function SecurityPlanner() {
 
     // Add items (Terrain Aware)
     items.forEach(item => {
-      const itemH = getGridHeight(item.x, item.y);
+      const itemH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
 
       if (item.type === "building") {
         const bld = item as BuildingItem;
-        const pts = getBuildingPoints(bld);
-        const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, -p.y)));
-        const geo = new THREE.ExtrudeGeometry(shape, { depth: 60, bevelEnabled: false });
-        geo.rotateX(-Math.PI / 2);
-        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: bld.color, side: THREE.DoubleSide }));
-        mesh.position.set(bld.x, itemH, bld.y);
-        mesh.rotation.y = -THREE.MathUtils.degToRad(bld.rotation);
+        const baseH = getBuildingBaseHeight(bld);
+        const mesh = createBuildingMesh3d(bld, baseH);
         scene.add(mesh);
       }
       if (item.type === "tree") {
@@ -2058,56 +2407,181 @@ export default function SecurityPlanner() {
     printWindow.document.close();
   };
 
-  const handleSaveProject = () => {
-    const projectData = {
-      version: 1,
-      items,
-      terrainHeights,
-      backgroundImg,
-      bgSettings,
-      canvasSize,
-      gridSize,
-      showGrid,
-      snapToGrid,
-      projectName,
-      exportList
-    };
-    const jsonString = JSON.stringify(projectData, null, 2);
-    const blob = new Blob([jsonString], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "security_project.json";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const applyProjectData = (projectData: any) => {
+    if (projectData.items) setItems(projectData.items);
+    if (projectData.terrainHeights) setTerrainHeights(projectData.terrainHeights);
+    if (projectData.backgroundImg) setBackgroundImg(projectData.backgroundImg);
+    if (projectData.bgSettings) setBgSettings(projectData.bgSettings);
+    if (projectData.canvasSize) setCanvasSize(projectData.canvasSize);
+    if (typeof projectData.gridSize === "number") setGridSize(projectData.gridSize);
+    if (typeof projectData.showGrid === "boolean") setShowGrid(projectData.showGrid);
+    if (typeof projectData.snapToGrid === "boolean") setSnapToGrid(projectData.snapToGrid);
+    if (projectData.projectName) setProjectName(projectData.projectName);
+    if (projectData.exportList) setExportList(projectData.exportList);
+    if (projectData.frustumSettings) setFrustumSettings(projectData.frustumSettings);
+    if (projectData.sceneBackgroundImg) setSceneBackgroundImg(projectData.sceneBackgroundImg);
+    if (projectData.backgroundMode) setBackgroundMode(projectData.backgroundMode);
+    if (projectData.nvrLayout) setNvrLayout(projectData.nvrLayout);
+    if (projectData.buildingLabelDefaults) {
+      setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...projectData.buildingLabelDefaults });
+    } else {
+      setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
+    }
+    if (projectData.demSettings) {
+      const settings = projectData.demSettings;
+      if (typeof settings.demScale === "number") setDemScale(settings.demScale);
+      if (typeof settings.demOffset === "number") setDemOffset(settings.demOffset);
+      if (typeof settings.demNormalize === "boolean") setDemNormalize(settings.demNormalize);
+      if (settings.demTransform) setDemTransform(settings.demTransform);
+      if (typeof settings.demOverlayOpacity === "number") setDemOverlayOpacity(settings.demOverlayOpacity);
+      if (typeof settings.demAlignMode === "boolean") setDemAlignMode(settings.demAlignMode);
+      if (settings.demAlignTool) setDemAlignTool(settings.demAlignTool);
+    }
   };
 
-  const handleLoadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const buildProjectData = (includeTerrain = true, hasTerrain = false) => ({
+    version: 2,
+    items,
+    ...(includeTerrain
+      ? { terrainHeights }
+      : hasTerrain
+        ? { terrainExternal: true, terrainCount: Object.keys(terrainHeights).length }
+        : {}),
+    backgroundImg,
+    bgSettings,
+    canvasSize,
+    gridSize,
+    showGrid,
+    snapToGrid,
+    projectName,
+    exportList,
+    frustumSettings,
+    sceneBackgroundImg,
+    backgroundMode,
+    nvrLayout,
+    buildingLabelDefaults,
+    demMeta: demData
+      ? {
+        name: demData.name,
+        width: demData.width,
+        height: demData.height,
+        min: demData.min,
+        max: demData.max,
+        noData: demData.noData ?? null
+      }
+      : null,
+    demSettings: {
+      demScale,
+      demOffset,
+      demNormalize,
+      demTransform,
+      demOverlayOpacity,
+      demAlignMode,
+      demAlignTool
+    }
+  });
+
+  const handleSaveProject = async () => {
+    const hasDem = !!demData;
+    const hasTerrain = Object.keys(terrainHeights).length > 0;
+
+    try {
+      const projectData = buildProjectData(false, hasTerrain);
+      const zip = new JSZip();
+      zip.file("project.json", JSON.stringify(projectData, null, 2));
+
+      if (hasTerrain) {
+        zip.file("terrain.json", JSON.stringify(terrainHeights));
+      }
+
+      const values = demData?.values;
+      if (values) {
+        const buffer = values.buffer.slice(values.byteOffset, values.byteOffset + values.byteLength);
+        zip.file("dem.bin", new Uint8Array(buffer));
+      }
+
+      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "security_project.zip";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to save zip project", err);
+      alert("Failed to save project archive. Try again.");
+    }
+  };
+
+  const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    const isZip = file.name.toLowerCase().endsWith(".zip");
+    if (isZip) {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const projectEntry = zip.file("project.json");
+        if (!projectEntry) throw new Error("project.json missing");
+        const json = await projectEntry.async("string");
+        const projectData = JSON.parse(json);
+        applyProjectData(projectData);
+
+        const terrainEntry = zip.file("terrain.json");
+        if (terrainEntry) {
+          const terrainJson = await terrainEntry.async("string");
+          const terrain = JSON.parse(terrainJson);
+          if (terrain) setTerrainHeights(terrain);
+        }
+
+        if (projectData.demMeta) {
+          const demEntry = zip.file("dem.bin");
+          if (demEntry) {
+            const buffer = await demEntry.async("arraybuffer");
+            const values = new Float32Array(buffer);
+            const meta = projectData.demMeta;
+            const dem: DemData = {
+              name: meta.name || "dem.bin",
+              width: meta.width,
+              height: meta.height,
+              min: meta.min,
+              max: meta.max,
+              noData: meta.noData ?? null,
+              values
+            };
+            setDemData(dem);
+            const preview = buildDemPreview(dem);
+            setDemPreview(preview);
+          } else {
+            setDemData(null);
+            setDemPreview(null);
+          }
+        } else {
+          setDemData(null);
+          setDemPreview(null);
+        }
+      } catch (err) {
+        console.error("Failed to load zip project", err);
+        alert("Invalid or corrupted project archive.");
+      } finally {
+        if (e.target) e.target.value = "";
+      }
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = event => {
       try {
         const json = event.target?.result as string;
         const projectData = JSON.parse(json);
-
-        if (projectData.items) setItems(projectData.items);
-        if (projectData.terrainHeights) setTerrainHeights(projectData.terrainHeights);
-        if (projectData.backgroundImg) setBackgroundImg(projectData.backgroundImg);
-        if (projectData.bgSettings) setBgSettings(projectData.bgSettings);
-        if (projectData.canvasSize) setCanvasSize(projectData.canvasSize);
-        if (typeof projectData.gridSize === "number") setGridSize(projectData.gridSize);
-        if (typeof projectData.showGrid === "boolean") setShowGrid(projectData.showGrid);
-        if (typeof projectData.snapToGrid === "boolean") setSnapToGrid(projectData.snapToGrid);
-        if (projectData.projectName) setProjectName(projectData.projectName);
-        if (projectData.exportList) setExportList(projectData.exportList);
+        applyProjectData(projectData);
       } catch (err) {
         console.error("Failed to load project file", err);
         alert("Invalid project file.");
+      } finally {
+        if (e.target) e.target.value = "";
       }
     };
     reader.readAsText(file);
@@ -2131,6 +2605,70 @@ export default function SecurityPlanner() {
       const reader = new FileReader();
       reader.onload = event => setBackgroundImg(event.target?.result as string);
       reader.readAsDataURL(file);
+    }
+  };
+
+  const handleDemUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const { fromArrayBuffer } = await import("geotiff");
+      const tiff = await fromArrayBuffer(buffer);
+      const image = await tiff.getImage();
+      const width = image.getWidth();
+      const height = image.getHeight();
+      const noData =
+        (image as any).getGDALNoData?.() ??
+        (image as any).getNoDataValue?.() ??
+        null;
+      const raster = await image.readRasters({ samples: [0], interleave: true });
+      const values = Float32Array.from(raster as any);
+
+      let min = Number.POSITIVE_INFINITY;
+      let max = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (!Number.isFinite(v)) continue;
+        if (noData !== null && noData !== undefined && v === noData) continue;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+
+      if (!Number.isFinite(min) || !Number.isFinite(max)) {
+        alert("DEM file contained no valid elevation values.");
+        return;
+      }
+
+      const data: DemData = {
+        name: file.name,
+        width,
+        height,
+        values,
+        min,
+        max,
+        noData
+      };
+
+      setDemData(data);
+      const preview = buildDemPreview(data);
+      if (preview) {
+        setDemPreview(preview);
+        const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
+        const baseH = backgroundImg ? bgSettings.height : canvasSize.height;
+        const scale = Math.min(baseW / preview.width, baseH / preview.height);
+        const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
+        const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
+        setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
+      }
+      setDemAlignMode(true);
+      setDemAlignTool("move");
+      applyDemToTerrain(data);
+    } catch (err) {
+      console.error("Failed to load DEM", err);
+      alert("Failed to read DEM file. Make sure it's a valid GeoTIFF DEM.");
+    } finally {
+      if (e.target) e.target.value = "";
     }
   };
 
@@ -2162,18 +2700,27 @@ export default function SecurityPlanner() {
     group.clear();
   };
 
-  const createTextSprite = (text: string) => {
+  const getSpriteFontSize = (fontSize: number) => clamp(Math.round(fontSize * 4), 24, 96);
+
+  const getBuildingLabelSignature = (building: BuildingItem) => {
+    const font = getBuildingLabelFont(building);
+    return `${building.label}|${font.fontFamily}|${font.fontSize}|${font.fontWeight}`;
+  };
+
+  const createTextSprite = (text: string, options?: { fontFamily?: string; fontSize?: number; fontWeight?: number; color?: string }) => {
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) return null;
-    const fontSize = 56;
+    const fontSize = options?.fontSize ?? 56;
     const padding = 24;
-    context.font = `${fontSize}px Space Grotesk, sans-serif`;
+    const fontFamily = options?.fontFamily ?? "Space Grotesk";
+    const fontWeight = options?.fontWeight ?? 700;
+    context.font = `${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;
     const metrics = context.measureText(text);
     canvas.width = Math.ceil(metrics.width + padding * 2);
     canvas.height = Math.ceil(fontSize + padding * 1.6);
-    context.font = `${fontSize}px Space Grotesk, sans-serif`;
-    context.fillStyle = "rgba(15, 23, 42, 0.9)";
+    context.font = `${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;
+    context.fillStyle = options?.color ?? "rgba(15, 23, 42, 0.9)";
     context.textBaseline = "middle";
     context.fillText(text, padding, canvas.height / 2);
 
@@ -2183,6 +2730,99 @@ export default function SecurityPlanner() {
     const sprite = new THREE.Sprite(material);
     sprite.scale.set(canvas.width / 10, canvas.height / 10, 1);
     return sprite;
+  };
+
+  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number) => {
+    const points = getBuildingPoints(building);
+    const buildingHeight = building.wallHeight ?? 60;
+    const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
+    const extrudeSettings = {
+      depth: buildingHeight,
+      bevelEnabled: true,
+      bevelThickness: 2,
+      bevelSize: 1,
+      bevelSegments: 2
+    };
+    const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+    geometry.rotateX(-Math.PI / 2);
+
+    const buildingMaterial = new THREE.MeshStandardMaterial({
+      color: building.color,
+      roughness: 0.6,
+      metalness: 0.1
+    });
+    const mesh = new THREE.Mesh(geometry, buildingMaterial);
+    mesh.position.set(building.x, baseHeight, building.y);
+    mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    const roofMaterial = new THREE.MeshStandardMaterial({
+      color: adjustColor(building.color, -20),
+      roughness: 0.7,
+      metalness: 0.05
+    });
+    const roofShape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
+    const roofGeometry = new THREE.ShapeGeometry(roofShape);
+    roofGeometry.rotateX(-Math.PI / 2);
+    const roof = new THREE.Mesh(roofGeometry, roofMaterial);
+    roof.position.set(0, buildingHeight, 0);
+    roof.name = "building-roof";
+    roof.userData.itemId = building.id;
+    roof.userData.isRoof = true;
+    roof.receiveShadow = true;
+    mesh.add(roof);
+
+    const font = getBuildingLabelFont(building);
+    const label = createTextSprite(building.label, {
+      fontFamily: font.fontFamily,
+      fontWeight: font.fontWeight,
+      fontSize: getSpriteFontSize(font.fontSize)
+    });
+    if (label) {
+      const labelOffset = building.labelOffset ?? { x: 0, y: 0 };
+      label.name = "building-label";
+      label.userData.itemId = building.id;
+      label.userData.isLabel = true;
+      label.userData.signature = getBuildingLabelSignature(building);
+      label.position.set(labelOffset.x, buildingHeight + 15, labelOffset.y);
+      mesh.add(label);
+    }
+
+    return mesh;
+  };
+
+  const disposeSprite = (sprite: THREE.Sprite) => {
+    const material = sprite.material;
+    if (material instanceof THREE.SpriteMaterial) {
+      if (material.map) material.map.dispose();
+      material.dispose();
+    }
+  };
+
+  const refreshBuildingLabelSprite = (mesh: THREE.Object3D, building: BuildingItem) => {
+    const signature = getBuildingLabelSignature(building);
+    const existing = mesh.getObjectByName("building-label") as THREE.Sprite | null;
+    if (existing && existing.userData?.signature === signature) return existing;
+
+    if (existing) {
+      mesh.remove(existing);
+      disposeSprite(existing);
+    }
+
+    const font = getBuildingLabelFont(building);
+    const label = createTextSprite(building.label, {
+      fontFamily: font.fontFamily,
+      fontWeight: font.fontWeight,
+      fontSize: getSpriteFontSize(font.fontSize)
+    });
+    if (!label) return null;
+    label.name = "building-label";
+    label.userData.itemId = building.id;
+    label.userData.isLabel = true;
+    label.userData.signature = signature;
+    mesh.add(label);
+    return label;
   };
 
   // Helper for Ray-Segment Intersection (2D)
@@ -2256,6 +2896,67 @@ export default function SecurityPlanner() {
     return pathPoints;
   };
 
+  const refreshCarObject = (item: ParkingItem, obj: THREE.Object3D | undefined, state: { group: THREE.Group }) => {
+    const signature = getCarSignature(item);
+    if (obj && obj.userData?.signature === signature) return obj;
+    const parent = obj?.parent ?? state.group;
+    const car = create3dCar(item);
+    car.userData.itemId = item.id;
+    car.userData.signature = signature;
+    parent.add(car);
+    if (obj) {
+      parent.remove(obj);
+      if (obj instanceof THREE.Group) {
+        disposeGroup(obj);
+      } else {
+        obj.traverse(child => {
+          const mesh = child as THREE.Mesh;
+          if (mesh.geometry) mesh.geometry.dispose();
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach(material => material.dispose());
+            } else {
+              mesh.material.dispose();
+            }
+          }
+        });
+      }
+    }
+    threeObjectCacheRef.current.set(item.id, car);
+    return car;
+  };
+
+  const refreshTreeObject = (item: TreeItem, obj: THREE.Object3D | undefined, state: { group: THREE.Group }) => {
+    const signature = getTreeSignature(item);
+    if (obj && obj.userData?.signature === signature) return obj;
+    const parent = obj?.parent ?? state.group;
+    const tree = create3dTree(item);
+    tree.userData.itemId = item.id;
+    tree.userData.signature = signature;
+    tree.renderOrder = 1;
+    parent.add(tree);
+    if (obj) {
+      parent.remove(obj);
+      if (obj instanceof THREE.Group) {
+        disposeGroup(obj);
+      } else {
+        obj.traverse(child => {
+          const mesh = child as THREE.Mesh;
+          if (mesh.geometry) mesh.geometry.dispose();
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach(material => material.dispose());
+            } else {
+              mesh.material.dispose();
+            }
+          }
+        });
+      }
+    }
+    threeObjectCacheRef.current.set(item.id, tree);
+    return tree;
+  };
+
   // Fast position-only update for 3D objects (used during dragging)
   const updateThreeScenePositions = () => {
     const state = threeStateRef.current;
@@ -2266,24 +2967,37 @@ export default function SecurityPlanner() {
 
     items.forEach(item => {
       const obj = cache.get(item.id);
-      if (!obj) return;
+      if (!obj && item.type !== "parking") return;
 
       // Get terrain height for the item
-      const h = getGridHeight(item.x, item.y);
+      const h = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
 
-      if (item.type === "building" || item.type === "parking") {
-        obj.position.set(item.x, h, item.y);
-        obj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
+      if (item.type === "parking") {
+        const carObj = refreshCarObject(item as ParkingItem, obj, state);
+        carObj.position.set(item.x, h, item.y);
+        carObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
         needsRender = true;
       } else if (item.type === "tree") {
-        const tree = item as TreeItem;
-        obj.position.set(tree.x, h, tree.y);
-        obj.rotation.y = -THREE.MathUtils.degToRad(tree.rotation);
+        const treeObj = refreshTreeObject(item as TreeItem, obj, state);
+        treeObj.position.set(item.x, h, item.y);
+        treeObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
+        needsRender = true;
+      } else if (item.type === "building") {
+        const building = item as BuildingItem;
+        const baseH = getBuildingBaseHeight(building);
+        obj.position.set(building.x, baseH, building.y);
+        obj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
+        const label = refreshBuildingLabelSprite(obj, building);
+        if (label) {
+          const offset = building.labelOffset ?? { x: 0, y: 0 };
+          const buildingHeight = building.wallHeight ?? 60;
+          label.position.set(offset.x, buildingHeight + 15, offset.y);
+        }
         needsRender = true;
       } else if (item.type === "camera") {
         const cam = item as CameraItem;
         const camPos = getCameraPlanPosition(cam);
-        const camH = getGridHeight(camPos.x, camPos.y); // Get height at camera specific position (pivot)
+        const camH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Get height at camera specific position (pivot)
         const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
 
         obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
@@ -2304,6 +3018,86 @@ export default function SecurityPlanner() {
     if (needsRender) {
       state.renderer.render(state.scene, state.camera);
     }
+  };
+
+  const bgSettingsEqual = (a: typeof bgSettings, b: typeof bgSettings) =>
+    a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.opacity === b.opacity;
+
+  const updateTerrainMesh = () => {
+    const state = threeStateRef.current;
+    if (!state) return false;
+
+    const { group } = state;
+    const terrainMesh = group.getObjectByName("terrain-mesh") as THREE.Mesh | null;
+    if (!terrainMesh || !(terrainMesh.geometry instanceof THREE.PlaneGeometry)) return false;
+
+    const segW = Math.round(canvasSize.width / gridSize);
+    const segH = Math.round(canvasSize.height / gridSize);
+    const terrainGeo = terrainMesh.geometry as THREE.PlaneGeometry;
+    const tParams = terrainGeo.parameters as any;
+    if (
+      tParams.width !== canvasSize.width ||
+      tParams.height !== canvasSize.height ||
+      tParams.widthSegments !== segW ||
+      tParams.heightSegments !== segH
+    ) {
+      return false;
+    }
+
+    const posAttr = terrainGeo.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i);
+      const vy = posAttr.getY(i);
+      const worldX = (canvasSize.width / 2) + vx;
+      const worldZ = (canvasSize.height / 2) - vy;
+      const h = getGridHeight(worldX, worldZ);
+      posAttr.setZ(i, h);
+    }
+    posAttr.needsUpdate = true;
+    terrainGeo.computeVertexNormals();
+
+    const mapPlane = group.getObjectByName("terrain-map-plane") as THREE.Mesh | null;
+    if (mapPlane && mapPlane.geometry instanceof THREE.PlaneGeometry) {
+      if (mapPlane.material && !Array.isArray(mapPlane.material)) {
+        mapPlane.material.depthWrite = false;
+      }
+      mapPlane.renderOrder = -1;
+      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
+      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
+      const mapGeo = mapPlane.geometry as THREE.PlaneGeometry;
+      const mParams = mapGeo.parameters as any;
+      if (
+        mParams.width !== bgSettings.width ||
+        mParams.height !== bgSettings.height ||
+        mParams.widthSegments !== mapSegW ||
+        mParams.heightSegments !== mapSegH
+      ) {
+        return false;
+      }
+
+      const mapPosAttr = mapGeo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < mapPosAttr.count; i++) {
+        const localX = mapPosAttr.getX(i);
+        const localY = mapPosAttr.getY(i);
+        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
+        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
+        const h = getGridHeight(worldX, worldZ);
+        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET);
+      }
+      mapPosAttr.needsUpdate = true;
+      mapGeo.computeVertexNormals();
+    }
+
+    return true;
+  };
+
+  const syncSceneRefs = () => {
+    prevItemsRef.current = [...items];
+    prevTerrainHeightsRef.current = terrainHeights;
+    prevCanvasSizeRef.current = canvasSize;
+    prevGridSizeRef.current = gridSize;
+    prevBgSettingsRef.current = bgSettings;
+    prevBackgroundImgRef.current = backgroundImg;
   };
 
   // Check if items have structural changes requiring full rebuild
@@ -2336,28 +3130,14 @@ export default function SecurityPlanner() {
         if (prevB.color !== nextB.color) return true;
       }
 
-      // For trees, check radius, height, width, treeType, rotation, color change
+      // For trees, geometry updates are handled via cache refresh (no full rebuild)
       if (nextItem.type === "tree") {
-        const prevT = prevItem as TreeItem;
-        const nextT = nextItem as TreeItem;
-        if (prevT.radius !== nextT.radius || prevT.color !== nextT.color) return true;
-        if (prevT.height !== nextT.height || prevT.width !== nextT.width) return true;
-        if (prevT.treeType !== nextT.treeType) return true;
+        // no-op
       }
 
-      // For parking/cars, check dimensions, color, vehicleType, rotation
+      // For parking/cars, geometry updates are handled via cache refresh (no full rebuild)
       if (nextItem.type === "parking") {
-        const prevP = prevItem as ParkingItem;
-        const nextP = nextItem as ParkingItem;
-        if (
-          prevP.width !== nextP.width ||
-          prevP.height !== nextP.height ||
-          prevP.vehicleHeight !== nextP.vehicleHeight ||
-          prevP.vehicleType !== nextP.vehicleType ||
-          prevP.color !== nextP.color
-        ) return true;
-        if (prevP.color !== nextP.color || prevP.vehicleType !== nextP.vehicleType) return true;
-        // if (prevP.rotation !== nextP.rotation) return true;
+        // no-op
       }
 
       // For cameras, check if range/fov changed (frustum geometry)
@@ -2378,20 +3158,36 @@ export default function SecurityPlanner() {
 
     const { group, scene, renderer } = state;
 
-    // Check if we can do a fast position-only update
-    // Fast path: Only if items structure/props haven't changed AND terrain hasn't changed
+    // Check if we can do a fast update without full rebuild
     const prevItems = prevItemsRef.current;
-
-    // We need to track previous terrain heights to know if we need a full rebuild
-    // Note: We use the ref inside the condition
     const terrainChanged = prevTerrainHeightsRef.current !== terrainHeights;
+    const canvasChanged = prevCanvasSizeRef.current.width !== canvasSize.width || prevCanvasSizeRef.current.height !== canvasSize.height;
+    const gridChanged = prevGridSizeRef.current !== gridSize;
+    const bgSettingsChanged = !bgSettingsEqual(prevBgSettingsRef.current, bgSettings);
+    const bgImgChanged = prevBackgroundImgRef.current !== backgroundImg;
+    const fullRebuildNeeded =
+      prevItems.length === 0 ||
+      needsFullRebuild(prevItems, items) ||
+      canvasChanged ||
+      gridChanged ||
+      bgSettingsChanged ||
+      bgImgChanged;
 
-    if (prevItems.length > 0 && !needsFullRebuild(prevItems, items) && !terrainChanged) {
-      updateThreeScenePositions();
-      prevItemsRef.current = [...items];
-      return;
+    if (!fullRebuildNeeded) {
+      if (terrainChanged) {
+        const updated = updateTerrainMesh();
+        updateThreeScenePositions();
+        if (updated) {
+          renderer.render(scene, state.camera);
+          syncSceneRefs();
+          return;
+        }
+      } else {
+        updateThreeScenePositions();
+        syncSceneRefs();
+        return;
+      }
     }
-    prevTerrainHeightsRef.current = terrainHeights;
 
     // Full rebuild needed - clear cache and group
     threeObjectCacheRef.current.clear();
@@ -2456,7 +3252,8 @@ export default function SecurityPlanner() {
       const mapPlaneMaterial = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: bgSettings.opacity
+        opacity: bgSettings.opacity,
+        depthWrite: false
       });
       new THREE.TextureLoader().load(backgroundImg, texture => {
         texture.colorSpace = THREE.SRGBColorSpace;
@@ -2486,93 +3283,45 @@ export default function SecurityPlanner() {
         const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
 
         const h = getGridHeight(worldX, worldZ);
-        mapPosAttr.setZ(i, h + 0.15); // Slight offset above terrain to prevent z-fighting
+        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET); // Slight offset above terrain to prevent z-fighting
       }
       mapGeometry.computeVertexNormals();
 
-      const mapPlane = new THREE.Mesh(mapGeometry, mapPlaneMaterial);
-      mapPlane.rotation.x = -Math.PI / 2;
-      mapPlane.position.set(
-        bgSettings.x + bgSettings.width / 2,
-        0,
-        bgSettings.y + bgSettings.height / 2
-      );
-      mapPlane.receiveShadow = true;
-      group.add(mapPlane);
-    }
+    const mapPlane = new THREE.Mesh(mapGeometry, mapPlaneMaterial);
+    mapPlane.renderOrder = -1;
+    mapPlane.rotation.x = -Math.PI / 2;
+    mapPlane.position.set(
+      bgSettings.x + bgSettings.width / 2,
+      0,
+      bgSettings.y + bgSettings.height / 2
+    );
+    mapPlane.receiveShadow = true;
+    mapPlane.name = "terrain-map-plane";
+    group.add(mapPlane);
+  }
 
     // Process all items
     items.forEach(item => {
-      const terrainH = getGridHeight(item.x, item.y);
+      const terrainH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
 
       // Buildings with improved materials
       if (item.type === "building") {
         const building = item as BuildingItem;
-        const points = getBuildingPoints(building);
-        const buildingHeight = building.wallHeight ?? 60;
-
-        // Create extruded building shape
-        // IMPORTANT: Negate Y because rotateX(-PI/2) will negate it again, 
-        // making the final Z coordinate match the 2D Y coordinate
-        const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-        const extrudeSettings = {
-          depth: buildingHeight,
-          bevelEnabled: true,
-          bevelThickness: 2,
-          bevelSize: 1,
-          bevelSegments: 2
-        };
-        const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-
-        // Rotate to make it vertical (extrude goes into Z, we need Y)
-        geometry.rotateX(-Math.PI / 2);
-
-        // Create building with better materials
-        const buildingMaterial = new THREE.MeshStandardMaterial({
-          color: building.color,
-          roughness: 0.6,
-          metalness: 0.1
-        });
-
-        const mesh = new THREE.Mesh(geometry, buildingMaterial);
-        mesh.position.set(building.x, terrainH, building.y);
-        mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
+        const baseH = getBuildingBaseHeight(building);
+        const mesh = createBuildingMesh3d(building, baseH);
         mesh.userData.itemId = building.id;
+        mesh.renderOrder = 1;
         threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
         group.add(mesh);
-
-        // Building roof (child of mesh for grouped transforms)
-        const roofMaterial = new THREE.MeshStandardMaterial({
-          color: adjustColor(building.color, -20),
-          roughness: 0.7,
-          metalness: 0.05
-        });
-        const roofShape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-        const roofGeometry = new THREE.ShapeGeometry(roofShape);
-        roofGeometry.rotateX(-Math.PI / 2);
-
-        const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-        roof.position.set(0, buildingHeight, 0); // Local space
-        roof.name = "building-roof";
-        roof.userData.itemId = building.id;
-        roof.userData.isRoof = true;
-        roof.receiveShadow = true;
-        mesh.add(roof);
-
-        // Building label
-        const label = createTextSprite(building.label);
-        if (label) {
-          label.position.set(0, buildingHeight + 15, 0);
-          mesh.add(label);
-        }
       }
 
       // Cars (Parking Items treated as cars)
       if (item.type === "parking") {
-        const car = create3dCar(item as ParkingItem);
+        const carItem = item as ParkingItem;
+        const car = create3dCar(carItem);
         car.userData.itemId = item.id;
+        car.userData.signature = getCarSignature(carItem);
+        car.renderOrder = 1;
         threeObjectCacheRef.current.set(item.id, car); // Cache for position updates
         group.add(car);
       }
@@ -2581,6 +3330,8 @@ export default function SecurityPlanner() {
       if (item.type === "tree") {
         const tree = create3dTree(item as TreeItem);
         tree.userData.itemId = item.id;
+        tree.userData.signature = getTreeSignature(item as TreeItem);
+        tree.renderOrder = 1;
         threeObjectCacheRef.current.set(item.id, tree); // Cache for position updates
         group.add(tree);
       }
@@ -2591,7 +3342,7 @@ export default function SecurityPlanner() {
         const cameraPos = getCameraPlanPosition(cameraItem);
 
         // Recalculate height at specific camera pivot
-        const camTerrainH = getGridHeight(cameraPos.x, cameraPos.y);
+        const camTerrainH = getGridHeight(cameraPos.x, cameraPos.y) + OBJECT_ELEVATION_OFFSET;
         const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
         const absHeight = camTerrainH + cameraMountHeight;
         const cameraHeight = cameraMountHeight;
@@ -2611,6 +3362,7 @@ export default function SecurityPlanner() {
         // Camera body - box with lens
         const cameraGroup = new THREE.Group();
         cameraGroup.userData.itemId = cameraItem.id; // For raycasting selection
+        cameraGroup.renderOrder = 1;
 
         // Main camera body
         const bodyGeometry = new THREE.BoxGeometry(14, 10, 10);
@@ -2662,6 +3414,7 @@ export default function SecurityPlanner() {
           metalness: 0.3
         });
         const pole = new THREE.Mesh(poleGeometry, poleMaterial);
+        pole.renderOrder = 1;
         pole.position.set(cameraPos.x, camTerrainH + cameraMountHeight / 2, cameraPos.y);
         pole.castShadow = true;
         group.add(pole);
@@ -2875,8 +3628,8 @@ export default function SecurityPlanner() {
 
     renderer.render(scene, state.camera);
 
-    // Update previous items ref for next diff comparison
-    prevItemsRef.current = [...items];
+    // Update previous refs for next diff comparison
+    syncSceneRefs();
   };
 
   const handleCaptureSnapshot = () => {
@@ -3060,10 +3813,13 @@ export default function SecurityPlanner() {
     itemId: string | null;
     dragOffset: { x: number; z: number } | null;
     originalItemPos?: { x: number; y: number };
-    interactionType?: "move" | "resize-height";
+    interactionType?: "move" | "resize-height" | "move-label";
     startHeight?: number;
     startMouseY?: number;
     currentHeight?: number;
+    dragStartWorld?: { x: number; z: number };
+    startLabelOffset?: { x: number; y: number };
+    currentLabelOffset?: { x: number; y: number };
   }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
@@ -3203,60 +3959,41 @@ export default function SecurityPlanner() {
   }, [selectedId, items]); // Re-run when selection or items change
 
   useEffect(() => {
-    // Terrain Interaction: Cursor & Selection
+    // Terrain Interaction: Cursor & Hover
     if (!threeStateRef.current) return;
     const scene = threeStateRef.current.scene;
     const camera = threeStateRef.current.camera;
     const renderer = threeStateRef.current.renderer;
 
-    // 1. Cursor Logic
     let cursor = scene.getObjectByName("terrain-cursor") as THREE.Mesh;
     if (!cursor) {
-      const geo = new THREE.BoxGeometry(gridSize / 2, 4, gridSize / 2);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.6, depthTest: false });
+      const geo = new THREE.RingGeometry(0.88, 1, 48);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.7, depthTest: false, side: THREE.DoubleSide });
       cursor = new THREE.Mesh(geo, mat);
+      cursor.rotation.x = -Math.PI / 2;
       cursor.name = "terrain-cursor";
       scene.add(cursor);
     }
 
-    if (isTerrainMode) {
-      cursor.visible = true;
-    } else {
-      cursor.visible = false;
+    let cursorDot = scene.getObjectByName("terrain-cursor-dot") as THREE.Mesh;
+    if (!cursorDot) {
+      const geo = new THREE.CircleGeometry(0.18, 16);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide });
+      cursorDot = new THREE.Mesh(geo, mat);
+      cursorDot.rotation.x = -Math.PI / 2;
+      cursorDot.name = "terrain-cursor-dot";
+      scene.add(cursorDot);
     }
 
-    // 2. Selection Box
-    let selectionMesh = scene.getObjectByName("terrain-selection-box") as THREE.Mesh;
-    if (!selectionMesh) {
-      const geo = new THREE.BoxGeometry(1, 400, 1); // Tall box to cover height variations
-      const mat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
-      selectionMesh = new THREE.Mesh(geo, mat);
-      selectionMesh.name = "terrain-selection-box";
-      scene.add(selectionMesh);
-    }
-
-    if (isTerrainMode && terrainSelection) {
-      selectionMesh.visible = true;
-      const { x1, z1, x2, z2 } = terrainSelection;
-      const minX = Math.min(x1, x2);
-      const maxX = Math.max(x1, x2);
-      const minZ = Math.min(z1, z2);
-      const maxZ = Math.max(z1, z2);
-
-      const w = (maxX - minX) + gridSize / 2;
-      const d = (maxZ - minZ) + gridSize / 2;
-
-      selectionMesh.scale.set(Math.max(w, 4), 1, Math.max(d, 4));
-      selectionMesh.position.set((minX + maxX) / 2, 0, (minZ + maxZ) / 2);
-    } else {
-      selectionMesh.visible = false;
-    }
-
-    // Only attach listener if in Terrain Mode
     if (!isTerrainMode) {
+      cursor.visible = false;
+      cursorDot.visible = false;
       renderer.render(scene, camera);
       return;
     }
+
+    cursor.visible = true;
+    cursorDot.visible = true;
 
     const onMove = (e: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -3271,11 +4008,22 @@ export default function SecurityPlanner() {
         const hits = raycaster.intersectObject(terrain);
         if (hits.length > 0) {
           const pt = hits[0].point;
-          const gx = Math.round(pt.x / gridSize) * gridSize;
-          const gz = Math.round(pt.z / gridSize) * gridSize;
+          const safeGrid = gridSize || 20;
+          terrainHoverRef.current = { pointX: pt.x, pointZ: pt.z };
+          const radius = getBrushRadius(safeGrid);
+          const h = getGridHeight(pt.x, pt.z);
 
-          const h = getGridHeight(gx, gz);
-          cursor.position.set(gx, h, gz);
+          const cursorMat = cursor.material as THREE.MeshBasicMaterial;
+          cursorMat.color.setHex(
+            terrainTool === "sculpt" ? 0xf59e0b : terrainTool === "smooth" ? 0x38bdf8 : 0x818cf8
+          );
+          cursorMat.opacity = 0.7;
+          cursorMat.transparent = true;
+          cursorMat.depthTest = false;
+          cursor.scale.set(radius, radius, radius);
+          cursor.position.set(pt.x, h + 0.6, pt.z);
+          cursorDot.position.set(pt.x, h + 0.6, pt.z);
+
           renderer.render(scene, camera);
         }
       }
@@ -3285,7 +4033,7 @@ export default function SecurityPlanner() {
     return () => {
       renderer.domElement.removeEventListener("pointermove", onMove);
     };
-  }, [isTerrainMode, gridSize, terrainHeights, terrainSelection]);
+  }, [isTerrainMode, gridSize, terrainHeights, terrainTool, terrainBrushSize, canvasSize.width, canvasSize.height]);
 
   useEffect(() => {
     if (!threeContainerRef.current || threeStateRef.current) return;
@@ -3483,96 +4231,73 @@ export default function SecurityPlanner() {
         return;
       }
 
-      // Terrain Edit Mode (Selection Logic)
+      // Terrain Edit Mode (Brush-based sculpting)
       if (isTerrainModeRef.current) {
+        if (event.button !== 0) return;
+        event.preventDefault();
         raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
         const terrain = group.getObjectByName("terrain-mesh");
         if (terrain) {
           const hits = raycaster.intersectObject(terrain);
           if (hits.length > 0) {
             const pt = hits[0].point;
-            const safeGrid = gridSize || 20;
-            const gx = Math.round(pt.x / safeGrid) * safeGrid;
-            const gz = Math.round(pt.z / safeGrid) * safeGrid;
+            const tool = terrainToolRef.current;
+            const direction: 1 | -1 = tool === "sculpt" && event.shiftKey ? -1 : 1;
 
-            // Start Selection
-            setTerrainSelection({ x1: gx, z1: gz, x2: gx, z2: gz });
-
-            // Disable Orbit Controls to prevent panning/rotating while selecting
-            if (threeStateRef.current?.controls) {
-              threeStateRef.current.controls.enabled = false;
+            if (tool === "flatten" && terrainFlattenSampleRef.current) {
+              const target = getGridHeight(pt.x, pt.z);
+              setTerrainFlattenTarget(target);
+              terrainFlattenTargetRef.current = target;
             }
 
-            threeDragStateRef.current = {
-              isDragging: true,
-              interactionType: "select-terrain" as any,
-              itemId: "terrain-select",
-              startMouse: { x: gx, y: gz } // Using as Grid Coord storage effectively
-            } as any;
+            const startTime = performance.now();
+            terrainStrokeRef.current = {
+              active: true,
+              tool,
+              direction,
+              lastTime: startTime
+            };
+
+            const applyAtPoint = (p: THREE.Vector3, now: number) => {
+              if (!terrainStrokeRef.current) return;
+              const last = terrainStrokeRef.current.lastTime;
+              const dt = Math.min((now - last) / 1000, 0.05);
+              terrainStrokeRef.current.lastTime = now;
+              applyBrushStroke(p.x, p.z, tool, direction, dt || 0.016);
+              terrainHoverRef.current = { pointX: p.x, pointZ: p.z };
+            };
+
+            applyAtPoint(pt, startTime);
 
             const moveHandler = (moveEvent: PointerEvent) => {
               const moveNdc = getNDC(moveEvent);
               raycaster.setFromCamera(new THREE.Vector2(moveNdc.x, moveNdc.y), camera);
               const moveHits = raycaster.intersectObject(terrain);
               if (moveHits.length > 0) {
-                const mPt = moveHits[0].point;
-                const safeGrid = gridSize || 20;
-                const mGx = Math.round(mPt.x / safeGrid) * safeGrid;
-                const mGz = Math.round(mPt.z / safeGrid) * safeGrid;
-
-                setTerrainSelection(prev => {
-                  if (!prev) return { x1: gx, z1: gz, x2: mGx, z2: mGz };
-                  return { ...prev, x2: mGx, z2: mGz };
-                });
+                applyAtPoint(moveHits[0].point, performance.now());
               }
             };
 
             const upHandler = () => {
-              const dragState = threeDragStateRef.current;
-
-              // Re-enable Orbit
-              if (threeStateRef.current?.controls) {
-                threeStateRef.current.controls.enabled = true;
+              if (terrainStrokeRef.current?.active) {
+                saveHistory(undefined, terrainHeightsRef.current);
               }
-
-              if ((dragState as any).interactionType === "select-terrain") {
-                threeDragStateRef.current = { ...threeDragStateRef.current, isDragging: false, interactionType: null };
-              }
+              terrainStrokeRef.current = null;
               window.removeEventListener("pointermove", moveHandler);
               window.removeEventListener("pointerup", upHandler);
             };
 
             window.addEventListener("pointermove", moveHandler);
             window.addEventListener("pointerup", upHandler);
-            event.stopPropagation(); // Stop bubbling
-            return; // Stop propagation
+            event.stopPropagation();
+            return;
           }
         }
-        // If in terrain mode but clicked off-terrain, fallback or do nothing?
-        // Do distinct check:
         return;
       } else {
         // Normal mode (Selection check)
         // Only check selection if NOT terrain mode
       }
-
-      // 1. Handle Selection / Drag (Existing logic)
-      // We need to wrap existing logic in "if (!isTerrainMode)" or handle fallthrough?
-      // If terrain mode started drag, we want to attach listeners.
-      // Existing code structure:
-      // const clickedItemId = ...
-      // ...
-
-      // My insertion above falls through?
-      // If threeDragStateRef is set, we skip selection logic?
-      // Existing selection logic sets threeDragStateRef.
-      // I should WRAP the selection logic.
-
-      // Let's look at the TARGET of replace.
-      // I'll replace lines 2900 
-
-
-
 
       // Left-click handling
       if (event.button === 0) {
@@ -3645,10 +4370,10 @@ export default function SecurityPlanner() {
                 newItem = {
                   ...common,
                   type: "parking",
-                  width: 30,
-                  height: 50,
+                  width: 24,
+                  height: 48,
                   color: COLORS.parking[0],
-                  vehicleHeight: 12
+                  vehicleHeight: 14
                 } as ParkingItem;
                 break;
               case "add-label":
@@ -3683,6 +4408,7 @@ export default function SecurityPlanner() {
 
           // Check for Corner Handle Interaction (Height Resize)
           let isResizingHeight = false;
+          let isLabelDrag = false;
           raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
           const intersects = raycaster.intersectObjects(group.children, true);
           const hit = intersects.find(h => {
@@ -3690,6 +4416,12 @@ export default function SecurityPlanner() {
           });
           if (hit) {
             isResizingHeight = true;
+          }
+          const labelHit = intersects.find(h => {
+            return h.object.userData?.isLabel && h.object.userData?.itemId === clickedItemId;
+          });
+          if (labelHit) {
+            isLabelDrag = true;
           }
 
           const groundPos = raycastToGround(ndc);
@@ -3699,13 +4431,17 @@ export default function SecurityPlanner() {
             threeDragStateRef.current = {
               isDragging: true,
               itemId: clickedItemId,
-              interactionType: isResizingHeight ? "resize-height" : "move",
+              interactionType: isResizingHeight ? "resize-height" : isLabelDrag ? "move-label" : "move",
               startHeight: (clickedItem as BuildingItem).wallHeight ?? 60,
               startMouseY: event.clientY,
-              dragOffset: {
-                x: clickedItem.x - groundPos.x,
-                z: clickedItem.y - groundPos.z
-              }
+              dragOffset: isLabelDrag
+                ? null
+                : {
+                  x: clickedItem.x - groundPos.x,
+                  z: clickedItem.y - groundPos.z
+                },
+              dragStartWorld: groundPos,
+              startLabelOffset: (clickedItem as BuildingItem).labelOffset ?? { x: 0, y: 0 }
             };
           }
 
@@ -3730,6 +4466,38 @@ export default function SecurityPlanner() {
               return;
             }
 
+            // HANDLE LABEL MOVE
+            if (dragState.interactionType === "move-label") {
+              const moveNdc = getNDC(moveEvent);
+              const newGroundPos = raycastToGround(moveNdc);
+              if (!newGroundPos || !dragState.dragStartWorld) return;
+
+              const deltaWorld = {
+                x: newGroundPos.x - dragState.dragStartWorld.x,
+                y: newGroundPos.z - dragState.dragStartWorld.z
+              };
+              const building = itemsRef.current.find(i => i.id === dragState.itemId) as BuildingItem | undefined;
+              if (!building) return;
+              const localDelta = rotatePoint(deltaWorld, -building.rotation);
+              const startOffset = dragState.startLabelOffset ?? { x: 0, y: 0 };
+              const nextOffset = {
+                x: startOffset.x + localDelta.x,
+                y: startOffset.y + localDelta.y
+              };
+              dragState.currentLabelOffset = nextOffset;
+
+              const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
+              if (cachedObj) {
+                const label = cachedObj.getObjectByName("building-label") as THREE.Sprite | null;
+                if (label) {
+                  const buildingHeight = building.wallHeight ?? 60;
+                  label.position.set(nextOffset.x, buildingHeight + 15, nextOffset.y);
+                }
+                state.renderer.render(state.scene, state.camera);
+              }
+              return;
+            }
+
             // HANDLE MOVE
             const moveNdc = getNDC(moveEvent);
             const newGroundPos = raycastToGround(moveNdc);
@@ -3748,17 +4516,27 @@ export default function SecurityPlanner() {
             const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
             if (cachedObj) {
               const itemType = itemsRef.current.find(i => i.id === dragState.itemId)?.type;
+              const terrainY = getGridHeight(newX, newY) + OBJECT_ELEVATION_OFFSET;
 
               if (itemType === "camera") {
                 const item = itemsRef.current.find(i => i.id === dragState.itemId) as CameraItem | undefined;
                 const camHeight = item?.mount?.height ?? item?.height ?? 10;
-                cachedObj.position.set(newX, camHeight, newY);
-              } else if (itemType === "tree" || itemType === "parking" || itemType === "building") {
-                cachedObj.position.set(newX, 0, newY);
+                cachedObj.position.set(newX, terrainY + camHeight, newY);
+              } else if (itemType === "building") {
+                const building = itemsRef.current.find(i => i.id === dragState.itemId) as BuildingItem | undefined;
+                if (building) {
+                  const nextBuilding = { ...building, x: newX, y: newY };
+                  const baseH = getBuildingBaseHeight(nextBuilding);
+                  cachedObj.position.set(newX, baseH, newY);
+                } else {
+                  cachedObj.position.set(newX, terrainY, newY);
+                }
+              } else if (itemType === "tree" || itemType === "parking") {
+                cachedObj.position.set(newX, terrainY, newY);
               } else if (itemType === "image") {
-                cachedObj.position.set(newX, 0.25, newY);
+                cachedObj.position.set(newX, terrainY + 0.25, newY);
               } else if (itemType === "label") {
-                cachedObj.position.set(newX, 8, newY);
+                cachedObj.position.set(newX, terrainY + 8, newY);
               }
 
               state.renderer.render(state.scene, state.camera);
@@ -3772,6 +4550,9 @@ export default function SecurityPlanner() {
               // Commit changes
               if (dragState.interactionType === "resize-height" && dragState.currentHeight !== undefined) {
                 updateItem(dragState.itemId, { wallHeight: dragState.currentHeight });
+                saveHistory();
+              } else if (dragState.interactionType === "move-label" && dragState.currentLabelOffset) {
+                updateItem(dragState.itemId, { labelOffset: dragState.currentLabelOffset });
                 saveHistory();
               } else if (dragState.interactionType !== "resize-height") {
                 // Commit Position
@@ -3797,7 +4578,10 @@ export default function SecurityPlanner() {
               itemId: null,
               dragOffset: null,
               interactionType: undefined,
-              currentHeight: undefined
+              currentHeight: undefined,
+              dragStartWorld: undefined,
+              startLabelOffset: undefined,
+              currentLabelOffset: undefined
             };
             window.removeEventListener("pointermove", moveHandler);
             window.removeEventListener("pointerup", upHandler);
@@ -3881,64 +4665,36 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (viewMode !== "iso3d") return;
     rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId, terrainHeights]);
+  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, frustumSettings, sceneBackgroundImg, backgroundMode, selectedId, terrainHeights, buildingLabelDefaults]);
 
-  // Lightweight effect for terrain selection visualization (no full rebuild)
   useEffect(() => {
     if (viewMode !== "iso3d") return;
-    const state = threeStateRef.current;
-    if (!state) return;
+    const id = window.requestAnimationFrame(() => {
+      updateThreeScenePositions();
+      const state = threeStateRef.current;
+      if (state) {
+        state.renderer.render(state.scene, state.camera);
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [items, viewMode]);
 
-    const { group, scene, camera, renderer } = state;
-
-    // Remove old selection helper
-    const oldHelper = group.getObjectByName("terrain-selection-helper");
-    if (oldHelper) {
-      group.remove(oldHelper);
-      if ((oldHelper as any).geometry) (oldHelper as any).geometry.dispose();
-    }
-
-    // Add new selection helper if selection exists
-    if (terrainSelection) {
-      const minX = Math.min(terrainSelection.x1, terrainSelection.x2);
-      const maxX = Math.max(terrainSelection.x1, terrainSelection.x2);
-      const minZ = Math.min(terrainSelection.z1, terrainSelection.z2);
-      const maxZ = Math.max(terrainSelection.z1, terrainSelection.z2);
-
-      const points = [
-        new THREE.Vector3(minX, getGridHeight(minX, minZ) + 3, minZ),
-        new THREE.Vector3(maxX, getGridHeight(maxX, minZ) + 3, minZ),
-        new THREE.Vector3(maxX, getGridHeight(maxX, maxZ) + 3, maxZ),
-        new THREE.Vector3(minX, getGridHeight(minX, maxZ) + 3, maxZ),
-        new THREE.Vector3(minX, getGridHeight(minX, minZ) + 3, minZ)
-      ];
-
-      const selGroup = new THREE.Group();
-      selGroup.name = "terrain-selection-helper";
-
-      const selGeo = new THREE.BufferGeometry().setFromPoints(points);
-      const selMat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2, depthTest: false });
-      const selLine = new THREE.Line(selGeo, selMat);
-      selLine.renderOrder = 999;
-      selGroup.add(selLine);
-
-      // Corner markers
-      const markerGeo = new THREE.BoxGeometry(5, 5, 5);
-      const markerMat = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
-      points.slice(0, 4).forEach(p => {
-        const m = new THREE.Mesh(markerGeo, markerMat);
-        m.position.copy(p);
-        m.renderOrder = 999;
-        selGroup.add(m);
-      });
-
-      group.add(selGroup);
-    }
-
-    renderer.render(scene, camera);
-  }, [terrainSelection, viewMode]);
-
-
+  useEffect(() => {
+    if (viewMode !== "iso3d") return;
+    const id = window.requestAnimationFrame(() => {
+      if (!threeStateRef.current) return;
+      if (threeObjectCacheRef.current.size === 0) {
+        rebuildThreeScene();
+      } else {
+        updateThreeScenePositions();
+        const state = threeStateRef.current;
+        if (state) {
+          state.renderer.render(state.scene, state.camera);
+        }
+      }
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [viewMode, terrainHeights]);
 
   useEffect(() => {
     if (viewMode !== "plan") {
@@ -3972,7 +4728,7 @@ export default function SecurityPlanner() {
     const height = canvas.height;
 
     const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getGridHeight(camPos.x, camPos.y); // Terrain adjusted height
+    const camTerrainH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Terrain adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
@@ -4007,10 +4763,12 @@ export default function SecurityPlanner() {
     dirLight.position.set(100, 200, 50);
     scene.add(dirLight);
 
-    // Ground with Terrain Height
-    const groundW = canvasSize.width * 2;
-    const groundH = canvasSize.height * 2;
-    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, 64, 64);
+    // Ground with Terrain Height (match 3D terrain resolution)
+    const groundW = canvasSize.width;
+    const groundH = canvasSize.height;
+    const segW = Math.max(Math.round(canvasSize.width / gridSize), 1);
+    const segH = Math.max(Math.round(canvasSize.height / gridSize), 1);
+    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, segW, segH);
 
     // Apply terrain height to ground geometry
     const pos = groundGeo.attributes.position;
@@ -4031,7 +4789,7 @@ export default function SecurityPlanner() {
 
     const ground = new THREE.Mesh(
       groundGeo,
-      new THREE.MeshStandardMaterial({ color: '#6B8E23', roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.9, metalness: 0.1, flatShading: true })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(centerX, 0, centerY);
@@ -4058,14 +4816,15 @@ export default function SecurityPlanner() {
         const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
 
         const h = getGridHeight(worldX, worldZ);
-        mapPosAttr.setZ(i, h + 0.1); // Slight offset above terrain
+        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET); // Slight offset above terrain
       }
       mapGeometry.computeVertexNormals();
 
       const mapPlane = new THREE.Mesh(
         mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity })
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false })
       );
+      mapPlane.renderOrder = -1;
       mapPlane.rotation.x = -Math.PI / 2;
       mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
       scene.add(mapPlane);
@@ -4073,17 +4832,12 @@ export default function SecurityPlanner() {
 
     // Add items (Terrain Aware)
     items.forEach(item => {
-      const itemH = getGridHeight(item.x, item.y);
+      const itemH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
 
       if (item.type === "building") {
         const bld = item as BuildingItem;
-        const pts = getBuildingPoints(bld);
-        const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, -p.y)));
-        const geo = new THREE.ExtrudeGeometry(shape, { depth: 60, bevelEnabled: false });
-        geo.rotateX(-Math.PI / 2);
-        const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: bld.color, side: THREE.DoubleSide }));
-        mesh.position.set(bld.x, itemH, bld.y);
-        mesh.rotation.y = -THREE.MathUtils.degToRad(bld.rotation);
+        const baseH = getBuildingBaseHeight(bld);
+        const mesh = createBuildingMesh3d(bld, baseH);
         scene.add(mesh);
       }
       if (item.type === "tree") {
@@ -4159,21 +4913,33 @@ export default function SecurityPlanner() {
 
   // --- Event Handlers ---
 
-  const getSvgMousePos = (e: React.MouseEvent) => {
-    if (!svgRef.current) return { x: 0, y: 0 };
-    const CTM = svgRef.current.getScreenCTM();
+  const getSvgMousePosFor = (
+    svgEl: SVGSVGElement | null,
+    e: React.MouseEvent,
+    pan = { x: 0, y: 0 },
+    scale = 1
+  ) => {
+    if (!svgEl) return { x: 0, y: 0 };
+    const CTM = svgEl.getScreenCTM();
     if (!CTM) return { x: 0, y: 0 };
     const rawX = (e.clientX - CTM.e) / CTM.a;
     const rawY = (e.clientY - CTM.f) / CTM.d;
     return {
-      x: (rawX - panOffset.x) / zoom,
-      y: (rawY - panOffset.y) / zoom
+      x: (rawX - pan.x) / scale,
+      y: (rawY - pan.y) / scale
     };
   };
+
+  const getSvgMousePos = (e: React.MouseEvent) =>
+    getSvgMousePosFor(svgRef.current, e, panOffset, zoom);
+
+  const getMiniSvgMousePos = (e: React.MouseEvent) =>
+    getSvgMousePosFor(demMiniRef.current, e);
 
   const handleMouseDown = (e: React.MouseEvent, id: string, type: InteractionType = "move", variant?: string) => {
     if (mode !== "select") return;
     if (viewMode === "iso3d") return;
+    if (e.altKey) return;
     e.stopPropagation();
 
     const item = items.find(i => i.id === id);
@@ -4224,7 +4990,32 @@ export default function SecurityPlanner() {
       snap: snapToGrid && !e.altKey
     });
   };
+  const updateDemTransformDrag = (pos: { x: number; y: number }, snapRotation?: boolean) => {
+    if (!demTransformDrag || !demPreview) return false;
+    const start = demTransformDrag.startTransform;
+    const dx = pos.x - demTransformDrag.startMouse.x;
+    const dy = pos.y - demTransformDrag.startMouse.y;
+
+    if (demTransformDrag.mode === "move") {
+      setDemTransform({ ...start, x: start.x + dx, y: start.y + dy });
+    } else if (demTransformDrag.mode === "scale") {
+      const startDist = Math.hypot(demTransformDrag.startMouse.x - start.x, demTransformDrag.startMouse.y - start.y) || 1;
+      const nextDist = Math.hypot(pos.x - start.x, pos.y - start.y);
+      const nextScale = clamp(start.scale * (nextDist / startDist), 0.1, 50);
+      setDemTransform({ ...start, scale: nextScale });
+    } else if (demTransformDrag.mode === "rotate") {
+      const startAngle = Math.atan2(demTransformDrag.startMouse.y - start.y, demTransformDrag.startMouse.x - start.x);
+      const nextAngle = Math.atan2(pos.y - start.y, pos.x - start.x);
+      const delta = ((nextAngle - startAngle) * 180) / Math.PI;
+      const nextRotation = start.rotation + delta;
+      const snapped = snapRotation ? Math.round(nextRotation / 5) * 5 : nextRotation;
+      setDemTransform({ ...start, rotation: snapped });
+    }
+    return true;
+  };
+
   const handleSvgMouseMove = (e: React.MouseEvent) => {
+    if (updateDemTransformDrag(getSvgMousePos(e), e.shiftKey)) return;
     // Handle camera placement preview
     if (mode === "add-camera" && viewMode === "plan") {
       const pos = getSvgMousePos(e);
@@ -4244,6 +5035,15 @@ export default function SecurityPlanner() {
       setCameraPlacementPreview(null);
     }
 
+    if (isBackgroundDragging) {
+      const pos = getSvgMousePos(e);
+      setBgSettings({
+        ...bgSettings,
+        x: bgDragStart.bgX + (pos.x - bgDragStart.x),
+        y: bgDragStart.bgY + (pos.y - bgDragStart.y)
+      });
+      return;
+    }
     if (isPanning) {
       const dx = e.clientX - panStart.x;
       const dy = e.clientY - panStart.y;
@@ -4302,6 +5102,17 @@ export default function SecurityPlanner() {
           y: startOffset.y + dy
         }
       });
+    } else if (interactionState.type === "move-label" && item.type === "building") {
+      const dx = pos.x - interactionState.startMouse.x;
+      const dy = pos.y - interactionState.startMouse.y;
+      const localDelta = rotatePoint({ x: dx, y: dy }, -item.rotation);
+      const startOffset = interactionState.startVal.labelOffset || { x: 0, y: 0 };
+      updateItem(interactionState.itemId, {
+        labelOffset: {
+          x: startOffset.x + localDelta.x,
+          y: startOffset.y + localDelta.y
+        }
+      });
     } else if (interactionState.type === "rotate") {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
@@ -4339,11 +5150,31 @@ export default function SecurityPlanner() {
       }
     }
   };
+
+  const endDemTransformDrag = () => {
+    if (demTransformDrag) {
+      if (demAutoApply) {
+        saveHistory(undefined, terrainHeightsRef.current);
+      }
+      setDemTransformDrag(null);
+    }
+  };
+
+  const handleDemMiniMouseMove = (e: React.MouseEvent) => {
+    if (updateDemTransformDrag(getMiniSvgMousePos(e), e.shiftKey)) return;
+  };
+
+  const handleDemMiniMouseUp = () => {
+    endDemTransformDrag();
+  };
+
   const handleSvgMouseUp = () => {
     if (interactionState.type) {
       saveHistory();
     }
+    endDemTransformDrag();
     setIsPanning(false);
+    setIsBackgroundDragging(false);
     setInteractionState({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
   };
 
@@ -4376,6 +5207,19 @@ export default function SecurityPlanner() {
   };
 
   const handleSvgMouseDown = (e: React.MouseEvent) => {
+    if (backgroundImg && mapMoveMode) {
+      e.preventDefault();
+      const pos = getSvgMousePos(e);
+      setIsBackgroundDragging(true);
+      setBgDragStart({ x: pos.x, y: pos.y, bgX: bgSettings.x, bgY: bgSettings.y });
+      return;
+    }
+    if (e.altKey) {
+      e.preventDefault();
+      setIsPanning(true);
+      setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
+      return;
+    }
     if (e.button === 1 || e.button === 2 || isSpacePressed || (e.button === 0 && mode === "select")) {
       e.preventDefault();
       setIsPanning(true);
@@ -4406,6 +5250,7 @@ export default function SecurityPlanner() {
 
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
+  const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
   const cameraAspect = selectedCamera?.aspect ?? 16 / 9;
   const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
   const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
@@ -4420,6 +5265,29 @@ export default function SecurityPlanner() {
   const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
   const rightPanelOffset = isRightPanelOpen ? "lg:right-[22rem]" : "lg:right-4";
   const workspaceRightPadding = isRightPanelOpen ? "pr-80" : "pr-6";
+  const workspaceLayoutClass = viewMode === "iso3d" || viewMode === "plan"
+    ? "items-stretch justify-stretch pt-16 pl-20 pb-4"
+    : "items-center justify-center pt-20 pl-24 pb-6";
+  const demOverlayTransform = demPreview ? {
+    x: demTransform.x,
+    y: demTransform.y,
+    scale: demTransform.scale,
+    rotation: demTransform.rotation
+  } : null;
+  const demAlignCursor = demAlignTool === "move"
+    ? "move"
+    : demAlignTool === "scale"
+      ? "nwse-resize"
+      : demAlignTool === "rotate"
+        ? "crosshair"
+        : "grab";
+  const demAlignStroke = demAlignTool === "rotate"
+    ? "#38bdf8"
+    : demAlignTool === "scale"
+      ? "#f59e0b"
+      : demAlignTool === "pan"
+        ? "#94a3b8"
+        : "#10b981";
   const floatingPanelRight = isRightPanelOpen ? "right-96" : "right-4";
   const showProjectSettings = rightPanelMode === "project";
 
@@ -4605,6 +5473,57 @@ export default function SecurityPlanner() {
           </div>
         </div>
       )}
+      {showDemGuide && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden text-slate-200">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-400">Terrain</p>
+                <h2 className="text-lg font-semibold text-slate-200">Get Elevation (GeoTIFF DEM)</h2>
+              </div>
+              <button onClick={() => setShowDemGuide(false)} className="p-2 text-slate-400 hover:text-slate-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-3 text-sm text-slate-300">
+              <div className="text-xs text-slate-400">
+                Use the USGS National Map Downloader to get a GeoTIFF DEM for your site.
+              </div>
+              <ol className="list-decimal list-inside space-y-2">
+                <li>
+                  Open the downloader:
+                  <a
+                    href="https://apps.nationalmap.gov/downloader/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-2 text-emerald-300 hover:text-emerald-200 underline"
+                  >
+                    apps.nationalmap.gov/downloader
+                  </a>
+                </li>
+                <li>Search for your address or location in the top‑right search box.</li>
+                <li>Use the draw tool to outline the area you want (box or polygon).</li>
+                <li>In the left panel, open the Elevation dataset.</li>
+                <li>Select a DEM product and make sure the format is GeoTIFF.</li>
+                <li>Add to cart, then download the GeoTIFF.</li>
+                <li>Back in the app, click <span className="text-slate-200">Upload TIF</span> in Terrain Tools.</li>
+                <li>Use <span className="text-slate-200">DEM Align</span> to line up the DEM with your screenshot.</li>
+              </ol>
+              <div className="text-xs text-slate-500">
+                Tip: If your download is too large, reduce the area or pick a lower‑resolution DEM.
+              </div>
+            </div>
+            <div className="px-5 py-4 border-t border-white/10 bg-zinc-900/60 flex justify-end">
+              <button
+                onClick={() => setShowDemGuide(false)}
+                className="px-4 py-2 text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {vertexInsertMode && viewMode === "plan" && selectedId && (
         <div className="absolute left-1/2 bottom-10 -translate-x-1/2 rounded-full bg-emerald-600/90 px-4 py-2 text-xs font-semibold text-white shadow-xl z-50 backdrop-blur-md">
           Click an edge to insert a vertex.
@@ -4618,7 +5537,7 @@ export default function SecurityPlanner() {
             { mode: "add-camera", icon: Camera, label: "Camera" },
             { mode: "add-building", icon: Square, label: "Building" },
             { mode: "add-tree", icon: Trees, label: "Tree" },
-            { mode: "add-parking", icon: Car, label: "Parking" },
+            { mode: "add-parking", icon: Car, label: "Cars" },
             { mode: "add-label", icon: Type, label: "Label" }
           ].map(tool => (
             <button
@@ -4658,63 +5577,373 @@ export default function SecurityPlanner() {
 
               {/* Terrain Controls Popup */}
               {isTerrainMode && (
-                <div className="absolute left-14 top-0 ml-4 w-64 bg-zinc-900/95 backdrop-blur-xl border border-white/10 p-4 rounded-xl shadow-2xl z-50 animate-in fade-in slide-in-from-left-2 ring-1 ring-white/10">
+                <div className="absolute left-14 top-1/2 -translate-y-1/2 mt-6 ml-4 w-64 max-h-[calc(100vh-8rem)] overflow-y-auto bg-zinc-900/95 backdrop-blur-xl border border-white/10 p-4 rounded-xl shadow-2xl z-50 animate-in fade-in slide-in-from-left-2 ring-1 ring-white/10 custom-scrollbar">
                   <h3 className="text-sm font-bold text-slate-200 mb-3 flex items-center gap-2">
                     <MapIcon className="w-4 h-4 text-emerald-500" />
                     Terrain Tools
                   </h3>
 
-                  <div className="bg-white/5 rounded-lg p-3 border border-white/5">
-                    <p className="text-[10px] text-slate-400 mb-3 text-center leading-relaxed">
-                      Drag firmly on the terrain to select an area to modify.
+                  <div className="bg-white/5 rounded-lg p-3 border border-white/5 space-y-3">
+                    <p className="text-[10px] text-slate-400 text-center leading-relaxed">
+                      Brush-based sculpting: drag to modify terrain. Hold Shift to lower (Sculpt).
                     </p>
 
-                    {terrainSelection ? (
-                      <div className="space-y-3 animate-in fade-in slide-in-from-top-1">
-                        <div className="space-y-1">
-                          <label className="text-[10px] uppercase font-bold text-slate-400">Presets</label>
-                          <div className="flex gap-2">
-                            <button onClick={() => { const next = applyRamp('x'); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/30 rounded text-xs font-medium text-emerald-300 transition-colors">Ramp X</button>
-                            <button onClick={() => { const next = applyRamp('z'); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/30 rounded text-xs font-medium text-emerald-300 transition-colors">Ramp Z</button>
-                            <button onClick={() => { const next = applySmooth(); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-blue-600/20 hover:bg-blue-600/40 border border-blue-500/30 rounded text-xs font-medium text-blue-300 transition-colors">Smooth</button>
-                          </div>
+                    <details className="rounded-lg border border-white/10 bg-white/5 px-2 py-2">
+                      <summary className="cursor-pointer text-[10px] font-semibold text-slate-300">
+                        How to Get Maps + Elevation
+                      </summary>
+                      <div className="mt-2 space-y-2 text-[10px] text-slate-400">
+                        <div><span className="font-semibold text-slate-300">Satellite image:</span> open your map source in a browser, take a screenshot, then click <span className="text-slate-200">Map</span> to upload.</div>
+                        <div>
+                          <span className="font-semibold text-slate-300">Elevation (GeoTIFF DEM):</span> download from USGS 3DEP (The National Map Downloader), then click <span className="text-slate-200">Upload TIF</span>.
                         </div>
-                        <div className="flex gap-2">
-                          <button onClick={() => { const next = setSelectionHeight(0); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Flatten (0)</button>
-                          <button onClick={() => { const next = setSelectionHeight(40); saveHistory(undefined, next); }} className="flex-1 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/30 rounded text-xs font-medium text-indigo-300 transition-colors">Plateau (40)</button>
+                        <div>
+                          <a
+                            href="https://apps.nationalmap.gov/downloader/"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-emerald-300 hover:text-emerald-200 underline"
+                          >
+                            apps.nationalmap.gov/downloader
+                          </a>
                         </div>
-
-                        <div className="space-y-1">
-                          <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
-                            <span>Height</span>
-                            <span className="text-emerald-400">Level {Math.round(selectionHeight ?? 0)}</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="-100" max="200" step="10"
-                            value={selectionHeight}
-                            className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                            onChange={(e) => setSelectionHeight(parseInt(e.target.value))}
-                            onPointerDown={(e) => e.stopPropagation()}
-                            onPointerUp={(e) => { e.stopPropagation(); saveHistory(undefined, terrainHeights); }}
-                          />
-                          <div className="flex justify-between text-[9px] text-slate-500 font-medium">
-                            <span>-100</span>
-                            <span>200</span>
-                          </div>
-                        </div>
-
-                        <div className="pt-2 border-t border-white/5">
-                          <p className="text-[9px] text-slate-500 text-center">
-                            Changes apply immediately.
-                          </p>
-                        </div>
+                        <div>Use <span className="text-slate-200">DEM Align</span> to line up the elevation with your screenshot.</div>
+                        <button
+                          onClick={() => setShowDemGuide(true)}
+                          className="w-full mt-1 px-2 py-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 hover:bg-white/10"
+                        >
+                          Open Step-by-Step Guide
+                        </button>
                       </div>
-                    ) : (
-                      <div className="py-4 text-center border-2 border-dashed border-white/10 rounded-lg">
-                        <p className="text-xs text-slate-500">No area selected</p>
+                    </details>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Tool</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          onClick={() => setTerrainTool("sculpt")}
+                          className={`py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "sculpt"
+                            ? "bg-amber-500/20 border-amber-400/40 text-amber-200"
+                            : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                            }`}
+                        >
+                          Sculpt
+                        </button>
+                        <button
+                          onClick={() => setTerrainTool("smooth")}
+                          className={`py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "smooth"
+                            ? "bg-sky-500/20 border-sky-400/40 text-sky-200"
+                            : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                            }`}
+                        >
+                          Smooth
+                        </button>
+                        <button
+                          onClick={() => setTerrainTool("flatten")}
+                          className={`py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "flatten"
+                            ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200"
+                            : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                            }`}
+                        >
+                          Flatten
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                        <span>Brush Size</span>
+                        <span className="text-emerald-400">{terrainBrushSize} tiles</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={TERRAIN_BRUSH_MIN}
+                        max={TERRAIN_BRUSH_MAX}
+                        step={1}
+                        value={terrainBrushSize}
+                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                        onChange={(e) => setTerrainBrushSize(parseInt(e.target.value))}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                        <span>Strength</span>
+                        <span className="text-emerald-400">{terrainBrushStrength}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={5}
+                        max={100}
+                        step={5}
+                        value={terrainBrushStrength}
+                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                        onChange={(e) => setTerrainBrushStrength(parseInt(e.target.value))}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                        <span>Falloff</span>
+                        <span className="text-emerald-400">{terrainBrushFalloff.toFixed(1)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={TERRAIN_FALLOFF_MIN}
+                        max={TERRAIN_FALLOFF_MAX}
+                        step={0.1}
+                        value={terrainBrushFalloff}
+                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                        onChange={(e) => setTerrainBrushFalloff(parseFloat(e.target.value))}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      />
+                    </div>
+
+                    {terrainTool === "flatten" && (
+                      <div className="space-y-2 pt-2 border-t border-white/5">
+                        <div className="flex items-center justify-between text-[10px] uppercase font-bold text-slate-400">
+                          <span>Flatten Target</span>
+                          <span className="text-emerald-400">{Math.round(terrainFlattenTarget)}</span>
+                        </div>
+                        <input
+                          type="number"
+                          value={Math.round(terrainFlattenTarget)}
+                          onChange={(e) => setTerrainFlattenTarget(parseInt(e.target.value || "0", 10))}
+                          className="w-full px-2 py-1 rounded bg-white/5 border border-white/10 text-xs text-slate-200"
+                        />
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            onClick={() => setTerrainFlattenSample(v => !v)}
+                            className={`py-1.5 rounded text-[10px] font-semibold border transition-colors ${terrainFlattenSample
+                              ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-200"
+                              : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                              }`}
+                          >
+                            {terrainFlattenSample ? "Sample On" : "Sample Off"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              const hover = terrainHoverRef.current;
+                              if (hover) setTerrainFlattenTarget(getGridHeight(hover.pointX, hover.pointZ));
+                            }}
+                            className="py-1.5 rounded text-[10px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                          >
+                            Pick
+                          </button>
+                          <button
+                            onClick={() => setTerrainFlattenTarget(0)}
+                            className="py-1.5 rounded text-[10px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                          >
+                            Zero
+                          </button>
+                        </div>
                       </div>
                     )}
+
+                    <div className="space-y-2 pt-3 border-t border-white/5">
+                      <div className="flex items-center justify-between text-[10px] uppercase font-bold text-slate-400">
+                        <span>DEM Elevation</span>
+                        <button
+                          onClick={() => demInputRef.current?.click()}
+                          className="px-2 py-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 hover:bg-white/10"
+                        >
+                          Upload TIF
+                        </button>
+                      </div>
+
+                      {demData ? (
+                        <div className="text-[10px] text-slate-400 space-y-1">
+                          <div className="truncate">{demData.name}</div>
+                          <div>{demData.width}x{demData.height} px • min {demData.min.toFixed(2)} max {demData.max.toFixed(2)}</div>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-500">No DEM loaded.</div>
+                      )}
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-[10px] uppercase font-bold text-slate-400">
+                          <span>Alignment</span>
+                          <button
+                            onClick={() => {
+                              setDemAlignMode(v => !v);
+                              setDemAlignTool("move");
+                            }}
+                            className="px-2 py-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 hover:bg-white/10"
+                          >
+                            {demAlignMode ? "Close Align" : "Open Align"}
+                          </button>
+                        </div>
+
+                        {demAlignMode && (
+                          <>
+                            <div className="grid grid-cols-2 gap-2">
+                              {([
+                                { id: "move", label: "Move" },
+                                { id: "scale", label: "Scale" },
+                                { id: "rotate", label: "Rotate" },
+                                { id: "pan", label: "Pan View" }
+                              ] as { id: DemAlignTool; label: string }[]).map((tool) => (
+                                <button
+                                  key={tool.id}
+                                  onClick={() => setDemAlignTool(tool.id)}
+                                  className={`px-2 py-1 rounded text-[10px] font-semibold border ${demAlignTool === tool.id
+                                    ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
+                                    : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                                    }`}
+                                >
+                                  {tool.label}
+                                </button>
+                              ))}
+                            </div>
+
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                                <span>Overlay Scale</span>
+                                <span className="text-emerald-400">{Math.round(demTransform.scale * 100)}%</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="range"
+                                  min={0.1}
+                                  max={10}
+                                  step={0.05}
+                                  value={demTransform.scale}
+                                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                                  onChange={(e) => {
+                                    const next = clamp(parseFloat(e.target.value), 0.1, 50);
+                                    setDemTransform(prev => ({ ...prev, scale: next }));
+                                  }}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                />
+                                <input
+                                  type="number"
+                                  min={0.1}
+                                  step={0.1}
+                                  value={demTransform.scale}
+                                  onChange={(e) => {
+                                    const next = clamp(parseFloat(e.target.value || "1"), 0.1, 50);
+                                    setDemTransform(prev => ({ ...prev, scale: next }));
+                                  }}
+                                  className="w-16 px-2 py-1 rounded bg-white/5 border border-white/10 text-[10px] text-slate-200"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                onClick={() => {
+                                  if (!demPreview) return;
+                                  const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
+                                  const baseH = backgroundImg ? bgSettings.height : canvasSize.height;
+                                  const scale = Math.min(baseW / demPreview.width, baseH / demPreview.height);
+                                  const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
+                                  const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
+                                  setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
+                                }}
+                                className="px-2 py-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 hover:bg-white/10"
+                              >
+                                Fit to Map
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const centerX = canvasSize.width / 2;
+                                  const centerY = canvasSize.height / 2;
+                                  setDemTransform({ x: centerX, y: centerY, scale: 1, rotation: 0 });
+                                }}
+                                className="px-2 py-1 rounded border border-white/10 bg-white/5 text-[10px] text-slate-200 hover:bg-white/10"
+                              >
+                                Reset
+                              </button>
+                            </div>
+
+                            <div className="text-[10px] text-slate-500">
+                              Drag on the overlay with the selected tool. Alt pans the view. Shift snaps rotation. In 3D view, use the mini-map.
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                          <span>Scale</span>
+                          <span className="text-emerald-400">{demScale.toFixed(2)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={10}
+                          step={0.1}
+                          value={demScale}
+                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                          onChange={(e) => setDemScale(parseFloat(e.target.value))}
+                          onPointerDown={(e) => e.stopPropagation()}
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                          <span>Offset</span>
+                          <span className="text-emerald-400">{demOffset.toFixed(2)}</span>
+                        </div>
+                        <input
+                          type="number"
+                          value={demOffset}
+                          onChange={(e) => setDemOffset(parseFloat(e.target.value || "0"))}
+                          className="w-full px-2 py-1 rounded bg-white/5 border border-white/10 text-xs text-slate-200"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                          <span>Overlay Opacity</span>
+                          <span className="text-emerald-400">{demOverlayOpacity.toFixed(2)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={1}
+                          step={0.05}
+                          value={demOverlayOpacity}
+                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                          onChange={(e) => setDemOverlayOpacity(parseFloat(e.target.value))}
+                          onPointerDown={(e) => e.stopPropagation()}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-[10px] text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={demAutoApply}
+                            onChange={(e) => setDemAutoApply(e.target.checked)}
+                          />
+                          Auto Apply
+                        </label>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex items-center gap-2 text-[10px] text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={demNormalize}
+                            onChange={(e) => setDemNormalize(e.target.checked)}
+                          />
+                          Normalize (min = 0)
+                        </label>
+                        <button
+                          onClick={() => applyDemToTerrain()}
+                          disabled={!demData}
+                          className={`px-2 py-1 rounded text-[10px] font-semibold border ${demData
+                            ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
+                            : "border-white/10 bg-white/5 text-slate-500 cursor-not-allowed"
+                            }`}
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -4760,8 +5989,9 @@ export default function SecurityPlanner() {
           {/* Inputs */}
           <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
           <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
-          <input type="file" ref={projectInputRef} className="hidden" accept=".json" onChange={handleLoadProject} />
+          <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
           <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
+          <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
 
           <button onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
             <LayoutGrid className="w-4 h-4" />
@@ -4797,16 +6027,84 @@ export default function SecurityPlanner() {
         </div>
       </div>
 
+      {demAlignMode && viewMode !== "plan" && demPreview && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
+          <span className="text-xs font-semibold">DEM Align is active. Editing uses the mini-map.</span>
+          <button
+            onClick={() => setViewMode("plan")}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
+          >
+            Open Plan View
+          </button>
+        </div>
+      )}
+
+      {demAlignMode && demPreview && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
+          <span className="text-xs font-semibold text-slate-300 tracking-wide">DEM Align ({viewMode === "plan" ? "Plan" : "3D"})</span>
+          <div className="h-4 w-px bg-white/10" />
+          {([
+            { id: "move", label: "Move" },
+            { id: "scale", label: "Scale" },
+            { id: "rotate", label: "Rotate" },
+            { id: "pan", label: "Pan View" }
+          ] as { id: DemAlignTool; label: string }[]).map((tool) => (
+            <button
+              key={tool.id}
+              onClick={() => setDemAlignTool(tool.id)}
+              className={`px-2 py-1 rounded-full text-[11px] font-semibold border ${demAlignTool === tool.id
+                ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
+                : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                }`}
+            >
+              {tool.label}
+            </button>
+          ))}
+          <div className="h-4 w-px bg-white/10" />
+          <button
+            onClick={() => {
+              if (!demPreview) return;
+              const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
+              const baseH = backgroundImg ? bgSettings.height : canvasSize.height;
+              const scale = Math.min(baseW / demPreview.width, baseH / demPreview.height);
+              const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
+              const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
+              setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
+            }}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+          >
+            Fit
+          </button>
+          <button
+            onClick={() => {
+              const centerX = canvasSize.width / 2;
+              const centerY = canvasSize.height / 2;
+              setDemTransform({ x: centerX, y: centerY, scale: 1, rotation: 0 });
+            }}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+          >
+            Reset
+          </button>
+          <button
+            onClick={() => setDemAlignMode(false)}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-emerald-400/40 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
       <div className="absolute inset-0 z-0 overflow-hidden">
         {/* --- Main Workspace --- */}
-        <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex items-center justify-center pt-20 pl-24 ${workspaceRightPadding} pb-6 custom-scrollbar`}>
-          <div className="shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden">
+        <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
+          <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan") ? "w-full h-full" : ""}`}>
             {viewMode === "plan" ? (
               <svg
                 ref={svgRef}
-                width={canvasSize.width}
-                height={canvasSize.height}
+                width="100%"
+                height="100%"
                 viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
+                preserveAspectRatio="xMidYMid meet"
                 className={`bg-white block ${mode === "select" ? "cursor-default" : "cursor-crosshair"}`}
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
@@ -4842,6 +6140,67 @@ export default function SecurityPlanner() {
                     />
                   )}
 
+                  {demPreview && viewMode === "plan" && demAlignMode && demOverlayTransform && (
+                    <g
+                      transform={`translate(${demOverlayTransform.x} ${demOverlayTransform.y}) rotate(${demOverlayTransform.rotation}) scale(${demOverlayTransform.scale}) translate(${-demPreview.width / 2} ${-demPreview.height / 2})`}
+                    >
+                      <image
+                        href={demPreview.url}
+                        x={0}
+                        y={0}
+                        width={demPreview.width}
+                        height={demPreview.height}
+                        opacity={demOverlayOpacity}
+                        preserveAspectRatio="none"
+                        className="pointer-events-none"
+                      />
+                      <rect
+                        x={0}
+                        y={0}
+                        width={demPreview.width}
+                        height={demPreview.height}
+                        fill="rgba(15, 23, 42, 0.08)"
+                        stroke={demAlignStroke}
+                        strokeWidth="2"
+                        strokeDasharray={demAlignTool === "rotate" ? "8 6" : demAlignTool === "scale" ? "4 4" : "0"}
+                        style={{ cursor: demAlignCursor }}
+                        onMouseDown={(e) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setIsPanning(true);
+                            setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
+                            return;
+                          }
+                          if (demAlignTool === "pan") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setIsPanning(true);
+                            setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
+                            return;
+                          }
+                          e.stopPropagation();
+                          const pos = getSvgMousePos(e);
+                          setDemTransformDrag({
+                            mode: demAlignTool,
+                            startMouse: pos,
+                            startTransform: demTransform
+                          });
+                        }}
+                      />
+                      <text
+                        x={demPreview.width / 2}
+                        y={-10}
+                        textAnchor="middle"
+                        fontSize="11"
+                        fill={demAlignStroke}
+                        className="font-semibold select-none"
+                      >
+                        DEM ALIGN • {demAlignTool.toUpperCase()}
+                      </text>
+                    </g>
+                  )}
+
                   {items.map(item => {
                     const isSelected = selectedId === item.id;
                     if (item.type === "building" || item.type === "parking") {
@@ -4850,6 +6209,11 @@ export default function SecurityPlanner() {
                       if (!isParking) {
                         const building = item as BuildingItem;
                         const points = getBuildingPoints(building);
+                        const labelLayout = getBuildingLabelLayout(building);
+                        const lineHeight = labelLayout.fontSize * 1.15;
+                        const labelStartY = -((labelLayout.lines.length - 1) * lineHeight) / 2;
+                        const labelOffset = building.labelOffset ?? { x: 0, y: 0 };
+                        const labelBoxHeight = Math.max(lineHeight * labelLayout.lines.length, lineHeight);
                         return (
                           <g
                             key={building.id}
@@ -4865,18 +6229,46 @@ export default function SecurityPlanner() {
                               stroke={isSelected ? "#059669" : "#334155"}
                               strokeWidth={isSelected ? 3 : 1}
                             />
-                            <text
-                              x="0"
-                              y="0"
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill="white"
-                              fontSize="12"
-                              pointerEvents="none"
-                              className="font-bold select-none"
+                            <g
+                              transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
+                              onMouseDown={e => {
+                                e.stopPropagation();
+                                handleMouseDown(e, building.id, "move-label");
+                              }}
+                              className="cursor-move"
+                              style={{ pointerEvents: "auto" }}
                             >
-                              {building.label}
-                            </text>
+                              <rect
+                                x={-labelLayout.maxWidth / 2}
+                                y={labelStartY - lineHeight * 0.6}
+                                width={labelLayout.maxWidth}
+                                height={labelBoxHeight + lineHeight * 0.2}
+                                fill="transparent"
+                              />
+                              {labelLayout.lines.map((line, idx) => {
+                                const estimated = line.length * labelLayout.fontSize * 0.62;
+                                const clampWidth = estimated > labelLayout.maxWidth ? labelLayout.maxWidth : undefined;
+                                return (
+                                  <text
+                                    key={`${building.id}-label-${idx}`}
+                                    x="0"
+                                    y={labelStartY + idx * lineHeight}
+                                    textAnchor="middle"
+                                    dominantBaseline="middle"
+                                    fill="white"
+                                    fontSize={labelLayout.fontSize}
+                                    fontFamily={labelLayout.fontFamily}
+                                    fontWeight={labelLayout.fontWeight}
+                                    pointerEvents="none"
+                                    className="select-none"
+                                    textLength={clampWidth}
+                                    lengthAdjust={clampWidth ? "spacingAndGlyphs" : undefined}
+                                  >
+                                    {line}
+                                  </text>
+                                );
+                              })}
+                            </g>
                             {isSelected &&
                               points.map((point, index) => (
                                 <circle
@@ -4918,21 +6310,6 @@ export default function SecurityPlanner() {
                             strokeWidth={isSelected ? 4 : 1}
                             strokeDasharray={isParking ? "4" : "0"}
                           />
-                          {isParking && (
-                            <text
-                              x="0"
-                              y="0"
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill="#94a3b8"
-                              fontSize="16"
-                              fontWeight="bold"
-                              pointerEvents="none"
-                              transform="rotate(-90)"
-                            >
-                              P
-                            </text>
-                          )}
                           {!isParking && (
                             <text
                               x="0"
@@ -5384,11 +6761,86 @@ export default function SecurityPlanner() {
                 </g>
               </svg>
             ) : viewMode === "iso3d" ? (
-              <div
-                className="relative flex-1"
-                style={{ minWidth: canvasSize.width, minHeight: canvasSize.height }}
-              >
+              <div className="relative w-full h-full">
                 <div ref={threeContainerRef} className="absolute inset-0" />
+                {demAlignMode && demPreview && (
+                  <div className="absolute top-4 left-4 z-40 w-80 rounded-xl border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+                      <div className="text-[11px] font-semibold text-slate-200">DEM Align Mini-Map</div>
+                      <div className="text-[10px] text-slate-400">{demAlignTool.toUpperCase()}</div>
+                    </div>
+                    <svg
+                      ref={demMiniRef}
+                      width="100%"
+                      height="220"
+                      viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
+                      className="block bg-zinc-950"
+                      onMouseMove={handleDemMiniMouseMove}
+                      onMouseUp={handleDemMiniMouseUp}
+                      onMouseLeave={handleDemMiniMouseUp}
+                    >
+                      <rect x={0} y={0} width={canvasSize.width} height={canvasSize.height} fill="#0b0f19" />
+                      {backgroundImg && (
+                        <image
+                          href={backgroundImg}
+                          x={bgSettings.x}
+                          y={bgSettings.y}
+                          width={bgSettings.width}
+                          height={bgSettings.height}
+                          preserveAspectRatio="none"
+                          opacity={bgSettings.opacity}
+                        />
+                      )}
+                      {demOverlayTransform && (
+                        <g
+                          transform={`translate(${demOverlayTransform.x} ${demOverlayTransform.y}) rotate(${demOverlayTransform.rotation}) scale(${demOverlayTransform.scale}) translate(${-demPreview.width / 2} ${-demPreview.height / 2})`}
+                        >
+                          <image
+                            href={demPreview.url}
+                            x={0}
+                            y={0}
+                            width={demPreview.width}
+                            height={demPreview.height}
+                            opacity={demOverlayOpacity}
+                            preserveAspectRatio="none"
+                            className="pointer-events-none"
+                          />
+                          <rect
+                            x={0}
+                            y={0}
+                            width={demPreview.width}
+                            height={demPreview.height}
+                            fill="rgba(15, 23, 42, 0.08)"
+                            stroke={demAlignStroke}
+                            strokeWidth="2"
+                            strokeDasharray={demAlignTool === "rotate" ? "8 6" : demAlignTool === "scale" ? "4 4" : "0"}
+                            style={{ cursor: demAlignCursor }}
+                            onMouseDown={(e) => {
+                              if (e.altKey || demAlignTool === "pan") return;
+                              e.stopPropagation();
+                              const pos = getMiniSvgMousePos(e);
+                              setDemTransformDrag({
+                                mode: demAlignTool,
+                                startMouse: pos,
+                                startTransform: demTransform
+                              });
+                            }}
+                          />
+                          <text
+                            x={demPreview.width / 2}
+                            y={-10}
+                            textAnchor="middle"
+                            fontSize="12"
+                            fill={demAlignStroke}
+                            className="font-semibold select-none"
+                          >
+                            DEM ALIGN
+                          </text>
+                        </g>
+                      )}
+                    </svg>
+                  </div>
+                )}
                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-30 pointer-events-none">
                   <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-300 shadow border border-white/10 pointer-events-auto">
                     Drag to pan · Right-click to rotate · Scroll to zoom
@@ -5442,14 +6894,14 @@ export default function SecurityPlanner() {
                       <GridLayout
                         className="layout"
                         layout={nvrLayout}
-                        cols={12}
-                        rowHeight={120}
+                        cols={NVR_COLS}
+                        rowHeight={nvrRowHeight}
                         width={canvasSize.width - 32}
                         onLayoutChange={onLayoutChange}
                         isDraggable={viewMode === 'nvr'}
                         isResizable={viewMode === 'nvr'}
                         draggableCancel=".no-drag"
-                        margin={[16, 16]}
+                        margin={[NVR_MARGIN, NVR_MARGIN]}
                       >
                         {items.filter(i => i.type === 'camera').map(cam => (
                           <div
@@ -5475,33 +6927,6 @@ export default function SecurityPlanner() {
                           </div>
                         ))}
                       </GridLayout>
-                      {maximizedCamId && (
-                        <div className="absolute inset-0 z-50 bg-black flex flex-col animate-in fade-in duration-200">
-                          {(() => {
-                            const cam = items.find(i => i.id === maximizedCamId);
-                            if (!cam) return null;
-                            return (
-                              <>
-                                <div className="flex items-center justify-between p-4 bg-zinc-900 border-b border-white/10 shrink-0">
-                                  <div className="flex items-center gap-3">
-                                    <Camera className="w-5 h-5 text-emerald-400" />
-                                    <span className="font-bold text-slate-200 text-lg">{cam.label}</span>
-                                    <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono font-bold border border-red-500/30">LIVE</span>
-                                  </div>
-                                  <button onClick={() => setMaximizedCamId(null)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors">
-                                    <Minimize className="w-5 h-5" />
-                                  </button>
-                                </div>
-                                <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
-                                  <div className="w-full h-full relative">
-                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} isMaximized={true} />
-                                  </div>
-                                </div>
-                              </>
-                            );
-                          })()}
-                        </div>
-                      )}
                     </>
                   )}
                 </div>
@@ -5518,12 +6943,22 @@ export default function SecurityPlanner() {
                 <Camera className="w-4 h-4 text-emerald-400" />
                 <span className="text-sm font-medium text-slate-200 truncate">{selectedCamera.label} View</span>
               </div>
-              <button
-                onClick={() => setShowCameraPreview(false)}
-                className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setMaximizedCamId(selectedCamera.id)}
+                  className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                  title="Full Screen"
+                >
+                  <Maximize className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setShowCameraPreview(false)}
+                  className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                  title="Close"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <canvas
               ref={cameraPreviewRef}
@@ -5548,6 +6983,36 @@ export default function SecurityPlanner() {
           </div>
         )}
 
+        {maximizedCamId && (
+          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="absolute left-4 right-4 top-16 bottom-4 lg:left-20 lg:right-8 lg:top-20 lg:bottom-8">
+              {(() => {
+                const cam = items.find(i => i.id === maximizedCamId);
+                if (!cam) return null;
+                return (
+                  <div className="w-full h-full rounded-2xl overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl flex flex-col">
+                    <div className="flex items-center justify-between p-4 bg-zinc-900 border-b border-white/10 shrink-0">
+                      <div className="flex items-center gap-3">
+                        <Camera className="w-5 h-5 text-emerald-400" />
+                        <span className="font-bold text-slate-200 text-lg">{cam.label}</span>
+                        <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono font-bold border border-red-500/30">LIVE</span>
+                      </div>
+                      <button onClick={() => setMaximizedCamId(null)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors">
+                        <Minimize className="w-5 h-5" />
+                      </button>
+                    </div>
+                    <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
+                      <div className="w-full h-full relative">
+                        <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} isMaximized={true} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
         {/* Show Camera Preview toggle button when camera is selected but preview is hidden */}
         {selectedCamera && !showCameraPreview && (
           <button
@@ -5564,7 +7029,7 @@ export default function SecurityPlanner() {
           {selectedItem && !showProjectSettings ? (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {selectedItem.type}</h2>
+                <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {getItemTypeLabel(selectedItem.type)}</h2>
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -5639,7 +7104,9 @@ export default function SecurityPlanner() {
                     />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase">Height</label>
+                      <label className="text-xs font-semibold text-slate-400 uppercase">
+                        {selectedItem.type === "parking" ? "Depth" : "Height"}
+                      </label>
                       <input
                         type="number"
                       value={(selectedItem as any).height}
@@ -5732,14 +7199,14 @@ export default function SecurityPlanner() {
                 {/* Vehicle Height */}
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                    <span>Vehicle Height</span>
+                    <span>Height (Z)</span>
                     <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} units</span>
                   </label>
                   <div className="flex gap-2">
                     <input
                       type="range"
                       min="6"
-                      max="40"
+                      max="60"
                       value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
                       onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
@@ -5747,7 +7214,7 @@ export default function SecurityPlanner() {
                     <input
                       type="number"
                       min="6"
-                      max="40"
+                      max="60"
                       value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
                       onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
@@ -5779,6 +7246,62 @@ export default function SecurityPlanner() {
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>
+                </div>
+              )}
+
+              {selectedItem.type === "building" && (
+                <div className={panelSection}>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Label Font</label>
+                    <button
+                      onClick={() => updateItem(selectedItem.id, { labelFontFamily: undefined, labelFontSize: undefined, labelFontWeight: undefined })}
+                      className="text-[11px] font-semibold text-slate-400 hover:text-white"
+                    >
+                      Use Defaults
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Font Family</label>
+                    <input
+                      list="building-font-families-override"
+                      value={(selectedItem as BuildingItem).labelFontFamily ?? buildingLabelDefaults.fontFamily}
+                      onChange={e => updateItem(selectedItem.id, { labelFontFamily: e.target.value })}
+                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                        <span>Font Size</span>
+                        <span>{selectedBuildingFont?.fontSize ?? buildingLabelDefaults.fontSize}px</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="8"
+                        max="32"
+                        value={selectedBuildingFont?.fontSize ?? buildingLabelDefaults.fontSize}
+                        onChange={e => updateItem(selectedItem.id, { labelFontSize: parseInt(e.target.value) })}
+                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Font Weight</label>
+                      <select
+                        value={selectedBuildingFont?.fontWeight ?? buildingLabelDefaults.fontWeight}
+                        onChange={e => updateItem(selectedItem.id, { labelFontWeight: parseInt(e.target.value) })}
+                        className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      >
+                        {FONT_WEIGHTS.map(weight => (
+                          <option key={weight} value={weight}>{weight}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <datalist id="building-font-families-override">
+                    {FONT_FAMILIES.map(font => (
+                      <option key={font} value={font} />
+                    ))}
+                  </datalist>
                 </div>
               )}
 
@@ -6241,7 +7764,7 @@ export default function SecurityPlanner() {
                   className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-red-500/30 text-red-400 hover:text-red-200 hover:bg-red-500/10 transition-colors text-sm font-semibold"
                 >
                   <Trash2 className="w-4 h-4" />
-                  Delete {selectedItem.type}
+                  Delete {getItemTypeLabel(selectedItem.type)}
                 </button>
               </div>
             </div>
@@ -6278,13 +7801,59 @@ export default function SecurityPlanner() {
                     { label: "Cameras", value: items.filter(item => item.type === "camera").length },
                     { label: "Buildings", value: items.filter(item => item.type === "building").length },
                     { label: "Trees", value: items.filter(item => item.type === "tree").length },
-                    { label: "Parking", value: items.filter(item => item.type === "parking").length }
+                    { label: "Cars", value: items.filter(item => item.type === "parking").length }
                   ].map(stat => (
                     <div key={stat.label} className="rounded-lg border border-white/10 bg-white/5 p-3">
                       <p className="text-xs uppercase tracking-wide text-slate-400">{stat.label}</p>
                       <p className="text-lg font-semibold text-slate-200">{stat.value}</p>
                     </div>
                   ))}
+                </div>
+              </div>
+
+              <div className={panelSectionLoose}>
+                <h3 className="text-sm font-semibold text-slate-300">Building Label Defaults</h3>
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-400 uppercase">Font Family</label>
+                  <input
+                    list="building-font-families"
+                    value={buildingLabelDefaults.fontFamily}
+                    onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontFamily: e.target.value })}
+                    className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                  />
+                  <datalist id="building-font-families">
+                    {FONT_FAMILIES.map(font => (
+                      <option key={font} value={font} />
+                    ))}
+                  </datalist>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Font Size</span>
+                      <span>{buildingLabelDefaults.fontSize}px</span>
+                    </label>
+                    <input
+                      type="range"
+                      min="8"
+                      max="32"
+                      value={buildingLabelDefaults.fontSize}
+                      onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontSize: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Font Weight</label>
+                    <select
+                      value={buildingLabelDefaults.fontWeight}
+                      onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontWeight: parseInt(e.target.value) })}
+                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                    >
+                      {FONT_WEIGHTS.map(weight => (
+                        <option key={weight} value={weight}>{weight}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
 
@@ -6361,6 +7930,18 @@ export default function SecurityPlanner() {
               <div className={panelSectionLoose}>
                 <h3 className="text-sm font-semibold text-slate-300">Background Map</h3>
                 <p className="text-xs text-slate-400">Adjust the uploaded map to align with the grid.</p>
+                <p className="text-[10px] text-slate-500">Tip: Hold Alt and drag in plan view to pan. Use Move Map to reposition the map image.</p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setMapMoveMode(v => !v)}
+                    className={`px-2 py-1 rounded text-[10px] font-semibold border ${mapMoveMode
+                      ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
+                      : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                      }`}
+                  >
+                    {mapMoveMode ? "Move Map: On" : "Move Map"}
+                  </button>
+                </div>
 
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase">Map Opacity</label>
@@ -6668,7 +8249,7 @@ const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized }: { came
       </div>
 
       {/* Camera View */}
-      <div className="flex-1 relative overflow-hidden bg-slate-800">
+      <div className="relative w-full aspect-video overflow-hidden bg-slate-800">
         {src ? (
           <img src={src} className="w-full h-full object-cover select-none" draggable={false} />
         ) : (
