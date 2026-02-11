@@ -6564,16 +6564,6 @@ export default function SecurityPlanner() {
                 xmlns="http://www.w3.org/2000/svg"
               >
                 <defs>
-                  <style>{`
-                    @keyframes cameraFovFade {
-                      0% { opacity: 0.9; }
-                      70% { opacity: 0.35; }
-                      100% { opacity: 0.08; }
-                    }
-                    .camera-fov-fade {
-                      animation: cameraFovFade 14s ease-out forwards;
-                    }
-                  `}</style>
                   <pattern id="smallGrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
                     <path
                       d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
@@ -6935,8 +6925,6 @@ export default function SecurityPlanner() {
                       const labelX = c.labelOffset?.x ?? 0;
                       const labelY = c.labelOffset?.y ?? 30;
                       const dash = c.connectorDashSize || 3;
-                      const fovFadeClass = isSelected ? "" : "camera-fov-fade";
-                      const fovFadeStyle = isSelected ? { opacity: 0.9 } : undefined;
 
 
                       // Visibility / Occlusion Calculation
@@ -6972,21 +6960,27 @@ export default function SecurityPlanner() {
 
                               {/* Blue Gradients (Clear View) */}
                               <radialGradient id={`grad-blue-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="50%" stopColor={c.color} stopOpacity="0.2" />
+                                <stop offset="20%" stopColor={c.color} stopOpacity="0.25" />
+                                <stop offset="70%" stopColor={c.color} stopOpacity="0.08" />
                                 <stop offset="100%" stopColor={c.color} stopOpacity="0" />
                               </radialGradient>
                               <radialGradient id={`grad-blue-stroke-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="80%" stopColor={c.color} stopOpacity="1" />
+                                <stop offset="0%" stopColor={c.color} stopOpacity="0.7" />
+                                <stop offset="60%" stopColor={c.color} stopOpacity="0.3" />
+                                <stop offset="85%" stopColor={c.color} stopOpacity="0.08" />
                                 <stop offset="100%" stopColor={c.color} stopOpacity="0" />
                               </radialGradient>
 
                               {/* Yellow Gradients (Obstructed View) */}
                               <radialGradient id={`grad-yellow-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="50%" stopColor="#fde047" stopOpacity="0.3" />
+                                <stop offset="20%" stopColor="#fde047" stopOpacity="0.3" />
+                                <stop offset="70%" stopColor="#fde047" stopOpacity="0.12" />
                                 <stop offset="100%" stopColor="#fde047" stopOpacity="0" />
                               </radialGradient>
                               <radialGradient id={`grad-yellow-stroke-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="80%" stopColor="#eab308" stopOpacity="1" />
+                                <stop offset="0%" stopColor="#eab308" stopOpacity="0.7" />
+                                <stop offset="60%" stopColor="#eab308" stopOpacity="0.35" />
+                                <stop offset="85%" stopColor="#eab308" stopOpacity="0.1" />
                                 <stop offset="100%" stopColor="#eab308" stopOpacity="0" />
                               </radialGradient>
                             </defs>
@@ -6998,8 +6992,6 @@ export default function SecurityPlanner() {
                               stroke={`url(#grad-yellow-stroke-${c.id})`}
                               strokeWidth="1" strokeDasharray="4,4" pointerEvents="none"
                               mask={`url(#mask-${c.id})`}
-                              className={fovFadeClass}
-                              style={fovFadeStyle}
                             />
                             {/* Clear Area (Visible) */}
                             <path
@@ -7007,8 +6999,6 @@ export default function SecurityPlanner() {
                               fill={`url(#grad-blue-${c.id})`}
                               stroke={`url(#grad-blue-stroke-${c.id})`}
                               strokeWidth="1" pointerEvents="none"
-                              className={fovFadeClass}
-                              style={fovFadeStyle}
                             />
                             <g transform={`rotate(${c.rotation})`}>
                               <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
