@@ -29,7 +29,9 @@ import {
   Undo,
   Redo,
   Maximize,
-  Minimize
+  Minimize,
+  Mountain,
+  LoaderCircle
 } from "lucide-react";
 import GridLayout from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -220,6 +222,340 @@ const FONT_FAMILIES = [
 const FONT_WEIGHTS = [400, 500, 600, 700, 800];
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+// --- Elevation Helpers ---
+
+// Plan units are feet throughout the app (camera heights, wall heights, etc.).
+const FEET_PER_METER = 3.28084;
+const METERS_PER_DEG_LAT = 111320;
+const ELEVATION_TILE_SIZE = 256;
+const ELEVATION_MAX_ZOOM = 15;
+const ELEVATION_MAX_TILES = 36;
+// Free, CORS-enabled global elevation tiles (AWS Open Data "Terrain Tiles", Terrarium encoding).
+const elevationTileUrl = (z: number, x: number, y: number) =>
+  `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+
+type SiteLocation = { lat: number; lon: number; label: string };
+type ElevationOverlayMode = "off" | "contours" | "shaded";
+
+const lonToPixel = (lon: number, z: number) => ((lon + 180) / 360) * ELEVATION_TILE_SIZE * Math.pow(2, z);
+const latToPixel = (lat: number, z: number) => {
+  const rad = (clamp(lat, -85, 85) * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * ELEVATION_TILE_SIZE * Math.pow(2, z);
+};
+
+// Accepts "lat, lon", a Google Maps / Apple Maps / OSM link, or a plain address (geocoded via OpenStreetMap).
+const resolveSiteLocation = async (input: string): Promise<SiteLocation> => {
+  const text = input.trim();
+  if (!text) throw new Error("Enter an address, coordinates, or a map link.");
+  const isValid = (lat: number, lon: number) =>
+    Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  const patterns = [
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/, // Google Maps pin
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/, // Google Maps view center
+    /[?&](?:q|ll|query|center)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i, // ?q=lat,lon
+    /[#&]map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/, // openstreetmap.org/#map=z/lat/lon
+    /^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/ // "lat, lon"
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const lat = parseFloat(match[1]);
+      const lon = parseFloat(match[2]);
+      if (isValid(lat, lon)) return { lat, lon, label: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
+    }
+  }
+  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(text)}`, {
+    headers: { Accept: "application/json" }
+  });
+  if (!res.ok) throw new Error("Address lookup failed. Try entering coordinates instead (e.g. 39.7392, -104.9903).");
+  const results = await res.json();
+  if (!Array.isArray(results) || results.length === 0) {
+    throw new Error("Couldn't find that address. Try a more specific address or paste coordinates.");
+  }
+  const lat = parseFloat(results[0].lat);
+  const lon = parseFloat(results[0].lon);
+  if (!isValid(lat, lon)) throw new Error("Address lookup returned an invalid location.");
+  return { lat, lon, label: results[0].display_name || text };
+};
+
+const loadTileImage = (url: string) =>
+  new Promise<HTMLImageElement | null>((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+
+type GeoBounds = { north: number; south: number; west: number; east: number };
+
+// Real-world bounds of a widthFt x heightFt area centered on the location.
+const getGeoBounds = (location: SiteLocation, widthFt: number, heightFt: number): GeoBounds => {
+  const cosLat = Math.cos((location.lat * Math.PI) / 180) || 1e-6;
+  const dLat = heightFt / FEET_PER_METER / 2 / METERS_PER_DEG_LAT;
+  const dLon = widthFt / FEET_PER_METER / 2 / (METERS_PER_DEG_LAT * cosLat);
+  return { north: location.lat + dLat, south: location.lat - dLat, west: location.lon - dLon, east: location.lon + dLon };
+};
+
+const getTileRange = (bounds: GeoBounds, z: number) => ({
+  x0: Math.floor(lonToPixel(bounds.west, z) / ELEVATION_TILE_SIZE),
+  x1: Math.floor(lonToPixel(bounds.east, z) / ELEVATION_TILE_SIZE),
+  y0: Math.floor(latToPixel(bounds.north, z) / ELEVATION_TILE_SIZE),
+  y1: Math.floor(latToPixel(bounds.south, z) / ELEVATION_TILE_SIZE)
+});
+
+// Downloads and stitches the web-mercator tiles covering the bounds. Lowers the zoom if it would need too many tiles.
+const loadTileMosaic = async (
+  bounds: GeoBounds,
+  maxZoom: number,
+  maxTiles: number,
+  tileUrl: (z: number, x: number, y: number) => string
+) => {
+  let z = maxZoom;
+  let range = getTileRange(bounds, z);
+  while (z > 1 && (range.x1 - range.x0 + 1) * (range.y1 - range.y0 + 1) > maxTiles) {
+    z -= 1;
+    range = getTileRange(bounds, z);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = (range.x1 - range.x0 + 1) * ELEVATION_TILE_SIZE;
+  canvas.height = (range.y1 - range.y0 + 1) * ELEVATION_TILE_SIZE;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Your browser couldn't create a canvas for map data.");
+  const jobs: Promise<boolean>[] = [];
+  for (let ty = range.y0; ty <= range.y1; ty++) {
+    for (let tx = range.x0; tx <= range.x1; tx++) {
+      jobs.push(loadTileImage(tileUrl(z, tx, ty)).then(img => {
+        if (!img) return false;
+        ctx.drawImage(img, (tx - range.x0) * ELEVATION_TILE_SIZE, (ty - range.y0) * ELEVATION_TILE_SIZE, ELEVATION_TILE_SIZE, ELEVATION_TILE_SIZE);
+        return true;
+      }));
+    }
+  }
+  const loaded = await Promise.all(jobs);
+  // Converts a lat/lon to a pixel position inside the mosaic.
+  const toMosaic = (lat: number, lon: number) => ({
+    x: lonToPixel(lon, z) - range.x0 * ELEVATION_TILE_SIZE,
+    y: latToPixel(lat, z) - range.y0 * ELEVATION_TILE_SIZE
+  });
+  return { canvas, ctx, z, toMosaic, loadedAny: loaded.some(Boolean), loadedAll: loaded.every(Boolean) };
+};
+
+// Samples real-world elevation (meters) on a samplesX x samplesY grid covering widthFt x heightFt centered on the location.
+// Row 0 is the north edge, column 0 is the west edge (matches a north-up map).
+const fetchElevationGrid = async (
+  location: SiteLocation,
+  widthFt: number,
+  heightFt: number,
+  samplesX: number,
+  samplesY: number
+) => {
+  const bounds = getGeoBounds(location, widthFt, heightFt);
+  const mosaic = await loadTileMosaic(bounds, ELEVATION_MAX_ZOOM, ELEVATION_MAX_TILES, elevationTileUrl);
+  if (!mosaic.loadedAny) {
+    throw new Error("Couldn't download elevation data. Check your internet connection and try again.");
+  }
+
+  const mosaicW = mosaic.canvas.width;
+  const mosaicH = mosaic.canvas.height;
+  const pixels = mosaic.ctx.getImageData(0, 0, mosaicW, mosaicH).data;
+  const decode = (px: number, py: number) => {
+    const ix = clamp(px, 0, mosaicW - 1);
+    const iy = clamp(py, 0, mosaicH - 1);
+    const i = (iy * mosaicW + ix) * 4;
+    if (pixels[i + 3] === 0) return NaN;
+    return pixels[i] * 256 + pixels[i + 1] + pixels[i + 2] / 256 - 32768;
+  };
+  const sample = (lat: number, lon: number) => {
+    const p = mosaic.toMosaic(lat, lon);
+    const gx = p.x - 0.5;
+    const gy = p.y - 0.5;
+    const x0 = Math.floor(gx);
+    const y0 = Math.floor(gy);
+    const tx = gx - x0;
+    const ty = gy - y0;
+    const a = decode(x0, y0);
+    const b = decode(x0 + 1, y0);
+    const c = decode(x0, y0 + 1);
+    const d = decode(x0 + 1, y0 + 1);
+    return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+  };
+
+  const values = new Float32Array(samplesX * samplesY);
+  let min = Infinity;
+  let max = -Infinity;
+  for (let sy = 0; sy < samplesY; sy++) {
+    const lat = bounds.north - (sy / Math.max(samplesY - 1, 1)) * (bounds.north - bounds.south);
+    for (let sx = 0; sx < samplesX; sx++) {
+      const lon = bounds.west + (sx / Math.max(samplesX - 1, 1)) * (bounds.east - bounds.west);
+      const v = sample(lat, lon);
+      values[sy * samplesX + sx] = v;
+      if (Number.isFinite(v)) {
+        min = Math.min(min, v);
+        max = Math.max(max, v);
+      }
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    throw new Error("No elevation data is available for that location.");
+  }
+  return { values, min, max, zoom: mosaic.z };
+};
+
+type MapImagerySource = "satellite" | "streets";
+const MAP_IMAGERY_SOURCES: Record<MapImagerySource, {
+  label: string;
+  maxZoom: number;
+  attribution: string;
+  url: (z: number, x: number, y: number) => string;
+}> = {
+  satellite: {
+    label: "Satellite",
+    maxZoom: 19,
+    attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+    url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`
+  },
+  streets: {
+    label: "Street Map",
+    maxZoom: 19,
+    attribution: "© OpenStreetMap contributors",
+    url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`
+  }
+};
+const MAP_IMAGERY_MAX_TILES = 64;
+const MAP_IMAGERY_TARGET_PX = 2400;
+
+// Downloads a north-up map image exactly covering widthFt x heightFt centered on the location.
+const fetchMapImagery = async (location: SiteLocation, widthFt: number, heightFt: number, source: MapImagerySource) => {
+  const config = MAP_IMAGERY_SOURCES[source];
+  const bounds = getGeoBounds(location, widthFt, heightFt);
+  // Pick the zoom whose resolution gives roughly MAP_IMAGERY_TARGET_PX across the area.
+  const metersPerPx = widthFt / FEET_PER_METER / MAP_IMAGERY_TARGET_PX;
+  const cosLat = Math.cos((location.lat * Math.PI) / 180);
+  const idealZoom = Math.ceil(Math.log2((156543.03392 * cosLat) / Math.max(metersPerPx, 0.01)));
+  const mosaic = await loadTileMosaic(bounds, clamp(idealZoom, 1, config.maxZoom), MAP_IMAGERY_MAX_TILES, config.url);
+  if (!mosaic.loadedAny) {
+    throw new Error(`Couldn't download ${config.label.toLowerCase()} imagery. Check your internet connection and try again.`);
+  }
+  const nw = mosaic.toMosaic(bounds.north, bounds.west);
+  const se = mosaic.toMosaic(bounds.south, bounds.east);
+  const cropW = Math.max(1, se.x - nw.x);
+  const cropH = Math.max(1, se.y - nw.y);
+  const outScale = Math.min(1.5, MAP_IMAGERY_TARGET_PX / cropW);
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(cropW * outScale));
+  out.height = Math.max(1, Math.round(cropH * outScale));
+  const outCtx = out.getContext("2d");
+  if (!outCtx) throw new Error("Your browser couldn't create a canvas for map data.");
+  outCtx.imageSmoothingQuality = "high";
+  outCtx.drawImage(mosaic.canvas, nw.x, nw.y, cropW, cropH, 0, 0, out.width, out.height);
+  // Attribution required by the tile providers.
+  const fontSize = Math.max(12, Math.round(out.width / 120));
+  outCtx.font = `${fontSize}px sans-serif`;
+  const textW = outCtx.measureText(config.attribution).width;
+  outCtx.fillStyle = "rgba(0,0,0,0.5)";
+  outCtx.fillRect(out.width - textW - fontSize, out.height - fontSize * 1.6, textW + fontSize, fontSize * 1.6);
+  outCtx.fillStyle = "#ffffff";
+  outCtx.fillText(config.attribution, out.width - textW - fontSize / 2, out.height - fontSize * 0.45);
+  return { url: out.toDataURL("image/jpeg", 0.88), partial: !mosaic.loadedAll };
+};
+
+const getTerrainStats = (heights: Record<string, number>) => {
+  let min = 0;
+  let max = 0;
+  let count = 0;
+  for (const key in heights) {
+    const v = heights[key];
+    if (!Number.isFinite(v)) continue;
+    // Missing vertices are ground level (0), so 0 is always within range.
+    min = Math.min(min, v);
+    max = Math.max(max, v);
+    count++;
+  }
+  return { min, max, relief: max - min, count };
+};
+
+// Picks a "nice" contour interval (1, 2, 5, 10... ft) giving roughly 8-15 lines across the relief.
+const getContourInterval = (relief: number) => {
+  if (relief <= 0) return 1;
+  const raw = relief / 10;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const nice = [1, 2, 5, 10].map(m => m * pow).find(v => v >= raw) ?? 10 * pow;
+  return Math.max(0.5, nice);
+};
+
+// Elevation color ramp: low = deep green, mid = tan, high = brown/white.
+const ELEVATION_RAMP: [number, [number, number, number]][] = [
+  [0, [34, 94, 64]],
+  [0.25, [84, 140, 74]],
+  [0.5, [196, 182, 112]],
+  [0.75, [168, 112, 66]],
+  [1, [240, 236, 228]]
+];
+const elevationColor = (t: number): [number, number, number] => {
+  const v = clamp(t, 0, 1);
+  for (let i = 1; i < ELEVATION_RAMP.length; i++) {
+    const [p1, c1] = ELEVATION_RAMP[i];
+    const [p0, c0] = ELEVATION_RAMP[i - 1];
+    if (v <= p1) {
+      const k = (v - p0) / (p1 - p0 || 1);
+      return [c0[0] + (c1[0] - c0[0]) * k, c0[1] + (c1[1] - c0[1]) * k, c0[2] + (c1[2] - c0[2]) * k];
+    }
+  }
+  return ELEVATION_RAMP[ELEVATION_RAMP.length - 1][1];
+};
+
+// Marching-squares contour segments over the terrain vertex grid (world/plan coordinates).
+const computeContourSegments = (
+  heights: Record<string, number>,
+  grid: number,
+  width: number,
+  height: number,
+  interval: number,
+  minH: number,
+  maxH: number
+) => {
+  const segments: { x1: number; y1: number; x2: number; y2: number; level: number }[] = [];
+  if (interval <= 0 || maxH - minH <= 0) return segments;
+  const cols = Math.floor(width / grid);
+  const rows = Math.floor(height / grid);
+  const h = (ix: number, iy: number) => heights[`${ix * grid},${iy * grid}`] ?? 0;
+  const firstLevel = Math.ceil(minH / interval) * interval;
+  for (let iy = 0; iy < rows; iy++) {
+    for (let ix = 0; ix < cols; ix++) {
+      const a = h(ix, iy);
+      const b = h(ix + 1, iy);
+      const c = h(ix + 1, iy + 1);
+      const d = h(ix, iy + 1);
+      const lo = Math.min(a, b, c, d);
+      const hi = Math.max(a, b, c, d);
+      if (hi - lo < 1e-6) continue;
+      const x0 = ix * grid;
+      const y0 = iy * grid;
+      for (let level = Math.max(firstLevel, Math.ceil(lo / interval) * interval); level <= hi; level += interval) {
+        if (level <= lo || level > hi) continue;
+        const pts: { x: number; y: number }[] = [];
+        const edge = (h1: number, h2: number, p1: { x: number; y: number }, p2: { x: number; y: number }) => {
+          if ((h1 < level) === (h2 < level)) return;
+          const t = (level - h1) / (h2 - h1);
+          pts.push({ x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t });
+        };
+        const pa = { x: x0, y: y0 };
+        const pb = { x: x0 + grid, y: y0 };
+        const pc = { x: x0 + grid, y: y0 + grid };
+        const pd = { x: x0, y: y0 + grid };
+        edge(a, b, pa, pb);
+        edge(b, c, pb, pc);
+        edge(c, d, pc, pd);
+        edge(d, a, pd, pa);
+        if (pts.length >= 2) segments.push({ x1: pts[0].x, y1: pts[0].y, x2: pts[1].x, y2: pts[1].y, level });
+        if (pts.length === 4) segments.push({ x1: pts[2].x, y1: pts[2].y, x2: pts[3].x, y2: pts[3].y, level });
+      }
+    }
+  }
+  return segments;
+};
 
 const normalizeAngle = (angle: number) => {
   let normalized = angle % 360;
@@ -884,6 +1220,17 @@ export default function SecurityPlanner() {
   const [demAutoApply, setDemAutoApply] = useState(true);
   const [demAlignTool, setDemAlignTool] = useState<DemAlignTool>("move");
   const [showDemGuide, setShowDemGuide] = useState(false);
+  // One-click elevation
+  const [siteLocation, setSiteLocation] = useState<SiteLocation | null>(null);
+  const [showElevationDialog, setShowElevationDialog] = useState(false);
+  const [elevationQuery, setElevationQuery] = useState("");
+  const [elevationAreaWidth, setElevationAreaWidth] = useState(0);
+  const [elevationExaggeration, setElevationExaggeration] = useState(1);
+  const [elevationStatus, setElevationStatus] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  const [elevationOverlay, setElevationOverlay] = useState<ElevationOverlayMode>("contours");
+  const [elevationImagery, setElevationImagery] = useState<MapImagerySource | "keep">("satellite");
+  const elevationReadoutRef = useRef<HTMLDivElement>(null);
+  const planBrushCursorRef = useRef<SVGCircleElement>(null);
   const [demTransformDrag, setDemTransformDrag] = useState<{
     mode: "move" | "scale" | "rotate";
     startMouse: { x: number; y: number };
@@ -1214,10 +1561,119 @@ export default function SecurityPlanner() {
 
 
 
-  const getGridHeight = (x: number, y: number) => {
-    const gx = Math.round(x / gridSize) * gridSize;
-    const gy = Math.round(y / gridSize) * gridSize;
-    return terrainHeights[`${gx},${gy}`] || 0;
+  // Bilinear interpolation between terrain vertices so objects sit smoothly on slopes
+  // (exact at grid vertices, so terrain meshes are unaffected).
+  const getGridHeight = (x: number, y: number, map = terrainHeights) => {
+    const grid = gridSize || 20;
+    const fx = x / grid;
+    const fy = y / grid;
+    const ix = Math.floor(fx);
+    const iy = Math.floor(fy);
+    const tx = fx - ix;
+    const ty = fy - iy;
+    const at = (gx: number, gy: number) => map[`${gx * grid},${gy * grid}`] || 0;
+    const top = at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx;
+    const bottom = at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx;
+    return top * (1 - ty) + bottom * ty;
+  };
+
+  // Base elevation for a camera: building-mounted cameras sit on the building, not the ground under them.
+  const getCameraBaseHeight = (camera: CameraItem, camPos = getCameraPlanPosition(camera)) => {
+    if (camera.mount?.type === "building" && camera.mount.buildingId) {
+      const building = getBuildingById(camera.mount.buildingId);
+      if (building) return getBuildingBaseHeight(building);
+    }
+    return getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET;
+  };
+
+  const terrainStats = useMemo(() => getTerrainStats(terrainHeights), [terrainHeights]);
+  const hasTerrain = terrainStats.relief > 0.01;
+  const contourInterval = getContourInterval(terrainStats.relief);
+  const contourSegments = useMemo(() => {
+    if (!hasTerrain) return [];
+    return computeContourSegments(
+      terrainHeights,
+      gridSize || 20,
+      canvasSize.width,
+      canvasSize.height,
+      contourInterval,
+      terrainStats.min,
+      terrainStats.max
+    );
+  }, [terrainHeights, gridSize, canvasSize.width, canvasSize.height, contourInterval, terrainStats.min, terrainStats.max, hasTerrain]);
+
+  const isMajorContour = (level: number) => Math.abs(Math.round(level / contourInterval)) % 5 === 0;
+
+  // SVG paths for plan-view contours, plus a few spaced-out labels on the major (index) lines.
+  const contourPaths = useMemo(() => {
+    if (contourSegments.length === 0) return null;
+    let minor = "";
+    let major = "";
+    const labels: { x: number; y: number; text: string }[] = [];
+    const minLabelGap = Math.max(canvasSize.width, canvasSize.height) / 6;
+    const fmt = (v: number) => Math.round(v * 10) / 10;
+    contourSegments.forEach(seg => {
+      const d = `M${fmt(seg.x1)} ${fmt(seg.y1)}L${fmt(seg.x2)} ${fmt(seg.y2)}`;
+      if (isMajorContour(seg.level)) major += d;
+      else minor += d;
+      if (labels.length > 60) return;
+      const mx = (seg.x1 + seg.x2) / 2;
+      const my = (seg.y1 + seg.y2) / 2;
+      const edgeMargin = Math.min(canvasSize.width, canvasSize.height) * 0.04;
+      if (mx < edgeMargin || my < edgeMargin || mx > canvasSize.width - edgeMargin || my > canvasSize.height - edgeMargin) return;
+      if (labels.some(l => Math.hypot(l.x - mx, l.y - my) < minLabelGap)) return;
+      labels.push({ x: mx, y: my, text: `${Math.round(seg.level * 10) / 10}′` });
+    });
+    return { minor, major, labels };
+  }, [contourSegments, contourInterval, canvasSize.width, canvasSize.height]);
+
+  // Hillshade + elevation tint image for the plan view (one pixel per terrain vertex, smoothed by the browser).
+  const elevationShadeUrl = useMemo(() => {
+    if (!hasTerrain || typeof document === "undefined") return null;
+    const grid = gridSize || 20;
+    const cols = Math.floor(canvasSize.width / grid) + 1;
+    const rows = Math.floor(canvasSize.height / grid) + 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = cols;
+    canvas.height = rows;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const img = ctx.createImageData(cols, rows);
+    const h = (ix: number, iy: number) =>
+      terrainHeights[`${clamp(ix, 0, cols - 1) * grid},${clamp(iy, 0, rows - 1) * grid}`] ?? 0;
+    const range = terrainStats.relief || 1;
+    // Light from the north-west, like a topo map.
+    const light = new THREE.Vector3(-1, 1.2, -1).normalize();
+    for (let iy = 0; iy < rows; iy++) {
+      for (let ix = 0; ix < cols; ix++) {
+        const v = h(ix, iy);
+        const dx = (h(ix + 1, iy) - h(ix - 1, iy)) / (2 * grid);
+        const dz = (h(ix, iy + 1) - h(ix, iy - 1)) / (2 * grid);
+        const normal = new THREE.Vector3(-dx * 2, 1, -dz * 2).normalize();
+        const shade = clamp(0.55 + normal.dot(light) * 0.6, 0.35, 1.15);
+        const [r, g, b] = elevationColor((v - terrainStats.min) / range);
+        const i = (iy * cols + ix) * 4;
+        img.data[i] = clamp(r * shade, 0, 255);
+        img.data[i + 1] = clamp(g * shade, 0, 255);
+        img.data[i + 2] = clamp(b * shade, 0, 255);
+        img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return canvas.toDataURL("image/png");
+  }, [terrainHeights, gridSize, canvasSize.width, canvasSize.height, terrainStats.min, terrainStats.relief, hasTerrain]);
+
+  const formatElevation = (value: number) => `${value >= 0 ? "" : "-"}${Math.abs(value) < 10 ? Math.abs(value).toFixed(1) : Math.round(Math.abs(value))} ft`;
+
+  const updateElevationReadout = (x: number, y: number) => {
+    const el = elevationReadoutRef.current;
+    if (!el) return;
+    if (x < 0 || y < 0 || x > canvasSize.width || y > canvasSize.height || !hasTerrain) {
+      el.style.opacity = "0";
+      return;
+    }
+    el.style.opacity = "1";
+    el.textContent = `Elevation ${formatElevation(getGridHeight(x, y))}`;
   };
 
   const getVertexKey = (x: number, z: number) => `${x},${z}`;
@@ -1296,16 +1752,31 @@ export default function SecurityPlanner() {
     terrainHeightsRef.current = next;
   };
 
-  const applyDemToTerrain = (data = demDataRef.current, options?: { save?: boolean }) => {
+  const applyDemToTerrain = (
+    data = demDataRef.current,
+    options?: {
+      save?: boolean;
+      preview?: { width: number; height: number } | null;
+      transform?: { x: number; y: number; scale: number; rotation: number };
+      scale?: number;
+      offset?: number;
+      normalize?: boolean;
+      canvas?: { width: number; height: number };
+    }
+  ) => {
     if (!data) return;
+    const canvasSize = options?.canvas ?? canvasSizeRef.current;
+    const demNormalize = options?.normalize ?? demNormalizeRef.current;
+    const demScale = options?.scale ?? demScaleRef.current;
+    const demOffset = options?.offset ?? demOffsetRef.current;
     const grid = gridSizeRef.current || gridSize;
     const next: Record<string, number> = {};
     const minVal = data.min;
     const maxVal = data.max;
     if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) return;
 
-    const preview = demPreviewRef.current;
-    const transform = demTransformRef.current;
+    const preview = options?.preview ?? demPreviewRef.current;
+    const transform = options?.transform ?? demTransformRef.current;
     const previewW = preview?.width ?? data.width;
     const previewH = preview?.height ?? data.height;
     const centerX = transform?.x ?? canvasSize.width / 2;
@@ -1383,6 +1854,154 @@ export default function SecurityPlanner() {
 
     ctx.putImageData(img, 0, 0);
     return { url: canvas.toDataURL("image/png"), width: previewW, height: previewH };
+  };
+
+  // The real-world area elevation is fetched for: the base map if there is one, otherwise the whole canvas.
+  const getElevationArea = () => {
+    if (backgroundImg) {
+      return { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height };
+    }
+    return { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
+  };
+
+  const openElevationDialog = () => {
+    const area = getElevationArea();
+    // Without a base map, default to a typical property-sized area.
+    setElevationAreaWidth(backgroundImg ? Math.round(area.width) : 400);
+    setElevationImagery(backgroundImg ? "keep" : "satellite");
+    if (siteLocation && !elevationQuery) setElevationQuery(siteLocation.label);
+    setElevationStatus({ state: "idle", message: "" });
+    setShowElevationDialog(true);
+  };
+
+  // One click: find the address, optionally download a north-up map image, then download and apply elevation.
+  const importSite = async () => {
+    const imagery = elevationImagery;
+    const query = elevationQuery;
+    const exaggeration = elevationExaggeration;
+    setElevationStatus({ state: "loading", message: "Finding location…" });
+    try {
+      const location =
+        siteLocation && query.trim() === siteLocation.label ? siteLocation : await resolveSiteLocation(query);
+      setSiteLocation(location);
+      setElevationQuery(location.label);
+
+      let area = getElevationArea();
+      let canvas = canvasSizeRef.current;
+      let realWidthFt = elevationAreaWidth > 0 ? elevationAreaWidth : area.width;
+      let partialImagery = false;
+
+      if (imagery !== "keep") {
+        // New map: the canvas becomes the area, drawn at 1 unit = 1 ft, so the map and terrain line up exactly.
+        const aspect = canvas.height / Math.max(canvas.width, 1);
+        const requestedWidth = clamp(Math.round(realWidthFt), 50, 5000);
+        // Keep the grid sensible for the map size (terrain resolution follows the grid) and
+        // make the canvas a whole number of grid cells so terrain vertices land exactly on the grid.
+        const nextGrid = clamp(Math.round(requestedWidth / 60 / 5) * 5, 5, 40);
+        const widthFt = Math.max(1, Math.round(requestedWidth / nextGrid)) * nextGrid;
+        const heightFt = Math.max(1, Math.round((requestedWidth * aspect) / nextGrid)) * nextGrid;
+        setElevationStatus({ state: "loading", message: `Downloading ${MAP_IMAGERY_SOURCES[imagery].label.toLowerCase()} imagery…` });
+        const map = await fetchMapImagery(location, widthFt, heightFt, imagery);
+        partialImagery = map.partial;
+        canvas = { width: widthFt, height: heightFt };
+        area = { x: 0, y: 0, width: widthFt, height: heightFt };
+        realWidthFt = widthFt;
+        const nextBg = { x: 0, y: 0, width: widthFt, height: heightFt, opacity: 1 };
+        setCanvasSize(canvas);
+        setBackgroundImg(map.url);
+        setBgSettings(nextBg);
+        canvasSizeRef.current = canvas;
+        backgroundImgRef.current = map.url;
+        bgSettingsRef.current = nextBg;
+        setPanOffset({ x: 0, y: 0 });
+        setZoom(1);
+        setGridSize(nextGrid);
+        gridSizeRef.current = nextGrid;
+      }
+
+      setElevationStatus({ state: "loading", message: "Downloading elevation…" });
+      const unitsPerFoot = area.width / realWidthFt;
+      const realHeightFt = area.height / unitsPerFoot;
+      const grid = gridSizeRef.current || gridSize;
+      const spacing = Math.max(grid / 2, Math.max(area.width, area.height) / 400);
+      const samplesX = clamp(Math.round(area.width / spacing) + 1, 2, 512);
+      const samplesY = clamp(Math.round(area.height / spacing) + 1, 2, 512);
+      const result = await fetchElevationGrid(location, realWidthFt, realHeightFt, samplesX, samplesY);
+
+      const dem: DemData = {
+        name: `Auto elevation · ${location.label}`,
+        width: samplesX,
+        height: samplesY,
+        values: result.values,
+        min: result.min,
+        max: result.max,
+        noData: null
+      };
+      const preview = buildDemPreview(dem);
+      const transform = {
+        x: area.x + area.width / 2,
+        y: area.y + area.height / 2,
+        scale: preview ? area.width / preview.width : 1,
+        rotation: 0
+      };
+      // meters -> feet, times map scale, times exaggeration
+      const scale = FEET_PER_METER * unitsPerFoot * exaggeration;
+      setDemData(dem);
+      setDemPreview(preview);
+      setDemTransform(transform);
+      setDemScale(scale);
+      setDemOffset(0);
+      setDemNormalize(true);
+      setDemAutoApply(true);
+      setDemAlignMode(false);
+      demDataRef.current = dem;
+      demPreviewRef.current = preview;
+      demTransformRef.current = transform;
+      demScaleRef.current = scale;
+      demOffsetRef.current = 0;
+      demNormalizeRef.current = true;
+      // When the map changed, the settings history debounce records map + terrain together.
+      applyDemToTerrain(dem, { preview, transform, scale, offset: 0, normalize: true, canvas, save: imagery === "keep" });
+
+      const reliefFt = (result.max - result.min) * FEET_PER_METER;
+      const reliefText = reliefFt < 1
+        ? "This site is nearly flat (under 1 ft of change)."
+        : `${Math.round(reliefFt)} ft of elevation change${exaggeration !== 1 ? ` (shown ${exaggeration}× taller)` : ""}.`;
+      setElevationStatus({
+        state: "done",
+        message: `${imagery === "keep" ? "Elevation applied." : "Site imported."} ${reliefText}${partialImagery ? " Some map tiles were unavailable." : ""}`
+      });
+      if (elevationOverlay === "off") setElevationOverlay("contours");
+    } catch (err) {
+      console.error("Failed to import site", err);
+      setElevationStatus({ state: "error", message: err instanceof Error ? err.message : "Couldn't import the site." });
+    }
+  };
+
+  // Terrain is stored per grid vertex, so changing the grid must resample it (or re-apply the DEM).
+  const changeGridSize = (next: number) => {
+    if (!Number.isFinite(next) || next <= 0 || next === gridSize) return;
+    if (!(demData && demAutoApply) && Object.keys(terrainHeights).length > 0) {
+      const resampled: Record<string, number> = {};
+      for (let x = 0; x <= canvasSize.width; x += next) {
+        for (let z = 0; z <= canvasSize.height; z += next) {
+          const h = getGridHeight(x, z);
+          if (Math.abs(h) > 0.001) resampled[getVertexKey(x, z)] = h;
+        }
+      }
+      setTerrainHeights(resampled);
+      terrainHeightsRef.current = resampled;
+    }
+    setGridSize(next);
+  };
+
+  const clearTerrain = () => {
+    setTerrainHeights({});
+    terrainHeightsRef.current = {};
+    setDemData(null);
+    setDemPreview(null);
+    setDemAlignMode(false);
+    saveHistory(undefined, {});
   };
 
   const demAutoApplyTimerRef = useRef<number | null>(null);
@@ -1593,6 +2212,8 @@ export default function SecurityPlanner() {
         if (data.backgroundMode) setBackgroundMode(data.backgroundMode);
         if (data.nvrLayout) setNvrLayout(data.nvrLayout);
         if (data.terrainHeights) setTerrainHeights(data.terrainHeights);
+        if (typeof data.gridSize === "number") setGridSize(data.gridSize);
+        if (data.siteLocation && typeof data.siteLocation.lat === "number") setSiteLocation(data.siteLocation);
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -1613,7 +2234,9 @@ export default function SecurityPlanner() {
           sceneBackgroundImg,
           backgroundMode,
           nvrLayout,
-          terrainHeights
+          terrainHeights,
+          gridSize,
+          siteLocation
         };
         localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
       } catch (err: any) {
@@ -1627,7 +2250,9 @@ export default function SecurityPlanner() {
               canvasSize,
               exportList,
               projectName,
-              terrainHeights
+              terrainHeights,
+              gridSize,
+              siteLocation
               // omit backgroundImg
             };
             localStorage.setItem('securityCameraPlannerData', JSON.stringify(partialData));
@@ -1641,7 +2266,7 @@ export default function SecurityPlanner() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights]);
+  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, siteLocation]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -2161,6 +2786,9 @@ export default function SecurityPlanner() {
     setIsBackgroundDragging(false);
     setMapMoveMode(false);
     setTerrainHeights({});
+    setSiteLocation(null);
+    setElevationQuery("");
+    setElevationStatus({ state: "idle", message: "" });
     setCameraPlacementPreview(null);
     setHistory([]);
     setHistoryIndex(-1);
@@ -2385,7 +3013,7 @@ export default function SecurityPlanner() {
     const height = Math.max(360, Math.round(width / aspect));
 
     const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Terrain adjusted height
+    const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
@@ -2471,7 +3099,7 @@ export default function SecurityPlanner() {
 
       const mapPlane = new THREE.Mesh(
         mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false })
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 })
       );
       mapPlane.renderOrder = -1;
       mapPlane.rotation.x = -Math.PI / 2;
@@ -2802,6 +3430,8 @@ export default function SecurityPlanner() {
     } else {
       setBuildingLabelDefaults(DEFAULT_BUILDING_LABEL);
     }
+    setSiteLocation(projectData.siteLocation && typeof projectData.siteLocation.lat === "number" ? projectData.siteLocation : null);
+    if (projectData.elevationOverlay) setElevationOverlay(projectData.elevationOverlay);
     if (projectData.demSettings) {
       const settings = projectData.demSettings;
       if (typeof settings.demScale === "number") setDemScale(settings.demScale);
@@ -2835,6 +3465,8 @@ export default function SecurityPlanner() {
     backgroundMode,
     nvrLayout,
     buildingLabelDefaults,
+    siteLocation,
+    elevationOverlay,
     demMeta: demData
       ? {
         name: demData.name,
@@ -3497,7 +4129,7 @@ export default function SecurityPlanner() {
       } else if (item.type === "camera") {
         const cam = item as CameraItem;
         const camPos = getCameraPlanPosition(cam);
-        const camH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Get height at camera specific position (pivot)
+        const camH = getCameraBaseHeight(cam, camPos); // Base height at camera pivot (building base if mounted)
         const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
 
         obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
@@ -3534,6 +4166,118 @@ export default function SecurityPlanner() {
   const bgSettingsEqual = (a: typeof bgSettings, b: typeof bgSettings) =>
     a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.opacity === b.opacity;
 
+  // Tints terrain vertices by elevation so hills/slopes are readable even without a base map.
+  const applyTerrainVertexColors = (geometry: THREE.BufferGeometry) => {
+    const posAttr = geometry.attributes.position as THREE.BufferAttribute;
+    let colorAttr = geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    if (!colorAttr || colorAttr.count !== posAttr.count) {
+      colorAttr = new THREE.BufferAttribute(new Float32Array(posAttr.count * 3), 3);
+      geometry.setAttribute("color", colorAttr);
+    }
+    const flat = new THREE.Color(0x18181b);
+    const color = new THREE.Color();
+    const range = terrainStats.relief;
+    for (let i = 0; i < posAttr.count; i++) {
+      if (range <= 0.01) {
+        color.copy(flat);
+      } else {
+        const [r, g, b] = elevationColor((posAttr.getZ(i) - terrainStats.min) / range);
+        color.setRGB((r / 255) * 0.8, (g / 255) * 0.8, (b / 255) * 0.8, THREE.SRGBColorSpace);
+      }
+      colorAttr.setXYZ(i, color.r, color.g, color.b);
+    }
+    colorAttr.needsUpdate = true;
+  };
+
+  // Contour lines draped on the 3D terrain (index contour every 5th line is brighter).
+  const updateTerrainContours3d = (group: THREE.Group) => {
+    const existing = group.getObjectByName("terrain-contours");
+    if (existing) {
+      disposeGroup(existing as THREE.Group);
+      existing.parent?.remove(existing);
+    }
+    if (elevationOverlay === "off" || contourSegments.length === 0) return;
+    const contours = new THREE.Group();
+    contours.name = "terrain-contours";
+    const minor: number[] = [];
+    const major: number[] = [];
+    const lift = 0.25;
+    contourSegments.forEach(seg => {
+      const isMajor = Math.abs(Math.round(seg.level / contourInterval) % 5) === 0;
+      (isMajor ? major : minor).push(seg.x1, seg.level + lift, seg.y1, seg.x2, seg.level + lift, seg.y2);
+    });
+    const addLines = (verts: number[], opacity: number) => {
+      if (verts.length === 0) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+      const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+        color: 0xfff7e6,
+        transparent: true,
+        opacity,
+        depthWrite: false
+      }));
+      lines.renderOrder = 0;
+      lines.raycast = () => {};
+      contours.add(lines);
+    };
+    addLines(minor, 0.35);
+    addLines(major, 0.8);
+    group.add(contours);
+  };
+
+  // Solid "cut-away" sides around the terrain so the site reads as a block of ground instead of a floating sheet.
+  const updateTerrainSkirt = (group: THREE.Group) => {
+    const existing = group.getObjectByName("terrain-skirt");
+    if (existing) {
+      disposeGroup(existing as THREE.Group);
+      existing.parent?.remove(existing);
+    }
+    const flatBoundary = group.getObjectByName("canvas-boundary");
+    if (flatBoundary) flatBoundary.visible = !hasTerrain;
+    if (!hasTerrain) return;
+    const grid = gridSize || 20;
+    const base = Math.min(0, terrainStats.min) - Math.max(2, terrainStats.relief * 0.08);
+    const edgePoints = (from: { x: number; z: number }, to: { x: number; z: number }) => {
+      const length = Math.hypot(to.x - from.x, to.z - from.z);
+      const steps = Math.max(1, Math.round(length / grid));
+      return Array.from({ length: steps + 1 }, (_, i) => ({
+        x: from.x + ((to.x - from.x) * i) / steps,
+        z: from.z + ((to.z - from.z) * i) / steps
+      }));
+    };
+    const w = canvasSize.width;
+    const d = canvasSize.height;
+    const corners = [{ x: 0, z: 0 }, { x: w, z: 0 }, { x: w, z: d }, { x: 0, z: d }];
+    const positions: number[] = [];
+    const outline: number[] = [];
+    corners.forEach((corner, ci) => {
+      const pts = edgePoints(corner, corners[(ci + 1) % 4]);
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const ha = getGridHeight(a.x, a.z);
+        const hb = getGridHeight(b.x, b.z);
+        positions.push(a.x, ha, a.z, a.x, base, a.z, b.x, hb, b.z);
+        positions.push(b.x, hb, b.z, a.x, base, a.z, b.x, base, b.z);
+        outline.push(a.x, ha + 0.1, a.z, b.x, hb + 0.1, b.z);
+      }
+    });
+    const skirt = new THREE.Group();
+    skirt.name = "terrain-skirt";
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+    const walls = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x4a3a2a, roughness: 1, metalness: 0, side: THREE.DoubleSide }));
+    walls.raycast = () => {};
+    skirt.add(walls);
+    const outlineGeo = new THREE.BufferGeometry();
+    outlineGeo.setAttribute("position", new THREE.Float32BufferAttribute(outline, 3));
+    const edge = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0x94a3b8 }));
+    edge.raycast = () => {};
+    skirt.add(edge);
+    group.add(skirt);
+  };
+
   const updateTerrainMesh = () => {
     const state = threeStateRef.current;
     if (!state) return false;
@@ -3566,6 +4310,9 @@ export default function SecurityPlanner() {
     }
     posAttr.needsUpdate = true;
     terrainGeo.computeVertexNormals();
+    applyTerrainVertexColors(terrainGeo);
+    updateTerrainContours3d(group);
+    updateTerrainSkirt(group);
 
     const mapPlane = group.getObjectByName("terrain-map-plane") as THREE.Mesh | null;
     if (mapPlane && mapPlane.geometry instanceof THREE.PlaneGeometry) {
@@ -3694,7 +4441,9 @@ export default function SecurityPlanner() {
           return;
         }
       } else {
+        updateTerrainContours3d(group);
         updateThreeScenePositions();
+        renderer.render(scene, state.camera);
         syncSceneRefs();
         return;
       }
@@ -3727,12 +4476,13 @@ export default function SecurityPlanner() {
       posAttr.setZ(i, h);
     }
     terrainGeometry.computeVertexNormals();
+    applyTerrainVertexColors(terrainGeometry);
 
     const terrainMaterial = new THREE.MeshStandardMaterial({
-      color: 0x18181b,
-      roughness: 0.9,
-      metalness: 0.1,
-      flatShading: true
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.95,
+      metalness: 0.0
     });
 
     const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
@@ -3741,6 +4491,8 @@ export default function SecurityPlanner() {
     terrainMesh.receiveShadow = true;
     terrainMesh.name = "terrain-mesh";
     group.add(terrainMesh);
+    updateTerrainContours3d(group);
+    updateTerrainSkirt(group);
 
     // Canvas boundary outline
     const boundaryGeometry = new THREE.BufferGeometry();
@@ -3756,6 +4508,8 @@ export default function SecurityPlanner() {
       boundaryGeometry,
       new THREE.LineBasicMaterial({ color: 0x94a3b8, linewidth: 2 })
     );
+    boundaryLine.name = "canvas-boundary";
+    boundaryLine.visible = !hasTerrain;
     group.add(boundaryLine);
 
     // Background image
@@ -3764,7 +4518,11 @@ export default function SecurityPlanner() {
         color: 0xffffff,
         transparent: true,
         opacity: bgSettings.opacity,
-        depthWrite: false
+        depthWrite: false,
+        // Avoids z-fighting with the terrain on steep or distant slopes
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -4
       });
       new THREE.TextureLoader().load(backgroundImg, texture => {
         texture.colorSpace = THREE.SRGBColorSpace;
@@ -3853,7 +4611,7 @@ export default function SecurityPlanner() {
         const cameraPos = getCameraPlanPosition(cameraItem);
 
         // Recalculate height at specific camera pivot
-        const camTerrainH = getGridHeight(cameraPos.x, cameraPos.y) + OBJECT_ELEVATION_OFFSET;
+        const camTerrainH = getCameraBaseHeight(cameraItem, cameraPos);
         const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
         const absHeight = camTerrainH + cameraMountHeight;
         const cameraHeight = cameraMountHeight;
@@ -4372,13 +5130,18 @@ export default function SecurityPlanner() {
     const camera = threeStateRef.current.camera;
     const renderer = threeStateRef.current.renderer;
 
-    let cursor = scene.getObjectByName("terrain-cursor") as THREE.Mesh;
+    // Brush outline is a line loop re-draped over the terrain on every move.
+    const CURSOR_SEGMENTS = 72;
+    let cursor = scene.getObjectByName("terrain-cursor") as THREE.LineLoop;
     if (!cursor) {
-      const geo = new THREE.RingGeometry(0.88, 1, 48);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.7, depthTest: false, side: THREE.DoubleSide });
-      cursor = new THREE.Mesh(geo, mat);
-      cursor.rotation.x = -Math.PI / 2;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(CURSOR_SEGMENTS * 3), 3));
+      const mat = new THREE.LineBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.95, depthTest: false });
+      cursor = new THREE.LineLoop(geo, mat);
       cursor.name = "terrain-cursor";
+      cursor.renderOrder = 10;
+      cursor.frustumCulled = false;
+      cursor.raycast = () => {};
       scene.add(cursor);
     }
 
@@ -4389,6 +5152,7 @@ export default function SecurityPlanner() {
       cursorDot = new THREE.Mesh(geo, mat);
       cursorDot.rotation.x = -Math.PI / 2;
       cursorDot.name = "terrain-cursor-dot";
+      cursorDot.raycast = () => {};
       scene.add(cursorDot);
     }
 
@@ -4396,7 +5160,20 @@ export default function SecurityPlanner() {
       cursor.visible = false;
       cursorDot.visible = false;
       renderer.render(scene, camera);
-      return;
+      const onHover = (e: PointerEvent) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(
+          ((e.clientX - rect.left) / rect.width) * 2 - 1,
+          -((e.clientY - rect.top) / rect.height) * 2 + 1
+        ), camera);
+        const terrain = scene.getObjectByName("terrain-mesh");
+        const hit = terrain ? raycaster.intersectObject(terrain)[0] : undefined;
+        if (hit) updateElevationReadout(hit.point.x, hit.point.z);
+        else updateElevationReadout(-1, -1);
+      };
+      renderer.domElement.addEventListener("pointermove", onHover);
+      return () => renderer.domElement.removeEventListener("pointermove", onHover);
     }
 
     cursor.visible = true;
@@ -4418,18 +5195,23 @@ export default function SecurityPlanner() {
           const safeGrid = gridSize || 20;
           terrainHoverRef.current = { pointX: pt.x, pointZ: pt.z };
           const radius = getBrushRadius(safeGrid);
-          const h = getGridHeight(pt.x, pt.z);
+          const h = getGridHeight(pt.x, pt.z, terrainHeightsRef.current);
 
-          const cursorMat = cursor.material as THREE.MeshBasicMaterial;
+          const cursorMat = cursor.material as THREE.LineBasicMaterial;
           cursorMat.color.setHex(
-            terrainTool === "sculpt" ? 0xf59e0b : terrainTool === "smooth" ? 0x38bdf8 : 0x818cf8
+            terrainTool === "sculpt" ? (e.shiftKey ? 0xef4444 : 0xf59e0b) : terrainTool === "smooth" ? 0x38bdf8 : 0x818cf8
           );
-          cursorMat.opacity = 0.7;
-          cursorMat.transparent = true;
-          cursorMat.depthTest = false;
-          cursor.scale.set(radius, radius, radius);
-          cursor.position.set(pt.x, h + 0.6, pt.z);
+          const cursorPos = cursor.geometry.attributes.position as THREE.BufferAttribute;
+          for (let i = 0; i < CURSOR_SEGMENTS; i++) {
+            const a = (i / CURSOR_SEGMENTS) * Math.PI * 2;
+            const cx = pt.x + Math.cos(a) * radius;
+            const cz = pt.z + Math.sin(a) * radius;
+            cursorPos.setXYZ(i, cx, getGridHeight(cx, cz, terrainHeightsRef.current) + 0.6, cz);
+          }
+          cursorPos.needsUpdate = true;
+          cursorDot.scale.set(Math.max(1, radius / 20), Math.max(1, radius / 20), 1);
           cursorDot.position.set(pt.x, h + 0.6, pt.z);
+          updateElevationReadout(pt.x, pt.z);
 
           renderer.render(scene, camera);
         }
@@ -4538,9 +5320,16 @@ export default function SecurityPlanner() {
       };
     };
 
-    // Helper: Cast ray to ground plane (y=0) and return world coords
+    // Helper: Cast ray to the terrain surface (falls back to the y=0 plane) and return world coords
     const raycastToGround = (ndc: { x: number; y: number }): { x: number; z: number } | null => {
       raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+      const terrainMesh = group.getObjectByName("terrain-mesh");
+      if (terrainMesh) {
+        const terrainHits = raycaster.intersectObject(terrainMesh, false);
+        if (terrainHits.length > 0) {
+          return { x: terrainHits[0].point.x, z: terrainHits[0].point.z };
+        }
+      }
       const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
       const intersection = new THREE.Vector3();
       const hit = raycaster.ray.intersectPlane(groundPlane, intersection);
@@ -4675,17 +5464,26 @@ export default function SecurityPlanner() {
             };
 
             applyAtPoint(pt, startTime);
+            let strokePoint = pt.clone();
+            // Keep applying while held so the brush works without constant mouse movement.
+            let strokeFrame = 0;
+            const strokeTick = () => {
+              applyAtPoint(strokePoint, performance.now());
+              strokeFrame = window.requestAnimationFrame(strokeTick);
+            };
+            strokeFrame = window.requestAnimationFrame(strokeTick);
 
             const moveHandler = (moveEvent: PointerEvent) => {
               const moveNdc = getNDC(moveEvent);
               raycaster.setFromCamera(new THREE.Vector2(moveNdc.x, moveNdc.y), camera);
               const moveHits = raycaster.intersectObject(terrain);
               if (moveHits.length > 0) {
-                applyAtPoint(moveHits[0].point, performance.now());
+                strokePoint = moveHits[0].point.clone();
               }
             };
 
             const upHandler = () => {
+              window.cancelAnimationFrame(strokeFrame);
               if (terrainStrokeRef.current?.active) {
                 saveHistory(undefined, terrainHeightsRef.current);
               }
@@ -4928,7 +5726,8 @@ export default function SecurityPlanner() {
               if (itemType === "camera") {
                 const item = itemsRef.current.find(i => i.id === dragState.itemId) as CameraItem | undefined;
                 const camHeight = item?.mount?.height ?? item?.height ?? 10;
-                cachedObj.position.set(newX, terrainY + camHeight, newY);
+                const baseY = item && item.mount?.type === "building" ? getCameraBaseHeight({ ...item, x: newX, y: newY }) : terrainY;
+                cachedObj.position.set(newX, baseY + camHeight, newY);
               } else if (itemType === "building") {
                 const building = itemsRef.current.find(i => i.id === dragState.itemId) as BuildingItem | undefined;
                 if (building) {
@@ -5072,7 +5871,7 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (viewMode !== "iso3d") return;
     rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, sceneBackgroundImg, backgroundMode, terrainHeights, buildingLabelDefaults]);
+  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, sceneBackgroundImg, backgroundMode, terrainHeights, buildingLabelDefaults, elevationOverlay]);
 
   useEffect(() => {
     if (viewMode !== "iso3d") return;
@@ -5163,7 +5962,7 @@ export default function SecurityPlanner() {
     const height = canvas.height;
 
     const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET; // Terrain adjusted height
+    const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
     const pitch = cam.pitch ?? -15;
@@ -5257,7 +6056,7 @@ export default function SecurityPlanner() {
 
       const mapPlane = new THREE.Mesh(
         mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false })
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 })
       );
       mapPlane.renderOrder = -1;
       mapPlane.rotation.x = -Math.PI / 2;
@@ -5450,6 +6249,15 @@ export default function SecurityPlanner() {
   };
 
   const handleSvgMouseMove = (e: React.MouseEvent) => {
+    {
+      const hoverPos = getSvgMousePos(e);
+      updateElevationReadout(hoverPos.x, hoverPos.y);
+      const brushCursor = planBrushCursorRef.current;
+      if (brushCursor) {
+        brushCursor.setAttribute("cx", `${hoverPos.x}`);
+        brushCursor.setAttribute("cy", `${hoverPos.y}`);
+      }
+    }
     if (updateDemTransformDrag(getSvgMousePos(e), e.shiftKey)) return;
     // Handle camera placement preview
     if (mode === "add-camera" && viewMode === "plan") {
@@ -5622,6 +6430,7 @@ export default function SecurityPlanner() {
 
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
+    if (isTerrainMode) return;
     if (isPanning) return;
     if (vertexInsertMode && selectedId) {
       const selectedItem = items.find(item => item.id === selectedId);
@@ -5639,6 +6448,53 @@ export default function SecurityPlanner() {
         setSelectedId(null);
       }
     }
+  };
+
+  // Terrain brush in the 2D plan view. Keeps applying while the button is held, even without moving.
+  const handlePlanTerrainMouseDown = (e: React.MouseEvent) => {
+    if (!isTerrainMode || viewMode !== "plan" || e.button !== 0 || e.altKey || isSpacePressed) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const pan = panOffset;
+    const scale = zoom;
+    const toWorld = (ev: { clientX: number; clientY: number }) =>
+      getSvgMousePosFor(svgRef.current, ev as React.MouseEvent, pan, scale);
+    const tool = terrainTool;
+    const direction: 1 | -1 = tool === "sculpt" && e.shiftKey ? -1 : 1;
+    let point = toWorld(e);
+    if (tool === "flatten" && terrainFlattenSampleRef.current) {
+      const target = getGridHeight(point.x, point.y);
+      setTerrainFlattenTarget(target);
+      terrainFlattenTargetRef.current = target;
+    }
+    let last = performance.now();
+    let frame = 0;
+    const tick = () => {
+      const now = performance.now();
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      applyBrushStroke(point.x, point.y, tool, direction, dt || 0.016);
+      frame = window.requestAnimationFrame(tick);
+    };
+    applyBrushStroke(point.x, point.y, tool, direction, 0.016);
+    frame = window.requestAnimationFrame(tick);
+    const move = (ev: MouseEvent) => {
+      point = toWorld(ev);
+      const brushCursor = planBrushCursorRef.current;
+      if (brushCursor) {
+        brushCursor.setAttribute("cx", `${point.x}`);
+        brushCursor.setAttribute("cy", `${point.y}`);
+      }
+      updateElevationReadout(point.x, point.y);
+    };
+    const up = () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      saveHistory(undefined, terrainHeightsRef.current);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
   };
 
   const handleSvgMouseDown = (e: React.MouseEvent) => {
@@ -5923,6 +6779,187 @@ export default function SecurityPlanner() {
           </div>
         </div>
       )}
+      {showElevationDialog && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onMouseDown={(e) => { if (e.target === e.currentTarget && elevationStatus.state !== "loading") setShowElevationDialog(false); }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl ring-1 ring-white/10">
+            <div className="flex items-start justify-between px-5 pt-5">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center">
+                  <Mountain className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-slate-100">Import Site</h2>
+                  <p className="text-xs text-slate-400">Real map imagery + elevation from an address</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowElevationDialog(false)}
+                disabled={elevationStatus.state === "loading"}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/10 disabled:opacity-40"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              className="px-5 pb-5 pt-4 space-y-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (elevationStatus.state !== "loading") importSite();
+              }}
+            >
+              <div className="space-y-1.5">
+                <label className="text-[11px] uppercase font-bold text-slate-400">Address or location</label>
+                <input
+                  autoFocus
+                  value={elevationQuery}
+                  onChange={(e) => setElevationQuery(e.target.value)}
+                  placeholder="123 Main St, Denver CO — or 39.7392, -104.9903"
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                />
+                <p className="text-[10px] text-slate-500">You can also paste a Google Maps link. The location becomes the center of the map.</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] uppercase font-bold text-slate-400">Map</label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {([
+                    { id: "satellite", label: "Satellite" },
+                    { id: "streets", label: "Street Map" },
+                    { id: "keep", label: backgroundImg ? "Keep Mine" : "None" }
+                  ] as { id: MapImagerySource | "keep"; label: string }[]).map(opt => (
+                    <button
+                      type="button"
+                      key={opt.id}
+                      onClick={() => {
+                        setElevationImagery(opt.id);
+                        if (opt.id === "keep") {
+                          setElevationAreaWidth(Math.round(getElevationArea().width));
+                        }
+                      }}
+                      className={`py-2 rounded-lg text-xs font-semibold border transition-colors ${elevationImagery === opt.id
+                        ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
+                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                        }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {elevationImagery !== "keep" && backgroundImg && (
+                  <p className="text-[10px] text-amber-300/80">This replaces your current base map.</p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] uppercase font-bold text-slate-400 flex justify-between">
+                  <span>{elevationImagery === "keep" ? "Real width of your map" : "Area width"}</span>
+                  <span className="text-slate-500 normal-case font-medium">
+                    {elevationImagery === "keep"
+                      ? "measure it in Google Maps if unsure"
+                      : `${elevationAreaWidth} × ${Math.round(elevationAreaWidth * (canvasSize.height / Math.max(canvasSize.width, 1)))} ft`}
+                  </span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={50}
+                    max={5000}
+                    value={elevationAreaWidth || ""}
+                    onChange={(e) => setElevationAreaWidth(parseInt(e.target.value || "0", 10))}
+                    className="w-28 rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  />
+                  <span className="text-xs text-slate-400">ft</span>
+                  {elevationImagery !== "keep" && (
+                    <div className="flex gap-1 ml-auto">
+                      {[200, 400, 800, 1500].map(w => (
+                        <button
+                          type="button"
+                          key={w}
+                          onClick={() => setElevationAreaWidth(w)}
+                          className={`px-2 py-1 rounded text-[10px] font-semibold border ${elevationAreaWidth === w ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                        >
+                          {w}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] uppercase font-bold text-slate-400">Height exaggeration</label>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[1, 2, 3, 5].map(v => (
+                    <button
+                      type="button"
+                      key={v}
+                      onClick={() => setElevationExaggeration(v)}
+                      className={`py-1.5 rounded-lg text-xs font-semibold border ${elevationExaggeration === v
+                        ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
+                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                        }`}
+                    >
+                      {v === 1 ? "Real (1×)" : `${v}×`}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-slate-500">Keep 1× for accurate camera views. Use more to make gentle slopes easier to see.</p>
+              </div>
+
+              {elevationStatus.state !== "idle" && (
+                <div className={`rounded-lg border px-3 py-2 text-xs flex items-center gap-2 ${elevationStatus.state === "error"
+                  ? "border-red-500/30 bg-red-500/10 text-red-200"
+                  : elevationStatus.state === "done"
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                    : "border-white/10 bg-white/5 text-slate-300"
+                  }`}>
+                  {elevationStatus.state === "loading" && <LoaderCircle className="w-4 h-4 animate-spin shrink-0" />}
+                  <span>{elevationStatus.message}</span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                {elevationStatus.state === "done" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { setShowElevationDialog(false); setViewMode("iso3d"); }}
+                      className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white"
+                    >
+                      View in 3D
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowElevationDialog(false)}
+                      className="px-4 py-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-semibold text-slate-200"
+                    >
+                      Done
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={elevationStatus.state === "loading" || !elevationQuery.trim()}
+                    className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900/50 disabled:text-emerald-200/50 text-sm font-semibold text-white flex items-center justify-center gap-2"
+                  >
+                    {elevationStatus.state === "loading" && <LoaderCircle className="w-4 h-4 animate-spin" />}
+                    {elevationImagery === "keep" ? "Get Elevation" : "Import Site"}
+                  </button>
+                )}
+              </div>
+
+              <p className="text-[10px] leading-relaxed text-slate-500">
+                Free public data, no account needed: elevation from AWS Terrain Tiles (USGS 3DEP in the US, ~3–10 m detail), imagery from Esri World Imagery or OpenStreetMap, address search by OpenStreetMap Nominatim. Maps are north-up.
+              </p>
+            </form>
+          </div>
+        </div>
+      )}
+
       {showDemGuide && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden text-slate-200">
@@ -6015,7 +7052,7 @@ export default function SecurityPlanner() {
 
 
 
-          {viewMode === "iso3d" && (
+          {(viewMode === "iso3d" || viewMode === "plan") && (
             <div className="relative group">
               <button
                 onClick={() => setIsTerrainMode(!isTerrainMode)}
@@ -6034,13 +7071,56 @@ export default function SecurityPlanner() {
                   </h3>
 
                   <div className="bg-white/5 rounded-lg p-3 border border-white/5 space-y-3">
-                    <p className="text-[10px] text-slate-400 text-center leading-relaxed">
-                      Brush-based sculpting: drag to modify terrain. Hold Shift to lower (Sculpt).
+                    <button
+                      onClick={openElevationDialog}
+                      className="w-full py-2.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 transition-colors"
+                    >
+                      {hasTerrain ? "Re-import Elevation" : "Get Real Elevation (1 click)"}
+                    </button>
+                    {siteLocation && (
+                      <div className="text-[10px] text-slate-400 truncate" title={siteLocation.label}>
+                        Site: {siteLocation.label}
+                      </div>
+                    )}
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Show Elevation</label>
+                      <div className="grid grid-cols-3 gap-1">
+                        {([
+                          { id: "off", label: "Off" },
+                          { id: "contours", label: "Contours" },
+                          { id: "shaded", label: "Shaded" }
+                        ] as { id: ElevationOverlayMode; label: string }[]).map(opt => (
+                          <button
+                            key={opt.id}
+                            onClick={() => setElevationOverlay(opt.id)}
+                            className={`py-1.5 rounded text-[10px] font-semibold border transition-colors ${elevationOverlay === opt.id
+                              ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
+                              : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                              }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {hasTerrain && (
+                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                        <span>Relief: {formatElevation(terrainStats.relief)} · contours every {contourInterval} ft</span>
+                        <button onClick={clearTerrain} className="px-2 py-0.5 rounded border border-white/10 bg-white/5 text-slate-300 hover:bg-red-500/20 hover:text-red-200">
+                          Clear
+                        </button>
+                      </div>
+                    )}
+
+                    <p className="text-[10px] text-slate-400 text-center leading-relaxed pt-2 border-t border-white/5">
+                      Or sculpt by hand: click and hold to paint terrain (2D or 3D). Hold Shift to lower.
                     </p>
 
                     <details className="rounded-lg border border-white/10 bg-white/5 px-2 py-2">
                       <summary className="cursor-pointer text-[10px] font-semibold text-slate-300">
-                        How to Get Maps + Elevation
+                        Use your own GeoTIFF instead (advanced)
                       </summary>
                       <div className="mt-2 space-y-2 text-[10px] text-slate-400">
                         <div><span className="font-semibold text-slate-300">Satellite image:</span> open your map source in a browser, take a screenshot, then click <span className="text-slate-200">Base Map</span> to upload.</div>
@@ -6457,6 +7537,14 @@ export default function SecurityPlanner() {
             <MapIcon className="w-4 h-4" />
             <span>Settings</span>
           </button>
+          <button
+            onClick={openElevationDialog}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/30 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition-all"
+            title="Download satellite imagery and real elevation for an address"
+          >
+            <Mountain className="w-4 h-4" />
+            <span className="whitespace-nowrap">Import Site</span>
+          </button>
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <Upload className="w-4 h-4" />
             <span>Base Map</span>
@@ -6555,10 +7643,12 @@ export default function SecurityPlanner() {
                 height="100%"
                 viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
                 preserveAspectRatio="xMidYMid meet"
-                className={`bg-white block ${mode === "select" ? "cursor-default" : "cursor-crosshair"}`}
+                className={`bg-white block ${mode === "select" && !isTerrainMode ? "cursor-default" : "cursor-crosshair"}`}
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
+                onMouseDownCapture={handlePlanTerrainMouseDown}
+                onMouseLeave={() => updateElevationReadout(-1, -1)}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
                 xmlns="http://www.w3.org/2000/svg"
@@ -6588,6 +7678,45 @@ export default function SecurityPlanner() {
                       opacity={bgSettings.opacity}
                       className="pointer-events-none"
                     />
+                  )}
+
+                  {hasTerrain && elevationOverlay === "shaded" && elevationShadeUrl && (
+                    <image
+                      href={elevationShadeUrl}
+                      x={0}
+                      y={0}
+                      width={canvasSize.width}
+                      height={canvasSize.height}
+                      preserveAspectRatio="none"
+                      opacity={backgroundImg ? 0.55 : 0.95}
+                      style={backgroundImg ? { mixBlendMode: "multiply" } : undefined}
+                      className="pointer-events-none"
+                    />
+                  )}
+
+                  {hasTerrain && elevationOverlay !== "off" && contourPaths && (
+                    <g className="pointer-events-none">
+                      <path d={contourPaths.minor} fill="none" stroke={backgroundImg ? "rgba(255,247,230,0.55)" : "rgba(68,52,30,0.45)"} strokeWidth={0.8 / zoom} />
+                      <path d={contourPaths.major} fill="none" stroke={backgroundImg ? "rgba(255,247,230,0.95)" : "rgba(68,52,30,0.85)"} strokeWidth={1.8 / zoom} />
+                      {contourPaths.labels.map((label, i) => (
+                        <text
+                          key={i}
+                          x={label.x}
+                          y={label.y}
+                          fontSize={10 / zoom}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          fill={backgroundImg ? "#fff7e6" : "#44341e"}
+                          stroke={backgroundImg ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.85)"}
+                          strokeWidth={2.5 / zoom}
+                          paintOrder="stroke"
+                          fontWeight={700}
+                          className="select-none"
+                        >
+                          {label.text}
+                        </text>
+                      ))}
+                    </g>
                   )}
 
                   {demPreview && viewMode === "plan" && demAlignMode && demOverlayTransform && (
@@ -7214,6 +8343,19 @@ export default function SecurityPlanner() {
                     }
                     return null;
                   })}
+                  {isTerrainMode && (
+                    <circle
+                      ref={planBrushCursorRef}
+                      cx={-9999}
+                      cy={-9999}
+                      r={Math.max(gridSize, clamp(terrainBrushSize, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * gridSize)}
+                      fill={terrainTool === "sculpt" ? "rgba(245,158,11,0.12)" : terrainTool === "smooth" ? "rgba(56,189,248,0.12)" : "rgba(129,140,248,0.12)"}
+                      stroke={terrainTool === "sculpt" ? "#f59e0b" : terrainTool === "smooth" ? "#38bdf8" : "#818cf8"}
+                      strokeWidth={2 / zoom}
+                      strokeDasharray={`${6 / zoom} ${4 / zoom}`}
+                      className="pointer-events-none"
+                    />
+                  )}
                 </g>
               </svg>
             ) : viewMode === "iso3d" ? (
@@ -7387,6 +8529,41 @@ export default function SecurityPlanner() {
                     </>
                   )}
                 </div>
+              </div>
+            )}
+
+            {(viewMode === "plan" || viewMode === "iso3d") && (
+              <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2 pointer-events-none">
+                <div
+                  ref={elevationReadoutRef}
+                  className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
+                  style={{ opacity: 0 }}
+                />
+                {hasTerrain && elevationOverlay !== "off" && (
+                  <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto">
+                    <div className="flex items-center justify-between gap-4 mb-1 font-semibold text-slate-200">
+                      <span>Elevation</span>
+                      <span className="text-slate-400 font-medium">contours {contourInterval} ft</span>
+                    </div>
+                    <div
+                      className="h-2 w-40 rounded-full"
+                      style={{ background: `linear-gradient(to right, ${ELEVATION_RAMP.map(([t, c]) => `rgb(${c.join(",")}) ${t * 100}%`).join(", ")})` }}
+                    />
+                    <div className="flex justify-between mt-1 text-slate-400">
+                      <span>{formatElevation(terrainStats.min)}</span>
+                      <span>{formatElevation(terrainStats.max)}</span>
+                    </div>
+                  </div>
+                )}
+                {!hasTerrain && viewMode === "plan" && !isTerrainMode && (
+                  <button
+                    onClick={openElevationDialog}
+                    className="pointer-events-auto flex items-center gap-2 rounded-full bg-zinc-900/90 hover:bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-emerald-300 shadow border border-emerald-500/30"
+                  >
+                    <Mountain className="w-3.5 h-3.5" />
+                    Add real elevation
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -8358,7 +9535,7 @@ export default function SecurityPlanner() {
                     min="10"
                     max="80"
                     value={gridSize}
-                    onChange={e => setGridSize(parseInt(e.target.value))}
+                    onChange={e => changeGridSize(parseInt(e.target.value))}
                     className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                   />
                 </div>
