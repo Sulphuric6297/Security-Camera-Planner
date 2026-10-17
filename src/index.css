@@ -11,3 +11,18 @@ body {
   font-family: 'Inter', system-ui, sans-serif;
   @apply bg-zinc-950 text-slate-200 antialiased selection:bg-indigo-500/30 selection:text-indigo-200;
 }
+
+/* Site picker: selected area size label */
+.leaflet-tooltip.site-picker-tooltip {
+  background: rgba(16, 185, 129, 0.92);
+  border: none;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.leaflet-tooltip.site-picker-tooltip::before {
+  display: none;
+}

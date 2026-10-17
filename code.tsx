@@ -3,6 +3,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import JSZip from "jszip";
 
+import L from "leaflet";
+import proj4 from "proj4";
+import "leaflet/dist/leaflet.css";
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry';
 import {
@@ -31,7 +34,10 @@ import {
   Maximize,
   Minimize,
   Mountain,
-  LoaderCircle
+  LoaderCircle,
+  MapPin,
+  Hand,
+  SquareDashed
 } from "lucide-react";
 import GridLayout from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -130,6 +136,7 @@ interface CameraItem extends BaseItem {
 
 interface BuildingItem extends BaseItem {
   type: "building";
+  importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D
@@ -403,18 +410,135 @@ const fetchElevationGrid = async (
   return { values, min, max, zoom: mosaic.z };
 };
 
+// High-resolution US elevation (USGS 3DEP, lidar-based where available, ~1-10 m). Free, no key.
+const USGS_3DEP_EXPORT = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage";
+
+const fetchUsgsElevationGrid = async (bounds: GeoBounds, samplesX: number, samplesY: number) => {
+  const params = new URLSearchParams({
+    bbox: `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
+    bboxSR: "4326",
+    imageSR: "4326",
+    size: `${samplesX},${samplesY}`,
+    format: "tiff",
+    pixelType: "F32",
+    interpolation: "RSP_BilinearInterpolation",
+    f: "image"
+  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${USGS_3DEP_EXPORT}?${params.toString()}`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`USGS ${res.status}`);
+    const buffer = await res.arrayBuffer();
+    const { fromArrayBuffer } = await import("geotiff");
+    const tiff = await fromArrayBuffer(buffer);
+    const image = await tiff.getImage();
+    if (image.getWidth() !== samplesX || image.getHeight() !== samplesY) throw new Error("USGS size mismatch");
+    const raster = (await image.readRasters({ samples: [0], interleave: true })) as unknown as ArrayLike<number>;
+    const noData = image.getGDALNoData();
+    const values = new Float32Array(samplesX * samplesY);
+    let min = Infinity;
+    let max = -Infinity;
+    let valid = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = raster[i];
+      // 3DEP marks missing data with a huge negative number.
+      if (!Number.isFinite(v) || v < -1000 || v > 9000 || (noData !== null && v === noData)) {
+        values[i] = NaN;
+        continue;
+      }
+      values[i] = v;
+      valid++;
+      min = Math.min(min, v);
+      max = Math.max(max, v);
+    }
+    if (valid < values.length * 0.95) throw new Error("USGS coverage incomplete");
+    // Fill any small gaps from the nearest valid neighbor in the row.
+    for (let i = 0; i < values.length; i++) {
+      if (Number.isNaN(values[i])) values[i] = Number.isNaN(values[i - 1]) ? min : values[i - 1];
+    }
+    return { values, min, max };
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
+// Best available elevation: USGS 3DEP (US, high detail), else global terrain tiles.
+const fetchBestElevationGrid = async (
+  location: SiteLocation,
+  widthFt: number,
+  heightFt: number,
+  samplesX: number,
+  samplesY: number
+) => {
+  try {
+    const usgs = await fetchUsgsElevationGrid(getGeoBounds(location, widthFt, heightFt), samplesX, samplesY);
+    return { ...usgs, source: "USGS 3DEP (high detail)" };
+  } catch (err) {
+    console.info("USGS 3DEP elevation unavailable, using global terrain tiles", err);
+    const tiles = await fetchElevationGrid(location, widthFt, heightFt, samplesX, samplesY);
+    return { values: tiles.values, min: tiles.min, max: tiles.max, source: "global terrain tiles" };
+  }
+};
+
+// --- Georeferenced GeoTIFF support (snap uploaded elevation files into place) ---
+
+// Projection definitions for the CRSs US elevation downloads commonly use.
+const getProj4Definition = (epsg: number): { def: string; feet: boolean } | null => {
+  const ncLcc = "+proj=lcc +lat_1=36.16666666666666 +lat_2=34.33333333333334 +lat_0=33.75 +lon_0=-79 +x_0=609601.22 +y_0=0 +ellps=GRS80 +no_defs";
+  if (epsg === 4326 || epsg === 4269 || epsg === 4759 || epsg === 6318) return { def: "+proj=longlat +datum=WGS84 +no_defs", feet: false };
+  if (epsg === 3857 || epsg === 900913) return { def: "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs", feet: false };
+  if (epsg >= 26901 && epsg <= 26923) return { def: `+proj=utm +zone=${epsg - 26900} +datum=NAD83 +units=m +no_defs`, feet: false };
+  if (epsg >= 32601 && epsg <= 32660) return { def: `+proj=utm +zone=${epsg - 32600} +datum=WGS84 +units=m +no_defs`, feet: false };
+  if (epsg >= 6330 && epsg <= 6348) return { def: `+proj=utm +zone=${epsg - 6329} +ellps=GRS80 +units=m +no_defs`, feet: false };
+  // North Carolina State Plane (meters / US survey feet), NAD83 / HARN / 2011
+  if (epsg === 32119 || epsg === 3358 || epsg === 6542) return { def: `${ncLcc} +units=m`, feet: false };
+  if (epsg === 2264 || epsg === 3359 || epsg === 6543) return { def: `${ncLcc} +units=us-ft`, feet: true };
+  return null;
+};
+
+// Returns the lat/lon of the GeoTIFF's four corners (NW, NE, SE, SW) and whether its elevations are in feet.
+const getGeoTiffCorners = (image: any) => {
+  const keys = image.getGeoKeys?.() ?? {};
+  const epsg = keys.ProjectedCSTypeGeoKey && keys.ProjectedCSTypeGeoKey !== 32767
+    ? keys.ProjectedCSTypeGeoKey
+    : keys.GeographicTypeGeoKey;
+  const proj = epsg ? getProj4Definition(epsg) : null;
+  if (!proj) return null;
+  const [minX, minY, maxX, maxY] = image.getBoundingBox();
+  const toLatLon = (x: number, y: number) => {
+    const [lon, lat] = proj4(proj.def, "+proj=longlat +datum=WGS84 +no_defs", [x, y]);
+    return { lat, lon };
+  };
+  const verticalUnits = keys.VerticalUnitsGeoKey;
+  const elevationInFeet = verticalUnits === 9002 || verticalUnits === 9003 || (verticalUnits === undefined && proj.feet);
+  return {
+    corners: [toLatLon(minX, maxY), toLatLon(maxX, maxY), toLatLon(maxX, minY), toLatLon(minX, minY)],
+    elevationInFeet,
+    epsg,
+    projDef: proj.def,
+    bbox: [minX, minY, maxX, maxY] as [number, number, number, number]
+  };
+};
+
+// How the plan maps to the real world (set when a site is imported).
+type PlanGeoRef = { bounds: GeoBounds; area: { x: number; y: number; width: number; height: number }; unitsPerFoot: number };
+
 type MapImagerySource = "satellite" | "streets";
 const MAP_IMAGERY_SOURCES: Record<MapImagerySource, {
   label: string;
   maxZoom: number;
   attribution: string;
   url: (z: number, x: number, y: number) => string;
+  // Coverage lookup for zoom levels that only exist in some areas (high-res aerials).
+  tilemap?: (z: number, x: number, y: number) => string;
 }> = {
   satellite: {
     label: "Satellite",
-    maxZoom: 19,
-    attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
-    url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`
+    maxZoom: 21,
+    attribution: "Imagery © Esri, Maxar, Vexcel, Earthstar Geographics",
+    url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
+    tilemap: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tilemap/${z}/${y}/${x}/1/1?f=json`
   },
   streets: {
     label: "Street Map",
@@ -423,18 +547,158 @@ const MAP_IMAGERY_SOURCES: Record<MapImagerySource, {
     url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`
   }
 };
-const MAP_IMAGERY_MAX_TILES = 64;
-const MAP_IMAGERY_TARGET_PX = 2400;
+// Statewide high-resolution orthoimagery (public ArcGIS ImageServers, no key).
+// Tried first when the site falls inside the region; falls back to Esri if unavailable.
+const STATE_ORTHO_SOURCES: {
+  label: string;
+  attribution: string;
+  region: GeoBounds;
+  feetPerPixel: number;
+  services: string[];
+}[] = [
+  {
+    label: "NC OneMap 6-inch orthoimagery",
+    attribution: "Imagery © NC OneMap / NC Orthoimagery Program",
+    region: { south: 33.75, north: 36.6, west: -84.33, east: -75.4 },
+    feetPerPixel: 0.5,
+    services: [
+      "https://services.nconemap.gov/secure/rest/services/Imagery/Orthoimagery_Latest/ImageServer",
+      "https://services.gis.nc.gov/secure/rest/services/Imagery/Orthoimagery_Latest/ImageServer"
+    ]
+  }
+];
+
+const findStateOrtho = (lat: number, lon: number) =>
+  STATE_ORTHO_SOURCES.find(src => lat >= src.region.south && lat <= src.region.north && lon >= src.region.west && lon <= src.region.east);
+
+const loadBlobImage = (blob: Blob) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Invalid image")); };
+    img.src = url;
+  });
+
+// Draws the provider credit in the corner of an exported map image.
+const drawAttribution = (ctx: CanvasRenderingContext2D, width: number, height: number, text: string) => {
+  const fontSize = Math.max(12, Math.round(width / 120));
+  ctx.font = `${fontSize}px sans-serif`;
+  const textW = ctx.measureText(text).width;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(width - textW - fontSize, height - fontSize * 1.6, textW + fontSize, fontSize * 1.6);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(text, width - textW - fontSize / 2, height - fontSize * 0.45);
+};
+
+// Exports a north-up image of the bounds from an ArcGIS ImageServer, in 2048px chunks so any server limit is respected.
+const fetchArcgisExportImage = async (
+  serviceUrl: string,
+  bounds: GeoBounds,
+  widthPx: number,
+  heightPx: number,
+  attribution: string
+) => {
+  const out = document.createElement("canvas");
+  out.width = widthPx;
+  out.height = heightPx;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas unavailable");
+  const chunk = 2048;
+  const lonPerPx = (bounds.east - bounds.west) / widthPx;
+  const latPerPx = (bounds.north - bounds.south) / heightPx;
+  const jobs: Promise<void>[] = [];
+  for (let py = 0; py < heightPx; py += chunk) {
+    for (let px = 0; px < widthPx; px += chunk) {
+      const w = Math.min(chunk, widthPx - px);
+      const h = Math.min(chunk, heightPx - py);
+      const west = bounds.west + px * lonPerPx;
+      const east = west + w * lonPerPx;
+      const north = bounds.north - py * latPerPx;
+      const south = north - h * latPerPx;
+      const params = new URLSearchParams({
+        bbox: `${west},${south},${east},${north}`,
+        bboxSR: "4326",
+        imageSR: "4326",
+        size: `${w},${h}`,
+        format: "jpg",
+        interpolation: "RSP_BilinearInterpolation",
+        f: "image"
+      });
+      jobs.push((async () => {
+        const res = await fetch(`${serviceUrl}/exportImage?${params.toString()}`);
+        if (!res.ok) throw new Error(`Imagery service ${res.status}`);
+        const blob = await res.blob();
+        if (!blob.type.startsWith("image/")) throw new Error("Imagery service returned no image");
+        const img = await loadBlobImage(blob);
+        ctx.drawImage(img, px, py, w, h);
+      })());
+    }
+  }
+  await Promise.all(jobs);
+  // Outside the program's coverage the service returns blank (black/white) pixels.
+  const sample = ctx.getImageData(0, 0, widthPx, heightPx).data;
+  let blank = 0;
+  let total = 0;
+  const step = Math.max(4, Math.floor(sample.length / 4 / 5000)) * 4;
+  for (let i = 0; i < sample.length; i += step) {
+    const r = sample[i], g = sample[i + 1], b = sample[i + 2];
+    if ((r < 4 && g < 4 && b < 4) || (r > 251 && g > 251 && b > 251)) blank++;
+    total++;
+  }
+  if (blank / Math.max(total, 1) > 0.3) throw new Error("Imagery service has no coverage here");
+  drawAttribution(ctx, widthPx, heightPx, attribution);
+  return out.toDataURL("image/jpeg", 0.92);
+};
+
+const MAP_IMAGERY_MAX_TILES = 196;
+// ~4K image: sharp in 2D and within every GPU's texture limit for 3D.
+const MAP_IMAGERY_TARGET_PX = 4096;
 
 // Downloads a north-up map image exactly covering widthFt x heightFt centered on the location.
-const fetchMapImagery = async (location: SiteLocation, widthFt: number, heightFt: number, source: MapImagerySource) => {
+const fetchMapImagery = async (
+  location: SiteLocation,
+  widthFt: number,
+  heightFt: number,
+  source: MapImagerySource
+): Promise<{ url: string; partial: boolean; sourceLabel: string }> => {
   const config = MAP_IMAGERY_SOURCES[source];
   const bounds = getGeoBounds(location, widthFt, heightFt);
+  const stateOrtho = source === "satellite" ? findStateOrtho(location.lat, location.lon) : undefined;
+  if (stateOrtho) {
+    const scale = Math.min(1, MAP_IMAGERY_TARGET_PX / (Math.max(widthFt, heightFt) / stateOrtho.feetPerPixel));
+    const widthPx = Math.max(1, Math.round((widthFt / stateOrtho.feetPerPixel) * scale));
+    const heightPx = Math.max(1, Math.round((heightFt / stateOrtho.feetPerPixel) * scale));
+    for (const service of stateOrtho.services) {
+      try {
+        const url = await fetchArcgisExportImage(service, bounds, widthPx, heightPx, stateOrtho.attribution);
+        return { url, partial: false, sourceLabel: stateOrtho.label };
+      } catch (err) {
+        console.info(`${stateOrtho.label} unavailable from ${service}`, err);
+      }
+    }
+  }
   // Pick the zoom whose resolution gives roughly MAP_IMAGERY_TARGET_PX across the area.
   const metersPerPx = widthFt / FEET_PER_METER / MAP_IMAGERY_TARGET_PX;
   const cosLat = Math.cos((location.lat * Math.PI) / 180);
   const idealZoom = Math.ceil(Math.log2((156543.03392 * cosLat) / Math.max(metersPerPx, 0.01)));
-  const mosaic = await loadTileMosaic(bounds, clamp(idealZoom, 1, config.maxZoom), MAP_IMAGERY_MAX_TILES, config.url);
+  let zoom = clamp(idealZoom, 1, config.maxZoom);
+  // Use the sharpest imagery level that actually exists here (beyond z19 coverage is regional).
+  if (config.tilemap) {
+    while (zoom > 19) {
+      const tx = Math.floor(lonToPixel(location.lon, zoom) / ELEVATION_TILE_SIZE);
+      const ty = Math.floor(latToPixel(location.lat, zoom) / ELEVATION_TILE_SIZE);
+      try {
+        const res = await fetch(config.tilemap(zoom, tx, ty));
+        const json = res.ok ? await res.json() : null;
+        if (json && !json.adjusted && Array.isArray(json.data) && json.data[0] === 1) break;
+      } catch {
+        // fall through to a lower zoom
+      }
+      zoom -= 1;
+    }
+  }
+  const mosaic = await loadTileMosaic(bounds, zoom, MAP_IMAGERY_MAX_TILES, config.url);
   if (!mosaic.loadedAny) {
     throw new Error(`Couldn't download ${config.label.toLowerCase()} imagery. Check your internet connection and try again.`);
   }
@@ -442,7 +706,7 @@ const fetchMapImagery = async (location: SiteLocation, widthFt: number, heightFt
   const se = mosaic.toMosaic(bounds.south, bounds.east);
   const cropW = Math.max(1, se.x - nw.x);
   const cropH = Math.max(1, se.y - nw.y);
-  const outScale = Math.min(1.5, MAP_IMAGERY_TARGET_PX / cropW);
+  const outScale = Math.min(1, MAP_IMAGERY_TARGET_PX / Math.max(cropW, cropH));
   const out = document.createElement("canvas");
   out.width = Math.max(1, Math.round(cropW * outScale));
   out.height = Math.max(1, Math.round(cropH * outScale));
@@ -451,14 +715,115 @@ const fetchMapImagery = async (location: SiteLocation, widthFt: number, heightFt
   outCtx.imageSmoothingQuality = "high";
   outCtx.drawImage(mosaic.canvas, nw.x, nw.y, cropW, cropH, 0, 0, out.width, out.height);
   // Attribution required by the tile providers.
-  const fontSize = Math.max(12, Math.round(out.width / 120));
-  outCtx.font = `${fontSize}px sans-serif`;
-  const textW = outCtx.measureText(config.attribution).width;
-  outCtx.fillStyle = "rgba(0,0,0,0.5)";
-  outCtx.fillRect(out.width - textW - fontSize, out.height - fontSize * 1.6, textW + fontSize, fontSize * 1.6);
-  outCtx.fillStyle = "#ffffff";
-  outCtx.fillText(config.attribution, out.width - textW - fontSize / 2, out.height - fontSize * 0.45);
-  return { url: out.toDataURL("image/jpeg", 0.88), partial: !mosaic.loadedAll };
+  drawAttribution(outCtx, out.width, out.height, config.attribution);
+  const metersPerPixel = (156543.03392 * cosLat) / Math.pow(2, mosaic.z);
+  return {
+    url: out.toDataURL("image/jpeg", 0.92),
+    partial: !mosaic.loadedAll,
+    sourceLabel: `${config.label === "Satellite" ? "Esri satellite" : "OpenStreetMap"} (~${Math.round(metersPerPixel * 100)} cm/pixel)`
+  };
+};
+
+// A real-world rectangle picked on the satellite map.
+type SiteSelection = { center: SiteLocation; widthFt: number; heightFt: number };
+
+const selectionFromBounds = (b: GeoBounds, label: string): SiteSelection => {
+  const lat = (b.north + b.south) / 2;
+  const lon = (b.east + b.west) / 2;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  return {
+    center: { lat, lon, label },
+    widthFt: Math.abs(b.east - b.west) * METERS_PER_DEG_LAT * cosLat * FEET_PER_METER,
+    heightFt: Math.abs(b.north - b.south) * METERS_PER_DEG_LAT * FEET_PER_METER
+  };
+};
+
+const SITE_MAX_WIDTH_FT = 5000;
+const SITE_MIN_WIDTH_FT = 40;
+
+// Satellite + labels for browsing in the site picker (the imported image itself has no labels).
+const PICKER_LAYERS: Record<MapImagerySource, { url: string; overlays: string[]; maxNativeZoom: number }> = {
+  satellite: {
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    overlays: [
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+    ],
+    maxNativeZoom: 19
+  },
+  streets: {
+    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    overlays: [],
+    maxNativeZoom: 19
+  }
+};
+
+type OsmBuilding = { points: { lat: number; lon: number }[]; heightFt: number; label: string };
+
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter"
+];
+
+const parseOsmLength = (value?: string) => {
+  if (!value) return null;
+  const num = parseFloat(value.replace(",", "."));
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return /ft|'|feet/i.test(value) ? num : num * FEET_PER_METER;
+};
+
+const estimateBuildingHeightFt = (tags: Record<string, string>) => {
+  const explicit = parseOsmLength(tags.height) ?? parseOsmLength(tags["building:height"]);
+  if (explicit) return Math.round(explicit);
+  const levels = parseFloat(tags["building:levels"] ?? "");
+  if (Number.isFinite(levels) && levels > 0) return Math.round(levels * 10 + 4);
+  switch (tags.building) {
+    case "garage": case "garages": case "shed": case "carport": case "hut": case "roof":
+      return 10;
+    case "apartments": case "hotel": case "office":
+      return 36;
+    case "commercial": case "retail": case "industrial": case "warehouse": case "school": case "church":
+      return 24;
+    default:
+      return 18;
+  }
+};
+
+// Building footprints from OpenStreetMap (free, no key). Coverage varies by area.
+const fetchOsmBuildings = async (bounds: GeoBounds): Promise<OsmBuilding[]> => {
+  const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
+  const query = `[out:json][timeout:25];(way["building"](${bbox});relation["building"]["type"="multipolygon"](${bbox}););out geom;`;
+  let lastError: unknown = null;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `data=${encodeURIComponent(query)}`
+      });
+      if (!res.ok) throw new Error(`Overpass ${res.status}`);
+      const json = await res.json();
+      const buildings: OsmBuilding[] = [];
+      (json.elements ?? []).forEach((el: any) => {
+        const tags: Record<string, string> = el.tags ?? {};
+        let geometry: { lat: number; lon: number }[] | undefined;
+        if (el.type === "way") geometry = el.geometry;
+        else if (el.type === "relation") geometry = el.members?.find((m: any) => m.role === "outer" && m.geometry)?.geometry;
+        if (!geometry || geometry.length < 4) return;
+        const points = geometry.slice();
+        const first = points[0];
+        const last = points[points.length - 1];
+        if (first.lat === last.lat && first.lon === last.lon) points.pop();
+        if (points.length < 3) return;
+        const label = tags.name || [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" ") || "";
+        buildings.push({ points, heightFt: estimateBuildingHeightFt(tags), label });
+      });
+      return buildings;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Building lookup failed.");
 };
 
 const getTerrainStats = (heights: Record<string, number>) => {
@@ -1196,6 +1561,161 @@ const getCameraAspectValue = (camera?: CameraItem | null) => {
   return 16 / 9;
 };
 
+// Interactive satellite map used to pick the site: pan/zoom, then drag to draw the import rectangle.
+function SitePickerMap({
+  imagery,
+  view,
+  selection,
+  drawing,
+  onDrawingChange,
+  onSelect
+}: {
+  imagery: MapImagerySource;
+  view: { lat: number; lon: number; zoom: number; key: number };
+  selection: GeoBounds | null;
+  drawing: boolean;
+  onDrawingChange: (drawing: boolean) => void;
+  onSelect: (bounds: GeoBounds) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layersRef = useRef<L.Layer[]>([]);
+  const rectRef = useRef<L.Rectangle | null>(null);
+  const onSelectRef = useRef(onSelect);
+  const onDrawingChangeRef = useRef(onDrawingChange);
+  onSelectRef.current = onSelect;
+  onDrawingChangeRef.current = onDrawingChange;
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const map = L.map(containerRef.current, { zoomControl: true, maxZoom: 21, attributionControl: true })
+      .setView([view.lat, view.lon], view.zoom);
+    mapRef.current = map;
+    // The dialog animates in; make sure Leaflet measures the final size.
+    const resize = window.setTimeout(() => map.invalidateSize(), 60);
+    return () => {
+      window.clearTimeout(resize);
+      map.remove();
+      mapRef.current = null;
+      rectRef.current = null;
+      layersRef.current = [];
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    mapRef.current?.setView([view.lat, view.lon], view.zoom);
+  }, [view.key]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    layersRef.current.forEach(layer => map.removeLayer(layer));
+    const config = PICKER_LAYERS[imagery];
+    const attribution = MAP_IMAGERY_SOURCES[imagery].attribution;
+    const base = L.tileLayer(config.url, { maxZoom: 21, maxNativeZoom: config.maxNativeZoom, attribution });
+    // Statewide 6-inch orthoimagery drawn over Esri inside its region (ImageServer exportImage per web-mercator tile).
+    const stateLayers = imagery === "satellite"
+      ? STATE_ORTHO_SOURCES.map(src => {
+        const OrthoLayer = L.TileLayer.extend({
+          getTileUrl(this: L.TileLayer, coords: L.Coords) {
+            const size = 256;
+            const nw = L.CRS.EPSG3857.project(map.unproject(L.point(coords.x * size, coords.y * size), coords.z));
+            const se = L.CRS.EPSG3857.project(map.unproject(L.point((coords.x + 1) * size, (coords.y + 1) * size), coords.z));
+            return `${src.services[0]}/exportImage?bbox=${nw.x},${se.y},${se.x},${nw.y}&bboxSR=3857&imageSR=3857&size=${size},${size}&format=png&transparent=true&f=image`;
+          }
+        });
+        return new (OrthoLayer as any)("", {
+          minZoom: 14,
+          maxZoom: 21,
+          maxNativeZoom: 20,
+          bounds: L.latLngBounds([src.region.south, src.region.west], [src.region.north, src.region.east]),
+          attribution: src.attribution
+        }) as L.TileLayer;
+      })
+      : [];
+    const overlays = config.overlays.map(url => L.tileLayer(url, { maxZoom: 21, maxNativeZoom: config.maxNativeZoom }));
+    layersRef.current = [base, ...stateLayers, ...overlays];
+    layersRef.current.forEach(layer => layer.addTo(map));
+  }, [imagery]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!selection) {
+      rectRef.current?.remove();
+      rectRef.current = null;
+      return;
+    }
+    const latLngBounds = L.latLngBounds([selection.south, selection.west], [selection.north, selection.east]);
+    if (!rectRef.current) {
+      rectRef.current = L.rectangle(latLngBounds, {
+        color: "#10b981",
+        weight: 3,
+        fillColor: "#10b981",
+        fillOpacity: 0.12,
+        dashArray: "8 6",
+        interactive: false
+      }).addTo(map);
+    } else {
+      rectRef.current.setBounds(latLngBounds);
+    }
+    const dims = selectionFromBounds(selection, "");
+    rectRef.current.unbindTooltip();
+    rectRef.current.bindTooltip(`${Math.round(dims.widthFt)} × ${Math.round(dims.heightFt)} ft`, {
+      permanent: true,
+      direction: "center",
+      className: "site-picker-tooltip"
+    }).openTooltip();
+  }, [selection]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !drawing) return;
+    const container = map.getContainer();
+    map.dragging.disable();
+    map.boxZoom.disable();
+    container.style.cursor = "crosshair";
+    let start: L.LatLng | null = null;
+    let preview: L.Rectangle | null = null;
+
+    const onDown = (e: L.LeafletMouseEvent) => {
+      start = e.latlng;
+      preview = L.rectangle(L.latLngBounds(start, start), { color: "#f59e0b", weight: 2, fillOpacity: 0.1, interactive: false }).addTo(map);
+    };
+    const onMove = (e: L.LeafletMouseEvent) => {
+      if (start && preview) preview.setBounds(L.latLngBounds(start, e.latlng));
+    };
+    const onUp = (e: L.LeafletMouseEvent) => {
+      if (!start) return;
+      const b = L.latLngBounds(start, e.latlng);
+      preview?.remove();
+      preview = null;
+      start = null;
+      const bounds = { north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() };
+      const dims = selectionFromBounds(bounds, "");
+      if (dims.widthFt >= SITE_MIN_WIDTH_FT && dims.heightFt >= SITE_MIN_WIDTH_FT) {
+        onSelectRef.current(bounds);
+        onDrawingChangeRef.current(false);
+      }
+    };
+    map.on("mousedown", onDown);
+    map.on("mousemove", onMove);
+    map.on("mouseup", onUp);
+    return () => {
+      map.off("mousedown", onDown);
+      map.off("mousemove", onMove);
+      map.off("mouseup", onUp);
+      preview?.remove();
+      map.dragging.enable();
+      map.boxZoom.enable();
+      container.style.cursor = "";
+    };
+  }, [drawing]);
+
+  return <div ref={containerRef} className="absolute inset-0 bg-zinc-800" />;
+}
+
 export default function SecurityPlanner() {
   // --- State ---
   const [items, setItems] = useState<CanvasItem[]>([]);
@@ -1224,7 +1744,11 @@ export default function SecurityPlanner() {
   const [siteLocation, setSiteLocation] = useState<SiteLocation | null>(null);
   const [showElevationDialog, setShowElevationDialog] = useState(false);
   const [elevationQuery, setElevationQuery] = useState("");
-  const [elevationAreaWidth, setElevationAreaWidth] = useState(0);
+  const [siteBounds, setSiteBounds] = useState<GeoBounds | null>(null);
+  const [pickerView, setPickerView] = useState({ lat: 39.5, lon: -98.35, zoom: 4, key: 0 });
+  const [pickerDrawing, setPickerDrawing] = useState(false);
+  const [importBuildings, setImportBuildings] = useState(true);
+  const [planGeoRef, setPlanGeoRef] = useState<PlanGeoRef | null>(null);
   const [elevationExaggeration, setElevationExaggeration] = useState(1);
   const [elevationStatus, setElevationStatus] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
   const [elevationOverlay, setElevationOverlay] = useState<ElevationOverlayMode>("contours");
@@ -1865,47 +2389,136 @@ export default function SecurityPlanner() {
   };
 
   const openElevationDialog = () => {
-    const area = getElevationArea();
-    // Without a base map, default to a typical property-sized area.
-    setElevationAreaWidth(backgroundImg ? Math.round(area.width) : 400);
-    setElevationImagery(backgroundImg ? "keep" : "satellite");
+    if (!backgroundImg && elevationImagery === "keep") setElevationImagery("satellite");
     if (siteLocation && !elevationQuery) setElevationQuery(siteLocation.label);
+    if (siteBounds) {
+      const c = selectionFromBounds(siteBounds, "");
+      setPickerView(v => ({ lat: c.center.lat, lon: c.center.lon, zoom: Math.max(v.zoom, 17), key: v.key + 1 }));
+    }
+    setPickerDrawing(false);
     setElevationStatus({ state: "idle", message: "" });
     setShowElevationDialog(true);
   };
 
-  // One click: find the address, optionally download a north-up map image, then download and apply elevation.
-  const importSite = async () => {
-    const imagery = elevationImagery;
-    const query = elevationQuery;
-    const exaggeration = elevationExaggeration;
-    setElevationStatus({ state: "loading", message: "Finding location…" });
-    try {
-      const location =
-        siteLocation && query.trim() === siteLocation.label ? siteLocation : await resolveSiteLocation(query);
-      setSiteLocation(location);
-      setElevationQuery(location.label);
+  // A screenshot uploaded from inside the Import Site dialog should be kept, not replaced.
+  useEffect(() => {
+    if (showElevationDialog && backgroundImg && (elevationStatus.state === "idle" || elevationStatus.state === "error")) {
+      setElevationImagery("keep");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backgroundImg]);
 
+  // Default selection around a searched point: a typical property-sized rectangle.
+  const selectAroundPoint = (lat: number, lon: number, label: string, widthFt = 400, heightFt = 280) => {
+    const bounds = getGeoBounds({ lat, lon, label }, widthFt, heightFt);
+    setSiteBounds(bounds);
+    setSiteLocation({ lat, lon, label });
+    setPickerView(v => ({ lat, lon, zoom: 18, key: v.key + 1 }));
+  };
+
+  const searchSiteLocation = async () => {
+    setElevationStatus({ state: "loading", message: "Searching…" });
+    try {
+      const location = await resolveSiteLocation(elevationQuery);
+      selectAroundPoint(location.lat, location.lon, location.label);
+      setElevationStatus({ state: "idle", message: "" });
+    } catch (err) {
+      setElevationStatus({ state: "error", message: err instanceof Error ? err.message : "Search failed." });
+    }
+  };
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      setElevationStatus({ state: "error", message: "Your browser can't share its location." });
+      return;
+    }
+    setElevationStatus({ state: "loading", message: "Getting your location…" });
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        selectAroundPoint(pos.coords.latitude, pos.coords.longitude, `${pos.coords.latitude.toFixed(5)}, ${pos.coords.longitude.toFixed(5)}`);
+        setElevationStatus({ state: "idle", message: "" });
+      },
+      () => setElevationStatus({ state: "error", message: "Location permission was denied. Search for an address instead." }),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  // Converts OSM footprints into plan buildings inside the given plan rectangle.
+  const buildingsFromOsm = (
+    osm: OsmBuilding[],
+    bounds: GeoBounds,
+    area: { x: number; y: number; width: number; height: number },
+    unitsPerFoot: number
+  ): BuildingItem[] => {
+    const toPlan = (p: { lat: number; lon: number }) => ({
+      x: area.x + ((p.lon - bounds.west) / (bounds.east - bounds.west)) * area.width,
+      y: area.y + ((bounds.north - p.lat) / (bounds.north - bounds.south)) * area.height
+    });
+    const result: BuildingItem[] = [];
+    osm.forEach(b => {
+      const world = b.points.map(toPlan);
+      const box = getPointsBounds(world);
+      const cx = box.minX + box.width / 2;
+      const cy = box.minY + box.height / 2;
+      // Keep buildings whose center is on the map; skip slivers.
+      if (cx < area.x || cy < area.y || cx > area.x + area.width || cy > area.y + area.height) return;
+      if (box.width * box.height < 30 * unitsPerFoot * unitsPerFoot) return;
+      result.push({
+        id: generateId(),
+        type: "building",
+        importSource: "osm",
+        x: cx,
+        y: cy,
+        rotation: 0,
+        width: box.width,
+        height: box.height,
+        wallHeight: Math.max(8, Math.round(b.heightFt * unitsPerFoot)),
+        label: b.label,
+        color: COLORS.building[0],
+        points: world.map(p => ({ x: p.x - cx, y: p.y - cy }))
+      });
+    });
+    return result.slice(0, 600);
+  };
+
+  // One click: download imagery for the selected rectangle, high-detail elevation, and 3D buildings.
+  const importSite = async () => {
+    if (!siteBounds) {
+      setElevationStatus({ state: "error", message: "Drag a rectangle on the map to choose your site first." });
+      return;
+    }
+    const imagery = elevationImagery;
+    const exaggeration = elevationExaggeration;
+    const selection = selectionFromBounds(siteBounds, siteLocation?.label || elevationQuery || "Selected site");
+    if (selection.widthFt > SITE_MAX_WIDTH_FT || selection.heightFt > SITE_MAX_WIDTH_FT) {
+      setElevationStatus({ state: "error", message: `That area is too large. Keep it under ${SITE_MAX_WIDTH_FT.toLocaleString()} ft on each side.` });
+      return;
+    }
+    const location = selection.center;
+    setSiteLocation(location);
+    try {
       let area = getElevationArea();
       let canvas = canvasSizeRef.current;
-      let realWidthFt = elevationAreaWidth > 0 ? elevationAreaWidth : area.width;
+      let realWidthFt = selection.widthFt;
+      let realHeightFt = area.height * (selection.widthFt / Math.max(area.width, 1));
       let partialImagery = false;
+      let imagerySource = "";
 
+      // Fine terrain grid (~160 cells across) for detailed elevation.
+      const nextGrid = clamp(Math.round(selection.widthFt / 160), 2, 20);
       if (imagery !== "keep") {
-        // New map: the canvas becomes the area, drawn at 1 unit = 1 ft, so the map and terrain line up exactly.
-        const aspect = canvas.height / Math.max(canvas.width, 1);
-        const requestedWidth = clamp(Math.round(realWidthFt), 50, 5000);
-        // Keep the grid sensible for the map size (terrain resolution follows the grid) and
-        // make the canvas a whole number of grid cells so terrain vertices land exactly on the grid.
-        const nextGrid = clamp(Math.round(requestedWidth / 60 / 5) * 5, 5, 40);
-        const widthFt = Math.max(1, Math.round(requestedWidth / nextGrid)) * nextGrid;
-        const heightFt = Math.max(1, Math.round((requestedWidth * aspect) / nextGrid)) * nextGrid;
-        setElevationStatus({ state: "loading", message: `Downloading ${MAP_IMAGERY_SOURCES[imagery].label.toLowerCase()} imagery…` });
+        // The canvas becomes the selected area at 1 unit = 1 ft, a whole number of grid cells,
+        // so imagery, terrain and buildings line up exactly.
+        const widthFt = Math.max(1, Math.round(selection.widthFt / nextGrid)) * nextGrid;
+        const heightFt = Math.max(1, Math.round(selection.heightFt / nextGrid)) * nextGrid;
+        setElevationStatus({ state: "loading", message: `Downloading high-resolution ${MAP_IMAGERY_SOURCES[imagery].label.toLowerCase()} imagery…` });
         const map = await fetchMapImagery(location, widthFt, heightFt, imagery);
         partialImagery = map.partial;
+        imagerySource = map.sourceLabel;
         canvas = { width: widthFt, height: heightFt };
         area = { x: 0, y: 0, width: widthFt, height: heightFt };
         realWidthFt = widthFt;
+        realHeightFt = heightFt;
         const nextBg = { x: 0, y: 0, width: widthFt, height: heightFt, opacity: 1 };
         setCanvasSize(canvas);
         setBackgroundImg(map.url);
@@ -1915,21 +2528,31 @@ export default function SecurityPlanner() {
         bgSettingsRef.current = nextBg;
         setPanOffset({ x: 0, y: 0 });
         setZoom(1);
-        setGridSize(nextGrid);
-        gridSizeRef.current = nextGrid;
+        setShowGrid(false);
       }
+      setGridSize(nextGrid);
+      gridSizeRef.current = nextGrid;
 
-      setElevationStatus({ state: "loading", message: "Downloading elevation…" });
       const unitsPerFoot = area.width / realWidthFt;
-      const realHeightFt = area.height / unitsPerFoot;
-      const grid = gridSizeRef.current || gridSize;
-      const spacing = Math.max(grid / 2, Math.max(area.width, area.height) / 400);
-      const samplesX = clamp(Math.round(area.width / spacing) + 1, 2, 512);
-      const samplesY = clamp(Math.round(area.height / spacing) + 1, 2, 512);
-      const result = await fetchElevationGrid(location, realWidthFt, realHeightFt, samplesX, samplesY);
+      const geoBounds = getGeoBounds(location, realWidthFt, realHeightFt);
+      setPlanGeoRef({ bounds: geoBounds, area, unitsPerFoot });
+      // Buildings download alongside the elevation; a failure there doesn't stop the import.
+      const buildingsJob = importBuildings
+        ? fetchOsmBuildings(geoBounds).catch(err => {
+          console.warn("Building import failed", err);
+          return null;
+        })
+        : Promise.resolve([] as OsmBuilding[]);
+
+      setElevationStatus({ state: "loading", message: "Downloading high-detail elevation…" });
+      const grid = nextGrid;
+      const spacing = Math.max(grid / 2, Math.max(area.width, area.height) / 600);
+      const samplesX = clamp(Math.round(area.width / spacing) + 1, 2, 800);
+      const samplesY = clamp(Math.round(area.height / spacing) + 1, 2, 800);
+      const result = await fetchBestElevationGrid(location, realWidthFt, realHeightFt, samplesX, samplesY);
 
       const dem: DemData = {
-        name: `Auto elevation · ${location.label}`,
+        name: `${result.source} · ${location.label}`,
         width: samplesX,
         height: samplesY,
         values: result.values,
@@ -1960,18 +2583,37 @@ export default function SecurityPlanner() {
       demScaleRef.current = scale;
       demOffsetRef.current = 0;
       demNormalizeRef.current = true;
-      // When the map changed, the settings history debounce records map + terrain together.
-      applyDemToTerrain(dem, { preview, transform, scale, offset: 0, normalize: true, canvas, save: imagery === "keep" });
+      // The settings history debounce records map + terrain together.
+      applyDemToTerrain(dem, { preview, transform, scale, offset: 0, normalize: true, canvas, save: false });
+
+      setElevationStatus({ state: "loading", message: "Building 3D buildings…" });
+      const osm = await buildingsJob;
+      let buildingText = "";
+      if (importBuildings) {
+        if (osm === null) {
+          buildingText = " Couldn't reach OpenStreetMap for buildings. Draw them over the satellite image instead.";
+        } else {
+          const newBuildings = buildingsFromOsm(osm, geoBounds, area, unitsPerFoot);
+          setItems(prev => [
+            ...prev.filter(item => !(item.type === "building" && (item as BuildingItem).importSource === "osm")),
+            ...newBuildings
+          ]);
+          buildingText = newBuildings.length > 0
+            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"} from OpenStreetMap — adjust heights in the right panel.`
+            : " No building outlines are mapped here yet. Draw them over the satellite image with the Building tool.";
+        }
+      }
 
       const reliefFt = (result.max - result.min) * FEET_PER_METER;
       const reliefText = reliefFt < 1
-        ? "This site is nearly flat (under 1 ft of change)."
+        ? "Nearly flat (under 1 ft of change)."
         : `${Math.round(reliefFt)} ft of elevation change${exaggeration !== 1 ? ` (shown ${exaggeration}× taller)` : ""}.`;
       setElevationStatus({
         state: "done",
-        message: `${imagery === "keep" ? "Elevation applied." : "Site imported."} ${reliefText}${partialImagery ? " Some map tiles were unavailable." : ""}`
+        message: `Site imported. ${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${buildingText}${partialImagery ? " Some map tiles were unavailable." : ""}`
       });
       if (elevationOverlay === "off") setElevationOverlay("contours");
+      window.setTimeout(() => saveHistory(undefined, terrainHeightsRef.current), 400);
     } catch (err) {
       console.error("Failed to import site", err);
       setElevationStatus({ state: "error", message: err instanceof Error ? err.message : "Couldn't import the site." });
@@ -2214,6 +2856,9 @@ export default function SecurityPlanner() {
         if (data.terrainHeights) setTerrainHeights(data.terrainHeights);
         if (typeof data.gridSize === "number") setGridSize(data.gridSize);
         if (data.siteLocation && typeof data.siteLocation.lat === "number") setSiteLocation(data.siteLocation);
+        if (data.siteBounds && typeof data.siteBounds.north === "number") setSiteBounds(data.siteBounds);
+        if (data.planGeoRef && data.planGeoRef.bounds) setPlanGeoRef(data.planGeoRef);
+        if (typeof data.showGrid === "boolean") setShowGrid(data.showGrid);
       } catch (e) {
         console.error("Failed to load saved state", e);
       }
@@ -2236,7 +2881,10 @@ export default function SecurityPlanner() {
           nvrLayout,
           terrainHeights,
           gridSize,
-          siteLocation
+          showGrid,
+          siteLocation,
+          siteBounds,
+          planGeoRef
         };
         localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
       } catch (err: any) {
@@ -2252,7 +2900,10 @@ export default function SecurityPlanner() {
               projectName,
               terrainHeights,
               gridSize,
-              siteLocation
+              showGrid,
+              siteLocation,
+              siteBounds,
+              planGeoRef
               // omit backgroundImg
             };
             localStorage.setItem('securityCameraPlannerData', JSON.stringify(partialData));
@@ -2266,7 +2917,7 @@ export default function SecurityPlanner() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, siteLocation]);
+  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, siteLocation, siteBounds, planGeoRef]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -2787,6 +3438,8 @@ export default function SecurityPlanner() {
     setMapMoveMode(false);
     setTerrainHeights({});
     setSiteLocation(null);
+    setSiteBounds(null);
+    setPlanGeoRef(null);
     setElevationQuery("");
     setElevationStatus({ state: "idle", message: "" });
     setCameraPlacementPreview(null);
@@ -3432,6 +4085,8 @@ export default function SecurityPlanner() {
     }
     setSiteLocation(projectData.siteLocation && typeof projectData.siteLocation.lat === "number" ? projectData.siteLocation : null);
     if (projectData.elevationOverlay) setElevationOverlay(projectData.elevationOverlay);
+    setSiteBounds(projectData.siteBounds && typeof projectData.siteBounds.north === "number" ? projectData.siteBounds : null);
+    setPlanGeoRef(projectData.planGeoRef && projectData.planGeoRef.bounds ? projectData.planGeoRef : null);
     if (projectData.demSettings) {
       const settings = projectData.demSettings;
       if (typeof settings.demScale === "number") setDemScale(settings.demScale);
@@ -3466,6 +4121,8 @@ export default function SecurityPlanner() {
     nvrLayout,
     buildingLabelDefaults,
     siteLocation,
+    siteBounds,
+    planGeoRef,
     elevationOverlay,
     demMeta: demData
       ? {
@@ -3623,13 +4280,53 @@ export default function SecurityPlanner() {
       const { fromArrayBuffer } = await import("geotiff");
       const tiff = await fromArrayBuffer(buffer);
       const image = await tiff.getImage();
-      const width = image.getWidth();
-      const height = image.getHeight();
+      let width = image.getWidth();
+      let height = image.getHeight();
       const noData =
         (image as any).getGDALNoData?.() ??
         (image as any).getNoDataValue?.() ??
         null;
-      const raster = await image.readRasters({ samples: [0], interleave: true });
+      // With a geo-referenced site, read only the part of the file covering the site (tiles can be huge).
+      let geo = planGeoRef ? getGeoTiffCorners(image) : null;
+      let readOptions: any = { samples: [0], interleave: true };
+      if (geo && planGeoRef) {
+        const fullW = width;
+        const fullH = height;
+        const [minX, minY, maxX, maxY] = geo.bbox;
+        const b = planGeoRef.bounds;
+        const siteCorners = [[b.west, b.north], [b.east, b.north], [b.east, b.south], [b.west, b.south]]
+          .map(([lon, lat]) => proj4("+proj=longlat +datum=WGS84 +no_defs", geo!.projDef, [lon, lat]));
+        const toPx = (x: number) => ((x - minX) / (maxX - minX)) * fullW;
+        const toPy = (y: number) => ((maxY - y) / (maxY - minY)) * fullH;
+        const pad = 2;
+        const x0 = clamp(Math.floor(Math.min(...siteCorners.map(c => toPx(c[0])))) - pad, 0, fullW);
+        const x1 = clamp(Math.ceil(Math.max(...siteCorners.map(c => toPx(c[0])))) + pad, 0, fullW);
+        const y0 = clamp(Math.floor(Math.min(...siteCorners.map(c => toPy(c[1])))) - pad, 0, fullH);
+        const y1 = clamp(Math.ceil(Math.max(...siteCorners.map(c => toPy(c[1])))) + pad, 0, fullH);
+        if (x1 - x0 < 2 || y1 - y0 < 2) {
+          alert("This elevation file doesn't cover your selected site. Download the tile that contains your property.");
+          return;
+        }
+        // Cap at ~800px per side; geotiff resamples on read.
+        const outScale = Math.min(1, 800 / Math.max(x1 - x0, y1 - y0));
+        width = Math.max(2, Math.round((x1 - x0) * outScale));
+        height = Math.max(2, Math.round((y1 - y0) * outScale));
+        readOptions = { ...readOptions, window: [x0, y0, x1, y1], width, height, resampleMethod: "bilinear" };
+        // Corners of the window that was read, for exact placement.
+        const wx0 = minX + (x0 / fullW) * (maxX - minX);
+        const wx1 = minX + (x1 / fullW) * (maxX - minX);
+        const wy0 = maxY - (y0 / fullH) * (maxY - minY);
+        const wy1 = maxY - (y1 / fullH) * (maxY - minY);
+        const toLatLon = (x: number, y: number) => {
+          const [lon, lat] = proj4(geo!.projDef, "+proj=longlat +datum=WGS84 +no_defs", [x, y]);
+          return { lat, lon };
+        };
+        geo = { ...geo, corners: [toLatLon(wx0, wy0), toLatLon(wx1, wy0), toLatLon(wx1, wy1), toLatLon(wx0, wy1)] };
+      } else if (width * height > 4096 * 4096) {
+        alert("This elevation file is very large. Pick your site in Import Site first so only the needed part is loaded.");
+        return;
+      }
+      const raster = await image.readRasters(readOptions);
       const values = Float32Array.from(raster as any);
 
       let min = Number.POSITIVE_INFINITY;
@@ -3659,6 +4356,38 @@ export default function SecurityPlanner() {
 
       setDemData(data);
       const preview = buildDemPreview(data);
+      // If the site is geo-referenced and the file carries coordinates, place it exactly — no manual aligning.
+      if (preview && planGeoRef && geo) {
+        const { bounds, area, unitsPerFoot } = planGeoRef;
+        const toPlan = (p: { lat: number; lon: number }) => ({
+          x: area.x + ((p.lon - bounds.west) / (bounds.east - bounds.west)) * area.width,
+          y: area.y + ((bounds.north - p.lat) / (bounds.north - bounds.south)) * area.height
+        });
+        const [nw, ne, se, sw] = geo.corners.map(toPlan);
+        const transform = {
+          x: (nw.x + ne.x + se.x + sw.x) / 4,
+          y: (nw.y + ne.y + se.y + sw.y) / 4,
+          scale: Math.hypot(ne.x - nw.x, ne.y - nw.y) / preview.width,
+          rotation: (Math.atan2(ne.y - nw.y, ne.x - nw.x) * 180) / Math.PI
+        };
+        const scale = (geo.elevationInFeet ? 1 : FEET_PER_METER) * unitsPerFoot * elevationExaggeration;
+        setDemPreview(preview);
+        setDemTransform(transform);
+        setDemScale(scale);
+        setDemOffset(0);
+        setDemNormalize(true);
+        setDemAutoApply(true);
+        setDemAlignMode(false);
+        demDataRef.current = data;
+        demPreviewRef.current = preview;
+        demTransformRef.current = transform;
+        demScaleRef.current = scale;
+        demOffsetRef.current = 0;
+        demNormalizeRef.current = true;
+        applyDemToTerrain(data, { preview, transform, scale, offset: 0, normalize: true });
+        if (elevationOverlay === "off") setElevationOverlay("contours");
+        return;
+      }
       if (preview) {
         setDemPreview(preview);
         const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
@@ -3666,11 +4395,17 @@ export default function SecurityPlanner() {
         const scale = Math.min(baseW / preview.width, baseH / preview.height);
         const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
         const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
-        setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
+        const transform = { x: centerX, y: centerY, scale, rotation: 0 };
+        setDemTransform(transform);
+        demPreviewRef.current = preview;
+        demTransformRef.current = transform;
+        applyDemToTerrain(data, { preview, transform });
       }
       setDemAlignMode(true);
       setDemAlignTool("move");
-      applyDemToTerrain(data);
+      alert(planGeoRef
+        ? "This file's coordinate system isn't recognized, so it was placed in the middle. Use DEM Align to line it up."
+        : "Tip: pick your site in Import Site first (draw the rectangle), and elevation files will snap into place automatically. For now, use DEM Align to line it up.");
     } catch (err) {
       console.error("Failed to load DEM", err);
       alert("Failed to read DEM file. Make sure it's a valid GeoTIFF DEM.");
@@ -3715,6 +4450,7 @@ export default function SecurityPlanner() {
   };
 
   const createTextSprite = (text: string, options?: { fontFamily?: string; fontSize?: number; fontWeight?: number; color?: string }) => {
+    if (!text?.trim()) return null;
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) return null;
@@ -4528,8 +5264,11 @@ export default function SecurityPlanner() {
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.wrapS = THREE.ClampToEdgeWrapping;
         texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.minFilter = THREE.LinearFilter;
+        // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
+        texture.generateMipmaps = true;
+        texture.minFilter = THREE.LinearMipmapLinearFilter;
         texture.magFilter = THREE.LinearFilter;
+        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
         mapPlaneMaterial.map = texture;
         mapPlaneMaterial.needsUpdate = true;
         renderer.render(scene, state.camera);
@@ -6779,186 +7518,256 @@ export default function SecurityPlanner() {
           </div>
         </div>
       )}
-      {showElevationDialog && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-          onMouseDown={(e) => { if (e.target === e.currentTarget && elevationStatus.state !== "loading") setShowElevationDialog(false); }}
-        >
-          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl ring-1 ring-white/10">
-            <div className="flex items-start justify-between px-5 pt-5">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center">
-                  <Mountain className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-base font-semibold text-slate-100">Import Site</h2>
-                  <p className="text-xs text-slate-400">Real map imagery + elevation from an address</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowElevationDialog(false)}
-                disabled={elevationStatus.state === "loading"}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/10 disabled:opacity-40"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form
-              className="px-5 pb-5 pt-4 space-y-4"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (elevationStatus.state !== "loading") importSite();
-              }}
-            >
-              <div className="space-y-1.5">
-                <label className="text-[11px] uppercase font-bold text-slate-400">Address or location</label>
-                <input
-                  autoFocus
-                  value={elevationQuery}
-                  onChange={(e) => setElevationQuery(e.target.value)}
-                  placeholder="123 Main St, Denver CO — or 39.7392, -104.9903"
-                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+      {showElevationDialog && (() => {
+        const dims = siteBounds ? selectionFromBounds(siteBounds, "") : null;
+        const loading = elevationStatus.state === "loading";
+        const tooLarge = !!dims && (dims.widthFt > SITE_MAX_WIDTH_FT || dims.heightFt > SITE_MAX_WIDTH_FT);
+        const step = !siteBounds ? (siteLocation ? 2 : 1) : 3;
+        const stepClass = (n: number) => `flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold shrink-0 ${step > n ? "bg-emerald-500 text-white" : step === n ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/50" : "bg-white/5 text-slate-500"}`;
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6"
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !loading) setShowElevationDialog(false); }}
+          >
+            <div className="w-full max-w-7xl h-full max-h-[900px] flex flex-col lg:flex-row rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl ring-1 ring-white/10 overflow-hidden">
+              {/* Map */}
+              <div className="relative flex-1 min-h-[320px]">
+                <SitePickerMap
+                  imagery={elevationImagery === "streets" ? "streets" : "satellite"}
+                  view={pickerView}
+                  selection={siteBounds}
+                  drawing={pickerDrawing}
+                  onDrawingChange={setPickerDrawing}
+                  onSelect={(bounds) => {
+                    setSiteBounds(bounds);
+                    const c = selectionFromBounds(bounds, "");
+                    setSiteLocation(prev => ({ lat: c.center.lat, lon: c.center.lon, label: prev?.label || `${c.center.lat.toFixed(5)}, ${c.center.lon.toFixed(5)}` }));
+                    if (elevationStatus.state !== "loading") setElevationStatus({ state: "idle", message: "" });
+                  }}
                 />
-                <p className="text-[10px] text-slate-500">You can also paste a Google Maps link. The location becomes the center of the map.</p>
-              </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] uppercase font-bold text-slate-400">Map</label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {([
-                    { id: "satellite", label: "Satellite" },
-                    { id: "streets", label: "Street Map" },
-                    { id: "keep", label: backgroundImg ? "Keep Mine" : "None" }
-                  ] as { id: MapImagerySource | "keep"; label: string }[]).map(opt => (
-                    <button
-                      type="button"
-                      key={opt.id}
-                      onClick={() => {
-                        setElevationImagery(opt.id);
-                        if (opt.id === "keep") {
-                          setElevationAreaWidth(Math.round(getElevationArea().width));
-                        }
-                      }}
-                      className={`py-2 rounded-lg text-xs font-semibold border transition-colors ${elevationImagery === opt.id
-                        ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
-                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-                        }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+                <form
+                  className="absolute top-3 left-14 right-3 z-[1000] flex gap-2"
+                  onSubmit={(e) => { e.preventDefault(); if (!loading && elevationQuery.trim()) searchSiteLocation(); }}
+                >
+                  <input
+                    autoFocus
+                    value={elevationQuery}
+                    onChange={(e) => setElevationQuery(e.target.value)}
+                    placeholder="Search an address, place, or paste coordinates / Google Maps link"
+                    className="flex-1 min-w-0 rounded-xl border border-white/10 bg-zinc-900/95 px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
+                  />
+                  <button type="submit" disabled={loading || !elevationQuery.trim()} className="px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-semibold text-white shadow-lg">
+                    Search
+                  </button>
+                  <button type="button" onClick={useMyLocation} title="Use my current location" className="px-3 rounded-xl border border-white/10 bg-zinc-900/95 hover:bg-zinc-800 text-slate-200 shadow-lg">
+                    <MapPin className="w-4 h-4" />
+                  </button>
+                </form>
+
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl">
+                  <button
+                    type="button"
+                    onClick={() => setPickerDrawing(false)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${!pickerDrawing ? "bg-white/10 text-white" : "text-slate-400 hover:text-white"}`}
+                  >
+                    <Hand className="w-4 h-4" /> Move map
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPickerDrawing(true)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${pickerDrawing ? "bg-emerald-600 text-white" : "text-slate-300 hover:text-white"}`}
+                  >
+                    <SquareDashed className="w-4 h-4" /> {siteBounds ? "Redraw area" : "Draw area"}
+                  </button>
                 </div>
-                {elevationImagery !== "keep" && backgroundImg && (
-                  <p className="text-[10px] text-amber-300/80">This replaces your current base map.</p>
+
+                {pickerDrawing && (
+                  <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1000] rounded-full bg-amber-500 px-4 py-1.5 text-xs font-semibold text-zinc-950 shadow-lg pointer-events-none">
+                    Click and drag over the map to select your site
+                  </div>
                 )}
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] uppercase font-bold text-slate-400 flex justify-between">
-                  <span>{elevationImagery === "keep" ? "Real width of your map" : "Area width"}</span>
-                  <span className="text-slate-500 normal-case font-medium">
-                    {elevationImagery === "keep"
-                      ? "measure it in Google Maps if unsure"
-                      : `${elevationAreaWidth} × ${Math.round(elevationAreaWidth * (canvasSize.height / Math.max(canvasSize.width, 1)))} ft`}
-                  </span>
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={50}
-                    max={5000}
-                    value={elevationAreaWidth || ""}
-                    onChange={(e) => setElevationAreaWidth(parseInt(e.target.value || "0", 10))}
-                    className="w-28 rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
-                  />
-                  <span className="text-xs text-slate-400">ft</span>
-                  {elevationImagery !== "keep" && (
-                    <div className="flex gap-1 ml-auto">
-                      {[200, 400, 800, 1500].map(w => (
+              {/* Side panel */}
+              <div className="w-full lg:w-80 shrink-0 border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col max-h-[45%] lg:max-h-none">
+                <div className="flex items-start justify-between px-5 pt-5 pb-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                      <Mountain className="w-5 h-5 text-emerald-400" /> Import Site
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">Satellite, elevation and 3D buildings in one click</p>
+                  </div>
+                  <button
+                    onClick={() => setShowElevationDialog(false)}
+                    disabled={loading}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/10 disabled:opacity-40"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto custom-scrollbar px-5 pb-5 space-y-5">
+                  <ol className="space-y-2.5 text-xs">
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(1)}>1</span>Find your property (search or zoom)</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(2)}>2</span>Drag a rectangle around it</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(3)}>3</span>Click Import</li>
+                  </ol>
+
+                  <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+                    <div className="text-[10px] uppercase font-bold text-slate-400">Selected area</div>
+                    {dims ? (
+                      <div className={`text-sm font-semibold ${tooLarge ? "text-red-300" : "text-emerald-200"}`}>
+                        {Math.round(dims.widthFt).toLocaleString()} × {Math.round(dims.heightFt).toLocaleString()} ft
+                        <span className="text-slate-400 font-normal"> · {Math.round(dims.widthFt / FEET_PER_METER)} × {Math.round(dims.heightFt / FEET_PER_METER)} m</span>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-slate-500">Nothing selected yet</div>
+                    )}
+                    {tooLarge && <div className="text-[10px] text-red-300 mt-1">Keep each side under {SITE_MAX_WIDTH_FT.toLocaleString()} ft for detailed results.</div>}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">Map image</label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {([
+                        { id: "satellite", label: "Satellite" },
+                        { id: "streets", label: "Street" },
+                        { id: "keep", label: "Keep mine" }
+                      ] as { id: MapImagerySource | "keep"; label: string }[]).map(opt => (
                         <button
                           type="button"
-                          key={w}
-                          onClick={() => setElevationAreaWidth(w)}
-                          className={`px-2 py-1 rounded text-[10px] font-semibold border ${elevationAreaWidth === w ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                          key={opt.id}
+                          disabled={opt.id === "keep" && !backgroundImg}
+                          onClick={() => setElevationImagery(opt.id)}
+                          className={`py-2 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${elevationImagery === opt.id
+                            ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
+                            : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                            }`}
                         >
-                          {w}
+                          {opt.label}
                         </button>
                       ))}
                     </div>
+                    <p className="text-[10px] text-slate-500">
+                      {elevationImagery === "keep"
+                        ? "Keeps your uploaded image. Draw the rectangle over exactly the area your image shows."
+                        : backgroundImg
+                          ? "Replaces your current base map with the sharpest imagery available here."
+                          : "Downloads the sharpest imagery available for the area."}
+                    </p>
+                  </div>
+
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <input type="checkbox" checked={importBuildings} onChange={e => setImportBuildings(e.target.checked)} className="mt-0.5 accent-emerald-500" />
+                    <span className="text-xs text-slate-300">
+                      Create 3D buildings
+                      <span className="block text-[10px] text-slate-500">Footprints and heights from OpenStreetMap where mapped. You can edit or draw more after.</span>
+                    </span>
+                  </label>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">Terrain height</label>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[1, 2, 3, 5].map(v => (
+                        <button
+                          type="button"
+                          key={v}
+                          onClick={() => setElevationExaggeration(v)}
+                          className={`py-1.5 rounded-lg text-xs font-semibold border ${elevationExaggeration === v
+                            ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
+                            : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                            }`}
+                        >
+                          {v === 1 ? "Real" : `${v}×`}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-500">Real is best for accurate camera views. Exaggerate to see gentle slopes.</p>
+                  </div>
+
+                  <details className="group rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
+                    <summary className="cursor-pointer text-xs font-semibold text-slate-200 list-none flex items-center justify-between">
+                      Prefer your own imagery or elevation files?
+                      <span className="text-slate-500 group-open:rotate-90 transition-transform">›</span>
+                    </summary>
+                    <div className="mt-3 space-y-3 text-[11px] text-slate-400 leading-relaxed">
+                      <div>
+                        <div className="font-semibold text-slate-200 mb-1">Imagery from a screenshot (e.g. Google Maps)</div>
+                        <ol className="list-decimal ml-4 space-y-0.5">
+                          <li>Open <a className="text-emerald-300 underline" href="https://www.google.com/maps/@39.78,-89.68,16z/data=!3m1!1e3" target="_blank" rel="noreferrer">Google Maps satellite</a> or the <a className="text-emerald-300 underline" href="https://www.nconemap.gov/" target="_blank" rel="noreferrer">NC OneMap imagery viewer</a>, north up, zoomed on your property.</li>
+                          <li>Screenshot just the map area and upload it:</li>
+                        </ol>
+                        <button type="button" onClick={() => fileInputRef.current?.click()} className="mt-1.5 w-full py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 font-semibold">
+                          Upload screenshot
+                        </button>
+                        <p className="mt-1.5">3. Choose <span className="text-slate-200">Keep mine</span>, then draw the rectangle here around the same area your screenshot shows. Elevation and buildings line up with it.</p>
+                      </div>
+                      <div className="pt-3 border-t border-white/10">
+                        <div className="font-semibold text-slate-200 mb-1">Elevation from a lidar file (most detailed)</div>
+                        <ol className="list-decimal ml-4 space-y-0.5">
+                          <li>Import your site here first (so the app knows where it is).</li>
+                          <li>Download a DEM GeoTIFF covering your property from <a className="text-emerald-300 underline" href="https://apps.nationalmap.gov/downloader/" target="_blank" rel="noreferrer">USGS National Map</a> (Elevation Products → 1 meter DEM) or <a className="text-emerald-300 underline" href="https://sdd.nc.gov/" target="_blank" rel="noreferrer">NC Spatial Data Download</a> (lidar DEM, NC State Plane).</li>
+                          <li>Upload it. It snaps into place automatically:</li>
+                        </ol>
+                        <button type="button" onClick={() => demInputRef.current?.click()} className="mt-1.5 w-full py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 font-semibold">
+                          Upload elevation GeoTIFF
+                        </button>
+                      </div>
+                    </div>
+                  </details>
+
+                  {elevationStatus.state !== "idle" && (
+                    <div className={`rounded-lg border px-3 py-2 text-xs flex items-start gap-2 ${elevationStatus.state === "error"
+                      ? "border-red-500/30 bg-red-500/10 text-red-200"
+                      : elevationStatus.state === "done"
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+                        : "border-white/10 bg-white/5 text-slate-300"
+                      }`}>
+                      {loading && <LoaderCircle className="w-4 h-4 animate-spin shrink-0" />}
+                      <span>{elevationStatus.message}</span>
+                    </div>
                   )}
                 </div>
-              </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] uppercase font-bold text-slate-400">Height exaggeration</label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {[1, 2, 3, 5].map(v => (
+                <div className="px-5 py-4 border-t border-white/10 space-y-2">
+                  {elevationStatus.state === "done" ? (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setShowElevationDialog(false); setViewMode("plan"); }}
+                        className="py-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-semibold text-slate-100"
+                      >
+                        Open in 2D
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setShowElevationDialog(false); setViewMode("iso3d"); }}
+                        className="py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white"
+                      >
+                        Open in 3D
+                      </button>
+                    </div>
+                  ) : (
                     <button
                       type="button"
-                      key={v}
-                      onClick={() => setElevationExaggeration(v)}
-                      className={`py-1.5 rounded-lg text-xs font-semibold border ${elevationExaggeration === v
-                        ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
-                        : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-                        }`}
+                      onClick={importSite}
+                      disabled={loading || !siteBounds || tooLarge}
+                      className="w-full py-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900/40 disabled:text-emerald-200/40 text-sm font-semibold text-white flex items-center justify-center gap-2"
                     >
-                      {v === 1 ? "Real (1×)" : `${v}×`}
+                      {loading && <LoaderCircle className="w-4 h-4 animate-spin" />}
+                      {siteBounds ? "Import Site" : "Select an area to import"}
                     </button>
-                  ))}
+                  )}
+                  <p className="text-[10px] leading-relaxed text-slate-500">
+                    Free public data, no account: imagery © Esri/Maxar or © OpenStreetMap; elevation from USGS 3DEP (US, high detail) or AWS Terrain Tiles; buildings © OpenStreetMap contributors. Maps are north-up.
+                  </p>
                 </div>
-                <p className="text-[10px] text-slate-500">Keep 1× for accurate camera views. Use more to make gentle slopes easier to see.</p>
               </div>
-
-              {elevationStatus.state !== "idle" && (
-                <div className={`rounded-lg border px-3 py-2 text-xs flex items-center gap-2 ${elevationStatus.state === "error"
-                  ? "border-red-500/30 bg-red-500/10 text-red-200"
-                  : elevationStatus.state === "done"
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
-                    : "border-white/10 bg-white/5 text-slate-300"
-                  }`}>
-                  {elevationStatus.state === "loading" && <LoaderCircle className="w-4 h-4 animate-spin shrink-0" />}
-                  <span>{elevationStatus.message}</span>
-                </div>
-              )}
-
-              <div className="flex items-center gap-2 pt-1">
-                {elevationStatus.state === "done" ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => { setShowElevationDialog(false); setViewMode("iso3d"); }}
-                      className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white"
-                    >
-                      View in 3D
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowElevationDialog(false)}
-                      className="px-4 py-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-semibold text-slate-200"
-                    >
-                      Done
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="submit"
-                    disabled={elevationStatus.state === "loading" || !elevationQuery.trim()}
-                    className="flex-1 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900/50 disabled:text-emerald-200/50 text-sm font-semibold text-white flex items-center justify-center gap-2"
-                  >
-                    {elevationStatus.state === "loading" && <LoaderCircle className="w-4 h-4 animate-spin" />}
-                    {elevationImagery === "keep" ? "Get Elevation" : "Import Site"}
-                  </button>
-                )}
-              </div>
-
-              <p className="text-[10px] leading-relaxed text-slate-500">
-                Free public data, no account needed: elevation from AWS Terrain Tiles (USGS 3DEP in the US, ~3–10 m detail), imagery from Esri World Imagery or OpenStreetMap, address search by OpenStreetMap Nominatim. Maps are north-up.
-              </p>
-            </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {showDemGuide && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -7494,7 +8303,7 @@ export default function SecurityPlanner() {
       {/* --- Top Header Actions --- */}
       <div className={`absolute top-4 left-24 right-4 ${rightPanelOffset} h-14 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center px-4 justify-between ring-1 ring-white/5 transition-all duration-300`}>
         <div className="flex items-center gap-4">
-          <h1 className="text-lg font-bold text-slate-200 tracking-tight flex items-center gap-2">
+          <h1 className="text-lg font-bold text-slate-200 tracking-tight flex items-center gap-2 whitespace-nowrap min-w-0 max-w-[16rem] truncate" title={projectName}>
             <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
               <Camera className="w-5 h-5" />
             </div>
@@ -7523,9 +8332,25 @@ export default function SecurityPlanner() {
           <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
           <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
 
-          <button onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
+          <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5" role="tablist" aria-label="View">
+            {([
+              { id: "plan", label: "2D" },
+              { id: "iso3d", label: "3D" }
+            ] as { id: ViewMode; label: string }[]).map(v => (
+              <button
+                key={v.id}
+                role="tab"
+                aria-selected={viewMode === v.id}
+                onClick={() => setViewMode(v.id)}
+                className={`px-3 py-1 rounded-md text-sm font-bold transition-all ${viewMode === v.id ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"}`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+          <button title="Monitor Wall" onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
             <LayoutGrid className="w-4 h-4" />
-            <span>Monitor Wall</span>
+            <span className="hidden min-[1800px]:inline whitespace-nowrap">Monitor Wall</span>
           </button>
           <button
             onClick={() => {
@@ -7545,18 +8370,18 @@ export default function SecurityPlanner() {
             <Mountain className="w-4 h-4" />
             <span className="whitespace-nowrap">Import Site</span>
           </button>
-          <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
+          <button title="Upload Base Map image" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <Upload className="w-4 h-4" />
-            <span>Base Map</span>
+            <span className="hidden min-[1800px]:inline whitespace-nowrap">Base Map</span>
           </button>
-          <button onClick={() => elementImageInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
+          <button title="Add image overlay" onClick={() => elementImageInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
             <ImageIcon className="w-4 h-4" />
-            <span>Overlay</span>
+            <span className="hidden min-[1800px]:inline whitespace-nowrap">Overlay</span>
           </button>
 
           <button onClick={addPlanToExportList} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all" title="Add Current View to Report">
             <Plus className="w-4 h-4" />
-            <span className="hidden sm:inline">Add to Report</span>
+            <span className="hidden min-[1800px]:inline whitespace-nowrap">Add to Report</span>
           </button>
           <button onClick={() => setShowExportPanel(true)} className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 transition-all">
             <Download className="w-4 h-4" />
@@ -7805,10 +8630,11 @@ export default function SecurityPlanner() {
                             <polygon
                               points={points.map(point => `${point.x},${point.y}`).join(" ")}
                               fill={building.color}
-                              stroke={isSelected ? "#059669" : "#334155"}
-                              strokeWidth={isSelected ? 3 : 1}
+                              fillOpacity={building.importSource ? 0.55 : 1}
+                              stroke={isSelected ? "#059669" : building.importSource ? "#f8fafc" : "#334155"}
+                              strokeWidth={isSelected ? 3 : building.importSource ? 1.5 : 1}
                             />
-                            <g
+                            {!(building.importSource && !building.label?.trim()) && <g
                               transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
                               onMouseDown={e => {
                                 e.stopPropagation();
@@ -7847,7 +8673,7 @@ export default function SecurityPlanner() {
                                   </text>
                                 );
                               })}
-                            </g>
+                            </g>}
                             {isSelected &&
                               points.map((point, index) => (
                                 <circle
@@ -9532,7 +10358,7 @@ export default function SecurityPlanner() {
                   </label>
                   <input
                     type="range"
-                    min="10"
+                    min="2"
                     max="80"
                     value={gridSize}
                     onChange={e => changeGridSize(parseInt(e.target.value))}
