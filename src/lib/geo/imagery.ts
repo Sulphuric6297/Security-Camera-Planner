@@ -60,7 +60,7 @@ export const loadBlobImage = (blob: Blob) =>
 
 // Draws the provider credit in the corner of an exported map image.
 export const drawAttribution = (ctx: CanvasRenderingContext2D, width: number, height: number, text: string) => {
-  const fontSize = Math.max(12, Math.round(width / 120));
+  const fontSize = Math.max(6, Math.round(width / 140));
   ctx.font = `${fontSize}px sans-serif`;
   const textW = ctx.measureText(text).width;
   ctx.fillStyle = "rgba(0,0,0,0.5)";

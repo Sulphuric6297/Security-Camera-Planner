@@ -5583,7 +5583,8 @@ export default function SecurityPlanner() {
       const dx = pos.x - interactionState.startMouse.x;
       const dy = pos.y - interactionState.startMouse.y;
 
-      const startOffset = interactionState.startVal.labelOffset || defaultCameraLabelOffset(interactionState.startVal.rotation ?? 0);
+      const defaultOffset = defaultCameraLabelOffset(interactionState.startVal.rotation ?? 0);
+      const startOffset = interactionState.startVal.labelOffset || { x: defaultOffset.x * planUi, y: defaultOffset.y * planUi };
 
       updateItem(interactionState.itemId, {
         labelOffset: {
@@ -5794,6 +5795,10 @@ export default function SecurityPlanner() {
   };
 
   // --- Render Helpers ---
+
+  // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
+  // regardless of how many feet the site spans or how far you zoom.
+  const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
 
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
@@ -7478,13 +7483,13 @@ export default function SecurityPlanner() {
                       const x2 = r * Math.cos(endAngle);
                       const y2 = r * Math.sin(endAngle);
 
-                      const handleDist = 40;
+                      const handleDist = 40 * planUi;
                       const rotRad = c.rotation * (Math.PI / 180);
                       const hx = handleDist * Math.cos(rotRad);
                       const hy = handleDist * Math.sin(rotRad);
 
-                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x;
-                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
                       const dash = c.connectorDashSize || 3;
 
 
@@ -7592,7 +7597,7 @@ export default function SecurityPlanner() {
                                 </g>
                               );
                             })()}
-                            <g transform={`rotate(${c.rotation})`}>
+                            <g transform={`rotate(${c.rotation}) scale(${planUi})`}>
                               <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
                               <circle cx="0" cy="0" r="4" fill={c.color} />
                               <rect x="10" y="-4" width="6" height="8" fill="#475569" />
@@ -7601,14 +7606,14 @@ export default function SecurityPlanner() {
 
                           {isSelected && (
                             <>
-                              <line x1="0" y1="0" x2={hx} y2={hy} stroke="white" strokeWidth="2" strokeDasharray="3,3" />
+                              <line x1="0" y1="0" x2={hx} y2={hy} stroke="white" strokeWidth={2 * planUi} strokeDasharray={`${3 * planUi},${3 * planUi}`} />
                               <circle
                                 cx={hx}
                                 cy={hy}
-                                r="7"
+                                r={7 * planUi}
                                 fill="#3b82f6"
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-crosshair"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "rotate")}
@@ -7617,10 +7622,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={x1}
                                 cy={y1}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ew-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "fov", "left")}
@@ -7628,10 +7633,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={x2}
                                 cy={y2}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ew-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "fov", "right")}
@@ -7640,10 +7645,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={r * Math.cos(rotRad)}
                                 cy={r * Math.sin(rotRad)}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ns-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "range")}
@@ -7656,29 +7661,31 @@ export default function SecurityPlanner() {
                             onMouseDown={e => handleMouseDown(e, c.id, "move-label")}
                             className="cursor-move hover:opacity-80 transition-opacity"
                           >
-                            {(Math.abs(labelX) > 10 || Math.abs(labelY - 30) > 10) && (
+                            {Math.hypot(labelX, labelY) > 14 * planUi && (
                               <line
                                 x1={-labelX} y1={-labelY} x2="0" y2="0"
                                 stroke="white"
-                                strokeWidth="2"
-                                strokeDasharray="6,4"
+                                strokeWidth={1.5 * planUi}
+                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
                                 style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
                               />
                             )}
 
-                            <rect
-                              x="-50"
-                              y="-10"
-                              width="100"
-                              height="20"
-                              rx="4"
-                              fill="rgba(255,255,255,0.9)"
-                              stroke={isSelected ? "#3b82f6" : "transparent"}
-                              strokeWidth="1"
-                            />
-                            <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                              {c.label}
-                            </text>
+                            <g transform={`scale(${planUi})`}>
+                              <rect
+                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
+                                y="-10"
+                                width={Math.max(36, c.label.length * 6.2 + 16)}
+                                height="20"
+                                rx="6"
+                                fill="rgba(255,255,255,0.92)"
+                                stroke={isSelected ? "#3b82f6" : c.color}
+                                strokeWidth={isSelected ? 1.5 : 1}
+                              />
+                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
+                                {c.label}
+                              </text>
+                            </g>
                           </g>
                         </g>
                       );
@@ -7761,8 +7768,8 @@ export default function SecurityPlanner() {
                     if (item.type === "camera") {
                       const c = item as CameraItem;
                       const cameraPos = getCameraPlanPosition(c);
-                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x;
-                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
                       const isSelected = selectedId === c.id;
 
                       return (
@@ -7777,29 +7784,31 @@ export default function SecurityPlanner() {
                             className="cursor-move hover:opacity-80 transition-opacity"
                             style={{ pointerEvents: 'auto' }}
                           >
-                            {(Math.abs(labelX) > 10 || Math.abs(labelY - 30) > 10) && (
+                            {Math.hypot(labelX, labelY) > 14 * planUi && (
                               <line
                                 x1={-labelX} y1={-labelY} x2="0" y2="0"
                                 stroke="white"
-                                strokeWidth="2"
-                                strokeDasharray="6,4"
+                                strokeWidth={1.5 * planUi}
+                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
                                 style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
                               />
                             )}
 
-                            <rect
-                              x="-50"
-                              y="-10"
-                              width="100"
-                              height="20"
-                              rx="4"
-                              fill="rgba(255,255,255,0.9)"
-                              stroke={isSelected ? "#3b82f6" : "transparent"}
-                              strokeWidth="1"
-                            />
-                            <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                              {c.label}
-                            </text>
+                            <g transform={`scale(${planUi})`}>
+                              <rect
+                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
+                                y="-10"
+                                width={Math.max(36, c.label.length * 6.2 + 16)}
+                                height="20"
+                                rx="6"
+                                fill="rgba(255,255,255,0.92)"
+                                stroke={isSelected ? "#3b82f6" : c.color}
+                                strokeWidth={isSelected ? 1.5 : 1}
+                              />
+                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
+                                {c.label}
+                              </text>
+                            </g>
                           </g>
                         </g>
                       );
