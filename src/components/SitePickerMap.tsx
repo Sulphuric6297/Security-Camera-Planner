@@ -194,7 +194,7 @@ export function SitePickerMap({
     const rect = rectRef.current;
     const setLabel = (b: GeoBounds) => {
       rect.unbindTooltip();
-      rect.bindTooltip(dimsLabel(b), { permanent: true, direction: "top", className: "site-picker-tooltip", offset: [0, -8] }).openTooltip(L.latLng(b.north, (b.west + b.east) / 2));
+      rect.bindTooltip(dimsLabel(b), { permanent: true, direction: "top", className: "site-picker-tooltip", offset: [0, -22] }).openTooltip(L.latLng(b.north, (b.west + b.east) / 2));
     };
     setLabel(selection);
 
@@ -208,7 +208,8 @@ export function SitePickerMap({
       { key: "sw", pos: () => [live.south, live.west] }
     ];
     const markers: L.Marker[] = [];
-    const center = () => L.latLng((live.north + live.south) / 2, (live.west + live.east) / 2);
+    // Move handle sits on the top edge: the middle of the area is usually the house the user searched for.
+    const center = () => L.latLng(live.north, (live.west + live.east) / 2);
     const refresh = (except?: L.Marker) => {
       rect.setBounds(L.latLngBounds([live.south, live.west], [live.north, live.east]));
       setLabel(live);

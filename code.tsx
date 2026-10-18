@@ -5,7 +5,7 @@ import JSZip from "jszip";
 
 import proj4 from "proj4";
 
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   Camera,
   Square,
@@ -38,7 +38,9 @@ import {
   Hand,
   SquareDashed
 } from "lucide-react";
-import GridLayout from "react-grid-layout";
+import GridLayoutBase from "react-grid-layout";
+// react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
+const GridLayout = GridLayoutBase as unknown as React.ComponentType<any>;
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { NVRCard } from "./src/components/NVRCard";
@@ -197,6 +199,10 @@ export default function SecurityPlanner() {
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
   const [historyVersion, setHistoryVersion] = useState(0);
+  if (typeof window !== "undefined") {
+    // Read access for the automated test suite: undo stack position.
+    (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
+  }
   const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
   const canRedo = historyVersion >= 0 && historyIndexRef.current < historyRef.current.length - 1;
 
@@ -228,7 +234,8 @@ export default function SecurityPlanner() {
     };
     // Compare cheaply: big image data URLs are represented by a short fingerprint.
     const imageKey = (img: string | null) => (img ? `${img.length}:${img.slice(-48)}` : null);
-    const key = JSON.stringify({ ...state, backgroundImg: imageKey(state.backgroundImg), sceneBackgroundImg: imageKey(state.sceneBackgroundImg) });
+    // The Monitor Wall layout follows the camera list automatically; it shouldn't create undo steps of its own.
+    const key = JSON.stringify({ ...state, nvrLayout: undefined, backgroundImg: imageKey(state.backgroundImg), sceneBackgroundImg: imageKey(state.sceneBackgroundImg) });
     const stack = historyRef.current;
     const index = historyIndexRef.current;
     // Don't save if same as current top
@@ -729,10 +736,47 @@ export default function SecurityPlanner() {
 
   // The real-world area elevation is fetched for: the base map if there is one, otherwise the whole canvas.
   const getElevationArea = () => {
-    if (backgroundImg) {
-      return { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height };
+    const bg = bgSettingsRef.current;
+    if (backgroundImgRef.current) {
+      return { x: bg.x, y: bg.y, width: bg.width, height: bg.height };
     }
-    return { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
+    const canvas = canvasSizeRef.current;
+    return { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  };
+
+  // Scale the whole plan (canvas, map placement, every item's position and plan size) by k.
+  // Heights (walls, mounts) are already feet and stay as they are.
+  const rescalePlan = (k: number) => {
+    const sp = (p: { x: number; y: number }) => ({ x: p.x * k, y: p.y * k });
+    const canvas = canvasSizeRef.current;
+    const bg = bgSettingsRef.current;
+    const nextCanvas = { width: Math.round(canvas.width * k), height: Math.round(canvas.height * k) };
+    const nextBg = { ...bg, x: bg.x * k, y: bg.y * k, width: bg.width * k, height: bg.height * k };
+    const nextItems = itemsRef.current.map(item => {
+      const base: any = { ...item, x: item.x * k, y: item.y * k };
+      if ((item as any).labelOffset) base.labelOffset = sp((item as any).labelOffset);
+      switch (item.type) {
+        case "building":
+          return { ...base, width: item.width * k, height: item.height * k, points: item.points?.map(sp) };
+        case "parking":
+        case "image":
+          return { ...base, width: item.width * k, height: item.height * k };
+        case "tree":
+          return { ...base, radius: item.radius * k };
+        case "camera":
+          return { ...base, range: item.range * k };
+        case "label":
+          return { ...base, fontSize: item.fontSize * k };
+        default:
+          return base;
+      }
+    }) as CanvasItem[];
+    canvasSizeRef.current = nextCanvas;
+    bgSettingsRef.current = nextBg;
+    setItems(nextItems);
+    setTerrainHeights({});
+    setPanOffset({ x: 0, y: 0 });
+    setZoom(1);
   };
 
   const openElevationDialog = () => {
@@ -904,12 +948,30 @@ export default function SecurityPlanner() {
       return;
     }
     const location = selection.center;
+    // A new map replaces the plan's extent; ask before stranding the user's own items on it.
+    const ownItems = items.filter(i => !(i.type === "building" && (i as BuildingItem).importSource === "osm"));
+    if (imagery !== "keep" && ownItems.length > 0 && !planGeoRef) {
+      const clearThem = window.confirm(
+        `Your plan already has ${ownItems.length} item${ownItems.length === 1 ? "" : "s"}. The new site map will replace the current map and scale.\n\nOK = start fresh on the new site (remove them)\nCancel = keep them (you may need to move them)`
+      );
+      if (clearThem) {
+        setItems(prev => prev.filter(i => i.type === "building" && (i as BuildingItem).importSource === "osm"));
+        setSelectedId(null);
+      }
+    }
     setSiteLocation(location);
     try {
+      if (imagery === "keep") {
+        // Your own map: rescale the whole plan so 1 unit = 1 ft, like an imported site, so camera
+        // ranges, coverage zones and every distance readout are true feet.
+        const current = getElevationArea();
+        const feetPerUnit = selection.widthFt / Math.max(current.width, 1);
+        if (Math.abs(feetPerUnit - 1) > 0.02) rescalePlan(feetPerUnit);
+      }
       let area = getElevationArea();
       let canvas = canvasSizeRef.current;
-      let realWidthFt = selection.widthFt;
-      let realHeightFt = area.height * (selection.widthFt / Math.max(area.width, 1));
+      let realWidthFt = imagery === "keep" ? area.width : selection.widthFt;
+      let realHeightFt = area.height * (realWidthFt / Math.max(area.width, 1));
       let partialImagery = false;
       let imagerySource = "";
 
@@ -1223,7 +1285,6 @@ export default function SecurityPlanner() {
     frustumSettings,
     sceneBackgroundImg,
     backgroundMode,
-    nvrLayout,
     buildingLabelDefaults,
     demScale,
     demOffset,
@@ -1700,7 +1761,7 @@ export default function SecurityPlanner() {
   const attachCameraToNearestBuilding = (cameraId: string) => {
     const camera = items.find(item => item.id === cameraId) as CameraItem | undefined;
     if (!camera || camera.type !== "camera") return;
-    const snap = snapCameraToNearestBuilding(camera);
+    const snap = snapCameraToNearestBuilding(camera) as { buildingId: string; edgeIndex: number; edgeT: number; distance: number; point: { x: number; y: number } } | null;
     if (!snap) return;
     updateItem(cameraId, {
       x: snap.point.x,
@@ -2147,7 +2208,7 @@ export default function SecurityPlanner() {
       cameraSnapshotRendererRef.current = { renderer, pmremGenerator, envTexture, canvas };
       cache = cameraSnapshotRendererRef.current;
     }
-    cache.renderer.setSize(width, height, false);
+    cache.renderer!.setSize(width, height, false);
     return cache;
   };
 
@@ -2301,7 +2362,7 @@ export default function SecurityPlanner() {
       }
     }
 
-    renderer.render(scene, perspCam);
+    renderer!.render(scene, perspCam);
     // This scene is rebuilt for every snapshot; free its GPU resources (but keep the shared env map).
     disposeObjectDeep(scene, new Set(snapshot.envTexture ? [snapshot.envTexture] : []));
     if (scene.background instanceof THREE.Texture) scene.background.dispose();
@@ -2748,7 +2809,9 @@ export default function SecurityPlanner() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const isZip = file.name.toLowerCase().endsWith(".zip");
+    // Detect zip by content ("PK" signature), not just the extension, so renamed files still open.
+    const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    const isZip = file.name.toLowerCase().endsWith(".zip") || (head[0] === 0x50 && head[1] === 0x4b);
     if (isZip) {
       try {
         const zip = await JSZip.loadAsync(file);
@@ -2889,6 +2952,21 @@ export default function SecurityPlanner() {
           return { lat, lon };
         };
         geo = { ...geo, corners: [toLatLon(wx0, wy0), toLatLon(wx1, wy0), toLatLon(wx1, wy1), toLatLon(wx0, wy1)] };
+        // Make output pixels square on the plan (in lat/lon files they're ~cos(lat) narrower than tall).
+        {
+          const { bounds: gb, area: ga } = planGeoRef;
+          const toPlan = (p: { lat: number; lon: number }) => ({
+            x: ga.x + ((p.lon - gb.west) / (gb.east - gb.west)) * ga.width,
+            y: ga.y + ((gb.north - p.lat) / (gb.north - gb.south)) * ga.height
+          });
+          const [pnw, pne, , psw] = geo.corners.map(toPlan);
+          const planW = Math.hypot(pne.x - pnw.x, pne.y - pnw.y);
+          const planH = Math.hypot(psw.x - pnw.x, psw.y - pnw.y);
+          if (planW > 0 && planH > 0) {
+            height = Math.max(2, Math.round(width * (planH / planW)));
+            readOptions = { ...readOptions, height };
+          }
+        }
       } else if (width * height > 4096 * 4096) {
         alert("This elevation file is very large. Pick your site in Import Site first so only the needed part is loaded.");
         return;
@@ -3478,6 +3556,7 @@ export default function SecurityPlanner() {
         treeObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
         needsRender = true;
       } else if (item.type === "building") {
+        if (!obj) return;
         const building = item as BuildingItem;
         const baseH = getBuildingBaseHeight(building);
         obj.position.set(building.x, baseH, building.y);
@@ -3495,8 +3574,8 @@ export default function SecurityPlanner() {
         const camH = getCameraBaseHeight(cam, camPos); // Base height at camera pivot (building base if mounted)
         const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
 
-        obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
         if (!obj) return;
+        obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
         obj.rotation.order = 'YZX';
         obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
         obj.rotation.x = 0;
@@ -3513,12 +3592,12 @@ export default function SecurityPlanner() {
           state
         );
         needsRender = true;
-      } else if (item.type === "image") {
+      } else if (item.type === "image" && obj) {
         const img = item as ImageItem;
         obj.position.set(img.x, h + 0.25, img.y);
         obj.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
         needsRender = true;
-      } else if (item.type === "label") {
+      } else if (item.type === "label" && obj) {
         obj.position.set(item.x, h + 8, item.y);
         needsRender = true;
       }
@@ -5733,8 +5812,16 @@ export default function SecurityPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A press that turned into a drag (pan, move, resize) must not also count as a click on the background.
+  const planPressRef = useRef<{ x: number; y: number } | null>(null);
+  const wasPlanDrag = (e: React.MouseEvent) => {
+    const start = planPressRef.current;
+    return !!start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4;
+  };
+
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
+    if (wasPlanDrag(e)) return;
     if (isTerrainMode) return;
     if (mode === "trace-building") {
       traceRoofAt(getSvgMousePos(e));
@@ -7124,6 +7211,7 @@ export default function SecurityPlanner() {
             {viewMode === "plan" ? (
               <svg
                 ref={svgRef}
+                data-testid="plan"
                 width="100%"
                 height="100%"
                 viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
@@ -7132,7 +7220,7 @@ export default function SecurityPlanner() {
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
-                onMouseDownCapture={handlePlanTerrainMouseDown}
+                onMouseDownCapture={e => { planPressRef.current = { x: e.clientX, y: e.clientY }; handlePlanTerrainMouseDown(e); }}
                 onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
@@ -7300,22 +7388,24 @@ export default function SecurityPlanner() {
                             />
                             {!(building.importSource && !building.label?.trim()) && <g
                               transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
-                              onMouseDown={e => {
-                                // Labels move separately only once the building is selected; otherwise drag the building.
-                                if (selectedId !== building.id) return;
-                                e.stopPropagation();
-                                handleMouseDown(e, building.id, "move-label");
-                              }}
-                              className="cursor-move"
-                              style={{ pointerEvents: "auto" }}
+                              style={{ pointerEvents: "none" }}
                             >
-                              <rect
-                                x={-labelLayout.maxWidth / 2}
-                                y={labelStartY - lineHeight * 0.6}
-                                width={labelLayout.maxWidth}
-                                height={labelBoxHeight + lineHeight * 0.2}
-                                fill="transparent"
-                              />
+                              {isSelected && (
+                                // Small grip to move the label; the text itself never blocks dragging the building.
+                                <g
+                                  transform={`translate(${-Math.min(labelLayout.maxWidth / 2, Math.max(...labelLayout.lines.map(line => line.length * labelLayout.fontSize * 0.31)) + labelLayout.fontSize * 0.3) - 9 * planUi}, ${labelStartY + ((labelLayout.lines.length - 1) * lineHeight) / 2})`}
+                                  style={{ pointerEvents: "auto" }}
+                                  className="cursor-move"
+                                  onMouseDown={e => {
+                                    e.stopPropagation();
+                                    handleMouseDown(e, building.id, "move-label");
+                                  }}
+                                >
+                                  <title>Drag to move the label</title>
+                                  <circle r={6 * planUi} fill="#0f172a" fillOpacity={0.75} stroke="white" strokeWidth={1.2 * planUi} />
+                                  <path d={`M ${-3 * planUi} 0 H ${3 * planUi} M 0 ${-3 * planUi} V ${3 * planUi}`} stroke="white" strokeWidth={1.2 * planUi} />
+                                </g>
+                              )}
                               {labelLayout.lines.map((line, idx) => {
                                 const estimated = line.length * labelLayout.fontSize * 0.62;
                                 const clampWidth = estimated > labelLayout.maxWidth ? labelLayout.maxWidth : undefined;
@@ -8235,7 +8325,7 @@ export default function SecurityPlanner() {
               style={{ right: "1rem" }}
             >
               {(() => {
-                const cam = items.find(i => i.id === maximizedCamId);
+                const cam = items.find(i => i.id === maximizedCamId) as CameraItem | undefined;
                 if (!cam) return null;
                 return (
                   <div className="w-full h-full rounded-2xl overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl flex flex-col">

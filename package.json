@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p .",
+    "test:e2e": "playwright test",
+    "check": "npm run typecheck && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "@types/react-grid-layout": "^1.3.6",
@@ -23,6 +26,7 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
     "@types/leaflet": "^1.9.12",
     "@types/proj4": "^2.5.5",
     "@types/react": "^18.2.0",

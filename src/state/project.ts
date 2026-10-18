@@ -148,3 +148,8 @@ export const projectRef = <K extends keyof ProjectDoc>(key: K): { current: Proje
   }
   return ref as { current: ProjectDoc[K] };
 };
+
+// Read access for the automated test suite (tests/e2e) and debugging in the browser console.
+if (typeof window !== "undefined") {
+  (window as any).__scpProject = () => useProject.getState();
+}

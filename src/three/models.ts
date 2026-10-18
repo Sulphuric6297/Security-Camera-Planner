@@ -1,12 +1,12 @@
 import * as THREE from "three";
-import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { Camera, Trees } from "lucide-react";
 import { clamp } from "../constants";
 import { CanvasItem, ParkingItem, TreeItem } from "../types";
 
 
 export const resolveVehicleType = (item: ParkingItem): ParkingItem['vehicleType'] => {
-  const rawType = (item as ParkingItem & { vehicleType?: string }).vehicleType;
+  const rawType = (item as unknown as { vehicleType?: string }).vehicleType;
   if (rawType) {
     if (rawType === 'motorcycle') return 'hatchback';
     if (['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'].includes(rawType)) {
