@@ -67,6 +67,11 @@ When you add a feature in a new area, add a new spec file and a row to this tabl
 - Keep test titles ASCII. Playwright's `setFiles` silently fails when a test's output path
   contains characters like "→".
 
+## Design direction
+
+`docs/REDESIGN.md` holds the research-based UX plan, organized in phases. Read it before UI work, and
+keep it updated as phases ship.
+
 ## Project conventions
 
 - Plan units are feet. Plan (x, y) maps to 3D world (x, z), with Y up. Camera rotation 0° = +x,
