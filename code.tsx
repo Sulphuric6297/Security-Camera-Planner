@@ -53,12 +53,14 @@ import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
+import { shiftGeoPoints } from "./src/lib/geo/align";
+import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize } from "./src/lib/geometry";
+import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { disposeObjectDeep } from "./src/three/dispose";
@@ -99,6 +101,9 @@ export default function SecurityPlanner() {
   const [importBuildings, setImportBuildings] = useState(true);
   const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
   const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  // Lining the found footprints up with the photo: automatic, with manual nudges as a fallback.
+  const [buildingAlign, setBuildingAlign] = useState<{ state: "idle" | "working" | "done" | "none"; movedM: number; nudged: boolean }>({ state: "idle", movedM: 0, nudged: false });
+  const originalCandidatesRef = useRef<BuildingCandidate[]>([]);
   const [selectViewSignal, setSelectViewSignal] = useState(0);
   const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false);
@@ -202,6 +207,7 @@ export default function SecurityPlanner() {
   if (typeof window !== "undefined") {
     // Read access for the automated test suite: undo stack position.
     (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
+    (window as any).__scpThree = () => threeStateRef.current;
   }
   const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
   const canRedo = historyVersion >= 0 && historyIndexRef.current < historyRef.current.length - 1;
@@ -855,15 +861,29 @@ export default function SecurityPlanner() {
     if (dims.widthFt > SITE_MAX_WIDTH_FT || dims.heightFt > SITE_MAX_WIDTH_FT) return;
     let cancelled = false;
     setBuildingScan({ state: "loading", message: "Looking for buildings…" });
+    setBuildingAlign({ state: "idle", movedM: 0, nudged: false });
     const timer = window.setTimeout(async () => {
       try {
         const result = await findBuildingCandidates(siteBounds);
         if (cancelled) return;
         setBuildingCandidates(result.candidates);
+        originalCandidatesRef.current = result.candidates;
         if (!result.osmOk && !result.detectedOk) {
           setBuildingScan({ state: "error", message: "Couldn't reach the building services. You can still import and draw buildings yourself." });
+          return;
+        }
+        setBuildingScan({ state: "done", message: "" });
+        // Footprint datasets are often a few meters off the photo: line them up automatically.
+        if (result.candidates.length === 0) return;
+        setBuildingAlign({ state: "working", movedM: 0, nudged: false });
+        const aligned = await alignToSatelliteTiles(result.candidates, siteBounds).catch(() => null);
+        if (cancelled) return;
+        if (aligned && aligned.stats.adjusted > 0) {
+          // Keep the user's keep/remove choices made while this ran.
+          setBuildingCandidates(prev => aligned.items.map(a => ({ ...a, selected: prev.find(p => p.id === a.id)?.selected ?? a.selected })));
+          setBuildingAlign({ state: "done", movedM: aligned.stats.movedMeters, nudged: false });
         } else {
-          setBuildingScan({ state: "done", message: "" });
+          setBuildingAlign({ state: "none", movedM: 0, nudged: false });
         }
       } catch (err) {
         if (!cancelled) setBuildingScan({ state: "error", message: "Couldn't look up buildings for this area." });
@@ -874,6 +894,17 @@ export default function SecurityPlanner() {
       window.clearTimeout(timer);
     };
   }, [siteBounds, showElevationDialog, importBuildings]);
+
+  // Manual fallback: move every found footprint by a small step (meters east/north).
+  const nudgeBuildingCandidates = (eastM: number, northM: number) => {
+    setBuildingCandidates(prev => prev.map(c => ({ ...c, points: shiftGeoPoints(c.points, eastM, northM) })));
+    setBuildingAlign(a => ({ ...a, nudged: true }));
+  };
+  const resetBuildingCandidatePositions = () => {
+    const original = new Map(originalCandidatesRef.current.map(c => [c.id, c.points]));
+    setBuildingCandidates(prev => prev.map(c => ({ ...c, points: original.get(c.id) ?? c.points })));
+    setBuildingAlign({ state: "none", movedM: 0, nudged: true });
+  };
 
   const toggleBuildingCandidate = (id: string) =>
     setBuildingCandidates(prev => prev.map(c => (c.id === id ? { ...c, selected: !c.selected } : c)));
@@ -909,13 +940,18 @@ export default function SecurityPlanner() {
     });
     const result: BuildingItem[] = [];
     osm.forEach(b => {
-      const world = b.points.map(toPlan);
+      const full = b.points.map(toPlan);
+      const fullBox = getPointsBounds(full);
+      const fcx = fullBox.minX + fullBox.width / 2;
+      const fcy = fullBox.minY + fullBox.height / 2;
+      // Keep buildings whose center is on the map, cut at the map edge (the terrain ends there).
+      if (fcx < area.x || fcy < area.y || fcx > area.x + area.width || fcy > area.y + area.height) return;
+      const world = clipPolygonToRect(full, area);
+      // Skip slivers.
+      if (world.length < 3 || polygonArea(world) < 30 * unitsPerFoot * unitsPerFoot) return;
       const box = getPointsBounds(world);
       const cx = box.minX + box.width / 2;
       const cy = box.minY + box.height / 2;
-      // Keep buildings whose center is on the map; skip slivers.
-      if (cx < area.x || cy < area.y || cx > area.x + area.width || cy > area.y + area.height) return;
-      if (box.width * box.height < 30 * unitsPerFoot * unitsPerFoot) return;
       result.push({
         id: generateId(),
         type: "building",
@@ -1057,7 +1093,14 @@ export default function SecurityPlanner() {
       applyDemToTerrain(dem, { preview, transform, scale, offset: 0, normalize: true, canvas, save: false });
 
       setElevationStatus({ state: "loading", message: "Building 3D buildings…" });
-      const osm = await buildingsJob;
+      let osm = await buildingsJob;
+      // Fine-tune against the exact image now in the plan (it can differ from the picker's tiles),
+      // unless the user lined them up by hand.
+      const importedImage = backgroundImgRef.current;
+      if (osm && osm.length && imagery === "satellite" && importedImage && !buildingAlign.nudged) {
+        const refined = await alignToImageUrl(osm, geoBounds, importedImage, buildingAlign.state === "done" ? 4 : 8).catch(() => null);
+        if (refined) osm = refined.items;
+      }
       let buildingText = "";
       if (importBuildings) {
         if (osm === null) {
@@ -4756,7 +4799,7 @@ export default function SecurityPlanner() {
     // Scene setup with improved atmosphere
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#09090b");
-    scene.fog = new THREE.Fog("#09090b", 200, 2000);
+    // No fog: this is an orthographic overview, and fog darkened the far side of large sites.
 
     // Orthographic camera for isometric-style view
     const camera = new THREE.OrthographicCamera(-500, 500, 500, -500, 0.1, 6000);
@@ -4770,12 +4813,28 @@ export default function SecurityPlanner() {
     const hemiLight = new THREE.HemisphereLight(0xddeeff, 0x202020, 0.6);
     scene.add(hemiLight);
 
+    // Sun from the south-west, with a shadow camera that covers the whole site
+    // (the default one only covered ~10 ft around the origin, so most shadows were missing).
+    const siteSpan = Math.max(canvasSize.width, canvasSize.height);
+    const siteCenter = new THREE.Vector3(canvasSize.width / 2, 0, canvasSize.height / 2);
     const dirLight = new THREE.DirectionalLight(0xfffee0, 2.0);
-    dirLight.position.set(50, 100, 50);
+    dirLight.position.copy(siteCenter).add(new THREE.Vector3(-0.5, 1, 0.6).normalize().multiplyScalar(siteSpan * 1.5));
+    dirLight.target.position.copy(siteCenter);
     dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.mapSize.width = 4096;
+    dirLight.shadow.mapSize.height = 4096;
+    const shadowCam = dirLight.shadow.camera;
+    shadowCam.left = -siteSpan * 0.8;
+    shadowCam.right = siteSpan * 0.8;
+    shadowCam.top = siteSpan * 0.8;
+    shadowCam.bottom = -siteSpan * 0.8;
+    shadowCam.near = 1;
+    shadowCam.far = siteSpan * 4;
+    shadowCam.updateProjectionMatrix();
+    dirLight.shadow.bias = -0.0005;
+    dirLight.shadow.normalBias = 0.5;
     scene.add(dirLight);
+    scene.add(dirLight.target);
 
     // Initial orbit state with good default viewing angle
     const orbit = {
@@ -6472,6 +6531,34 @@ export default function SecurityPlanner() {
                             )}
                           </div>
                           <p className="text-[11px] text-slate-400">Click a building on the map to remove it (or add it back).</p>
+                          <div className="rounded-lg bg-black/20 px-2 py-1.5 space-y-1.5" data-testid="building-align">
+                            <div className="text-[11px] text-slate-300">
+                              {buildingAlign.state === "working" ? (
+                                <span className="flex items-center gap-1.5"><LoaderCircle className="w-3 h-3 animate-spin" /> Lining buildings up with the photo…</span>
+                              ) : buildingAlign.nudged ? (
+                                "Moved by hand."
+                              ) : buildingAlign.state === "done" ? (
+                                `Lined up with the photo (moved ~${buildingAlign.movedM < 1 ? "<1" : Math.round(buildingAlign.movedM)} m).`
+                              ) : (
+                                "Outlines off the roofs? Nudge them:"
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {([
+                                { label: "←", title: "Move all outlines west (0.5 m)", e: -0.5, n: 0 },
+                                { label: "→", title: "Move all outlines east (0.5 m)", e: 0.5, n: 0 },
+                                { label: "↑", title: "Move all outlines north (0.5 m)", e: 0, n: 0.5 },
+                                { label: "↓", title: "Move all outlines south (0.5 m)", e: 0, n: -0.5 }
+                              ]).map(b => (
+                                <button key={b.label} type="button" title={b.title} aria-label={b.title} onClick={() => nudgeBuildingCandidates(b.e, b.n)} className="w-7 h-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 text-sm">
+                                  {b.label}
+                                </button>
+                              ))}
+                              <button type="button" onClick={resetBuildingCandidatePositions} className="ml-auto px-2 h-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] text-slate-300" title="Put the outlines back where the map data had them">
+                                Original
+                              </button>
+                            </div>
+                          </div>
                           <div className="flex gap-1.5">
                             <button type="button" onClick={() => setAllBuildingCandidates(true)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Keep all</button>
                             <button type="button" onClick={() => setAllBuildingCandidates(false)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Remove all</button>

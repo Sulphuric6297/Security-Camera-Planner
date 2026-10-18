@@ -1,4 +1,4 @@
-import { test, expect, placeWithKey } from "./fixtures";
+import { test, expect, importSite, placeWithKey } from "./fixtures";
 
 test.describe("3D, camera views and report", () => {
   test("3D view and the camera preview render", async ({ page }) => {
@@ -19,6 +19,25 @@ test.describe("3D, camera views and report", () => {
     await page.keyboard.press("3");
     await expect(page.locator("canvas").first()).toBeVisible();
     await page.waitForTimeout(800);
+  });
+
+  test("3D overview of a large site: no fog, sun shadows cover the whole site", async ({ page }) => {
+    await importSite(page);
+    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
+    const info = await page.evaluate(() => {
+      const t = (window as any).__scpThree();
+      const p = (window as any).__scpProject();
+      let sun: any = null;
+      t.scene.traverse((o: any) => { if (o.isDirectionalLight && o.castShadow) sun = o; });
+      const cam = sun.shadow.camera;
+      return { fog: t.scene.fog, span: Math.max(p.canvasSize.width, p.canvasSize.height), halfW: (cam.right - cam.left) / 2, halfH: (cam.top - cam.bottom) / 2 };
+    });
+    // Fog used to darken the far side of big sites.
+    expect(info.fog).toBeNull();
+    // The shadow camera must reach every corner of the site (the default covered ~10 ft).
+    expect(info.halfW).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
+    expect(info.halfH).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
   });
 
   test("Camera wall shows one tile per camera", async ({ page }) => {

@@ -39,13 +39,15 @@ Useful commands:
 | Spec | Area |
 | --- | --- |
 | `smoke.spec.ts` | App loads, onboarding, steps, 2D/3D/camera-wall views, tool and view shortcuts |
-| `import-site.spec.ts` | Address search, drawing or moving the area, building review, imagery + elevation + building import, re-import merge |
+| `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
 | `plan-editing.spec.ts` | Placing every item type, dragging, adding corners, undo/redo, duplicate, nudge, delete + Undo toast, panning |
 | `camera.spec.ts` | Aim handle matches the stored rotation, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
-| `views-and-report.spec.ts` | 3D render, camera preview, camera wall tiles, PDF report contents |
+| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), camera wall tiles, PDF report contents |
+| `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
+| `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
 

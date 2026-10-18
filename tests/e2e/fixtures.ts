@@ -30,18 +30,51 @@ const terrariumTile = (z: number, x: number) => {
   return encode({ width: size, height: size, data, channels: 3, depth: 8 });
 };
 
-/** Imagery tile: grass with a soft checker so the map visibly renders. */
-const imageryTile = (seed: number) => {
+// Where the stub buildings really are on the "photo". The OSM house is mapped exactly; the
+// AI-detected footprint is deliberately 4 m west and 3 m north of its roof, like real data can be,
+// so tests can check that import lines it up with the photo.
+export const DETECTED_OFFSET_M = { east: -4, north: 3 };
+const M_PER_DEG = 111320;
+export const DETECTED_CENTER = { lat: SITE.lat + 0.00025, lon: SITE.lon + 0.0003 };
+export const ROOFS = [
+  { lat: SITE.lat, lon: SITE.lon, d: 0.00008, color: [70, 72, 78] },
+  {
+    lat: DETECTED_CENTER.lat - DETECTED_OFFSET_M.north / M_PER_DEG,
+    lon: DETECTED_CENTER.lon - DETECTED_OFFSET_M.east / (M_PER_DEG * Math.cos((SITE.lat * Math.PI) / 180)),
+    d: 0.00004,
+    color: [150, 92, 64]
+  }
+];
+
+/** Imagery tile: textured grass with the stub buildings' roofs (and their shadows) drawn where they really are. */
+const imageryTile = (z: number, tx: number, ty: number) => {
   const size = 256;
+  const world = size * Math.pow(2, z);
   const data = new Uint8Array(size * size * 4);
-  for (let i = 0; i < size * size; i++) {
-    const x = i % size;
-    const y = Math.floor(i / size);
-    const c = ((x >> 5) + (y >> 5) + seed) % 2 ? 0 : 10;
-    data[i * 4] = 80 + c;
-    data[i * 4 + 1] = 120 + c;
-    data[i * 4 + 2] = 60;
-    data[i * 4 + 3] = 255;
+  const shadowDeg = 1.2 / M_PER_DEG;
+  for (let py = 0; py < size; py++) {
+    const gy = ty * size + py;
+    const lat = (Math.atan(Math.sinh(Math.PI * (1 - (2 * gy) / world))) * 180) / Math.PI;
+    for (let px = 0; px < size; px++) {
+      const gx = tx * size + px;
+      const lon = (gx / world) * 360 - 180;
+      // deterministic grass texture
+      const h = Math.sin(gx * 12.9898 + gy * 78.233) * 43758.5453;
+      const n = (h - Math.floor(h) - 0.5) * 30;
+      let col = [80 + n, 120 + n, 60 + n * 0.5];
+      for (const r of ROOFS) {
+        const dLon = r.d; // same shape as the stub footprints (square() offsets lat and lon equally)
+        const inRoof = Math.abs(lat - r.lat) <= r.d && Math.abs(lon - r.lon) <= dLon;
+        const inShadow = !inRoof && Math.abs(lat + shadowDeg - r.lat) <= r.d && Math.abs(lon - shadowDeg - r.lon) <= dLon;
+        if (inShadow) col = col.map(v => v * 0.45);
+        if (inRoof) col = r.color.map(v => v * (lat > r.lat ? 1.12 : 0.88) + n * 0.3);
+      }
+      const i = (py * size + px) * 4;
+      data[i] = col[0];
+      data[i + 1] = col[1];
+      data[i + 2] = col[2];
+      data[i + 3] = 255;
+    }
   }
   return encode({ width: size, height: size, data, channels: 4, depth: 8 });
 };
@@ -63,10 +96,13 @@ export async function stubNetwork(page: Page) {
     route.fulfill(png(cached(`t${z}/${x}`, () => terrariumTile(z, x))));
   });
   await page.route(/arcgisonline\.com\/.*\/tile\/(\d+)\/(\d+)\/(\d+)/, route => {
-    const n = Number(route.request().url().match(/tile\/(\d+)\/(\d+)\/(\d+)/)![3]);
-    route.fulfill(png(cached(`i${n % 2}`, () => imageryTile(n % 2))));
+    const [z, y, x] = route.request().url().match(/tile\/(\d+)\/(\d+)\/(\d+)/)!.slice(1).map(Number);
+    route.fulfill(png(cached(`i${z}/${x}/${y}`, () => imageryTile(z, x, y))));
   });
-  await page.route(/tile\.openstreetmap\.org/, route => route.fulfill(png(cached("i0", () => imageryTile(0)))));
+  await page.route(/tile\.openstreetmap\.org\/(\d+)\/(\d+)\/(\d+)/, route => {
+    const [z, x, y] = route.request().url().match(/org\/(\d+)\/(\d+)\/(\d+)/)!.slice(1).map(Number);
+    route.fulfill(png(cached(`i${z}/${x}/${y}`, () => imageryTile(z, x, y))));
+  });
   await page.route(/\/tilemap\//, route => route.fulfill(json({ adjusted: false, data: [0] })));
   // Statewide ortho + USGS: simulate "unavailable" so the fallbacks are exercised.
   await page.route(/nconemap\.gov|gis\.nc\.gov|elevation\.nationalmap\.gov/, route => route.abort());
