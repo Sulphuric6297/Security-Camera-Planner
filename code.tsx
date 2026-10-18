@@ -41,6 +41,7 @@ import GridLayout from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { NVRCard } from "./src/components/NVRCard";
+import { useProjectField, getProject, useProject, createEmptyProject, projectRef } from "./src/state/project";
 import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { diagonalFromHv, fovFromDiagonal, getCameraAspectValue, hFovFromV, vFovFromH } from "./src/lib/camera";
@@ -59,10 +60,10 @@ import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, 
 
 export default function SecurityPlanner() {
   // --- State ---
-  const [items, setItems] = useState<CanvasItem[]>([]);
+  const [items, setItems] = useProjectField("items");
 
   // Terrain State (Moved up for scope access)
-  const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
+  const [terrainHeights, setTerrainHeights] = useProjectField("terrainHeights");
   const [isTerrainMode, setIsTerrainMode] = useState(false);
   const [terrainTool, setTerrainTool] = useState<TerrainTool>("sculpt");
   const [terrainBrushSize, setTerrainBrushSize] = useState(4); // in tiles
@@ -70,22 +71,22 @@ export default function SecurityPlanner() {
   const [terrainBrushFalloff, setTerrainBrushFalloff] = useState(2);
   const [terrainFlattenTarget, setTerrainFlattenTarget] = useState(0);
   const [terrainFlattenSample, setTerrainFlattenSample] = useState(true);
-  const [demData, setDemData] = useState<DemData | null>(null);
-  const [demScale, setDemScale] = useState(1);
-  const [demOffset, setDemOffset] = useState(0);
-  const [demNormalize, setDemNormalize] = useState(true);
+  const [demData, setDemData] = useProjectField("demData");
+  const [demScale, setDemScale] = useProjectField("demScale");
+  const [demOffset, setDemOffset] = useProjectField("demOffset");
+  const [demNormalize, setDemNormalize] = useProjectField("demNormalize");
   const [demPreview, setDemPreview] = useState<{ url: string; width: number; height: number } | null>(null);
-  const [demAlignMode, setDemAlignMode] = useState(false);
-  const [demTransform, setDemTransform] = useState({ x: DEFAULT_CANVAS.width / 2, y: DEFAULT_CANVAS.height / 2, scale: 1, rotation: 0 });
-  const [demOverlayOpacity, setDemOverlayOpacity] = useState(0.6);
+  const [demAlignMode, setDemAlignMode] = useProjectField("demAlignMode");
+  const [demTransform, setDemTransform] = useProjectField("demTransform");
+  const [demOverlayOpacity, setDemOverlayOpacity] = useProjectField("demOverlayOpacity");
   const [demAutoApply, setDemAutoApply] = useState(true);
-  const [demAlignTool, setDemAlignTool] = useState<DemAlignTool>("move");
+  const [demAlignTool, setDemAlignTool] = useProjectField("demAlignTool");
   const [showDemGuide, setShowDemGuide] = useState(false);
   // One-click elevation
-  const [siteLocation, setSiteLocation] = useState<SiteLocation | null>(null);
+  const [siteLocation, setSiteLocation] = useProjectField("siteLocation");
   const [showElevationDialog, setShowElevationDialog] = useState(false);
   const [elevationQuery, setElevationQuery] = useState("");
-  const [siteBounds, setSiteBounds] = useState<GeoBounds | null>(null);
+  const [siteBounds, setSiteBounds] = useProjectField("siteBounds");
   const [pickerView, setPickerView] = useState({ lat: 39.5, lon: -98.35, zoom: 4, key: 0 });
   const [pickerDrawing, setPickerDrawing] = useState(false);
   const [importBuildings, setImportBuildings] = useState(true);
@@ -95,10 +96,10 @@ export default function SecurityPlanner() {
   const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
-  const [planGeoRef, setPlanGeoRef] = useState<PlanGeoRef | null>(null);
+  const [planGeoRef, setPlanGeoRef] = useProjectField("planGeoRef");
   const [elevationExaggeration, setElevationExaggeration] = useState(1);
   const [elevationStatus, setElevationStatus] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
-  const [elevationOverlay, setElevationOverlay] = useState<ElevationOverlayMode>("off");
+  const [elevationOverlay, setElevationOverlay] = useProjectField("elevationOverlay");
   const [elevationImagery, setElevationImagery] = useState<MapImagerySource | "keep">("satellite");
   const elevationReadoutRef = useRef<HTMLDivElement>(null);
   const planBrushCursorRef = useRef<SVGCircleElement>(null);
@@ -110,26 +111,20 @@ export default function SecurityPlanner() {
   const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
   const [bgDragStart, setBgDragStart] = useState({ x: 0, y: 0, bgX: 0, bgY: 0 });
   const [mapMoveMode, setMapMoveMode] = useState(false);
-  const [buildingLabelDefaults, setBuildingLabelDefaults] = useState<BuildingLabelDefaults>(DEFAULT_BUILDING_LABEL);
+  const [buildingLabelDefaults, setBuildingLabelDefaults] = useProjectField("buildingLabelDefaults");
 
   const panelSection = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-3";
   const panelSectionLoose = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-4";
 
   // Canvas + Background State
-  const [canvasSize, setCanvasSize] = useState(DEFAULT_CANVAS);
-  const [backgroundImg, setBackgroundImg] = useState<string | null>(null);
-  const [bgSettings, setBgSettings] = useState({
-    x: 0,
-    y: 0,
-    width: DEFAULT_CANVAS.width,
-    height: DEFAULT_CANVAS.height,
-    opacity: 0.5
-  });
+  const [canvasSize, setCanvasSize] = useProjectField("canvasSize");
+  const [backgroundImg, setBackgroundImg] = useProjectField("backgroundImg");
+  const [bgSettings, setBgSettings] = useProjectField("bgSettings");
 
-  const [gridSize, setGridSize] = useState(20);
-  const [showGrid, setShowGrid] = useState(true);
-  const [snapToGrid, setSnapToGrid] = useState(false);
-  const [projectName, setProjectName] = useState("Security Camera Plan");
+  const [gridSize, setGridSize] = useProjectField("gridSize");
+  const [showGrid, setShowGrid] = useProjectField("showGrid");
+  const [snapToGrid, setSnapToGrid] = useProjectField("snapToGrid");
+  const [projectName, setProjectName] = useProjectField("projectName");
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
   const [rightPanelMode, setRightPanelMode] = useState<"properties" | "project">("properties");
@@ -160,53 +155,29 @@ export default function SecurityPlanner() {
   }, [selectedId]);
 
   // State Refs for History (Ensures we save latest state in async callbacks)
-  const currentItemsRef = useRef(items);
-  const terrainHeightsRef = useRef(terrainHeights);
-  const buildingLabelDefaultsRef = useRef(buildingLabelDefaults);
-  const backgroundImgRef = useRef(backgroundImg);
-  const bgSettingsRef = useRef(bgSettings);
-  const canvasSizeRef = useRef(canvasSize);
-  const gridSizeRef = useRef(gridSize);
-  const showGridRef = useRef(showGrid);
-  const snapToGridRef = useRef(snapToGrid);
-  const frustumSettingsRef = useRef({
-    visible: true,
-    opacity: 0.15,
-    edgeOpacity: 0.6,
-    useCameraColor: true,
-    color: '#3b82f6',
-    showAll: true,
-    mode: 'volume' as 'volume' | 'floor'
-  });
-  const sceneBackgroundImgRef = useRef<string | null>(null);
-  const backgroundModeRef = useRef<'flat' | 'panorama'>('flat');
-  const nvrLayoutRef = useRef<any[]>([]);
-  const demScaleRef = useRef(demScale);
-  const demOffsetRef = useRef(demOffset);
-  const demNormalizeRef = useRef(demNormalize);
-  const demTransformRef = useRef(demTransform);
-  const demOverlayOpacityRef = useRef(demOverlayOpacity);
-  const demAlignModeRef = useRef(demAlignMode);
-  const demAlignToolRef = useRef(demAlignTool);
+  const currentItemsRef = projectRef("items");
+  const terrainHeightsRef = projectRef("terrainHeights");
+  const buildingLabelDefaultsRef = projectRef("buildingLabelDefaults");
+  const backgroundImgRef = projectRef("backgroundImg");
+  const bgSettingsRef = projectRef("bgSettings");
+  const canvasSizeRef = projectRef("canvasSize");
+  const gridSizeRef = projectRef("gridSize");
+  const showGridRef = projectRef("showGrid");
+  const snapToGridRef = projectRef("snapToGrid");
+  const frustumSettingsRef = projectRef("frustumSettings");
+  const sceneBackgroundImgRef = projectRef("sceneBackgroundImg");
+  const backgroundModeRef = projectRef("backgroundMode");
+  const nvrLayoutRef = projectRef("nvrLayout");
+  const demScaleRef = projectRef("demScale");
+  const demOffsetRef = projectRef("demOffset");
+  const demNormalizeRef = projectRef("demNormalize");
+  const demTransformRef = projectRef("demTransform");
+  const demOverlayOpacityRef = projectRef("demOverlayOpacity");
+  const demAlignModeRef = projectRef("demAlignMode");
+  const demAlignToolRef = projectRef("demAlignTool");
   const isApplyingHistoryRef = useRef(false);
   const historySettingsTimerRef = useRef<number | null>(null);
   const itemsHistoryTimerRef = useRef<number | null>(null);
-  useEffect(() => { currentItemsRef.current = items; }, [items]);
-  useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
-  useEffect(() => { buildingLabelDefaultsRef.current = buildingLabelDefaults; }, [buildingLabelDefaults]);
-  useEffect(() => { backgroundImgRef.current = backgroundImg; }, [backgroundImg]);
-  useEffect(() => { bgSettingsRef.current = bgSettings; }, [bgSettings]);
-  useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
-  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
-  useEffect(() => { showGridRef.current = showGrid; }, [showGrid]);
-  useEffect(() => { snapToGridRef.current = snapToGrid; }, [snapToGrid]);
-  useEffect(() => { demScaleRef.current = demScale; }, [demScale]);
-  useEffect(() => { demOffsetRef.current = demOffset; }, [demOffset]);
-  useEffect(() => { demNormalizeRef.current = demNormalize; }, [demNormalize]);
-  useEffect(() => { demTransformRef.current = demTransform; }, [demTransform]);
-  useEffect(() => { demOverlayOpacityRef.current = demOverlayOpacity; }, [demOverlayOpacity]);
-  useEffect(() => { demAlignModeRef.current = demAlignMode; }, [demAlignMode]);
-  useEffect(() => { demAlignToolRef.current = demAlignTool; }, [demAlignTool]);
 
   // Clipboard
   const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
@@ -366,8 +337,7 @@ export default function SecurityPlanner() {
   useEffect(() => { interactionStateRef.current = interactionState; }, [interactionState]);
 
   // NVR Layout State
-  const [nvrLayout, setNvrLayout] = useState<any[]>([]);
-  useEffect(() => { nvrLayoutRef.current = nvrLayout; }, [nvrLayout]);
+  const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
   const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
   const nvrContainerRef = useRef<HTMLDivElement>(null);
   const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
@@ -1085,7 +1055,7 @@ export default function SecurityPlanner() {
   const terrainBrushFalloffRef = useRef(terrainBrushFalloff);
   const terrainFlattenTargetRef = useRef(terrainFlattenTarget);
   const terrainFlattenSampleRef = useRef(terrainFlattenSample);
-  const demDataRef = useRef<DemData | null>(demData);
+  const demDataRef = projectRef("demData");
   const demPreviewRef = useRef(demPreview);
   const prevCanvasSizeRef = useRef(canvasSize);
   const prevGridSizeRef = useRef(gridSize);
@@ -1097,7 +1067,6 @@ export default function SecurityPlanner() {
   useEffect(() => { terrainBrushFalloffRef.current = terrainBrushFalloff; }, [terrainBrushFalloff]);
   useEffect(() => { terrainFlattenTargetRef.current = terrainFlattenTarget; }, [terrainFlattenTarget]);
   useEffect(() => { terrainFlattenSampleRef.current = terrainFlattenSample; }, [terrainFlattenSample]);
-  useEffect(() => { demDataRef.current = demData; }, [demData]);
   useEffect(() => { demPreviewRef.current = demPreview; }, [demPreview]);
   const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
   const terrainStrokeRef = useRef<{
@@ -1152,13 +1121,7 @@ export default function SecurityPlanner() {
   const [showCameraPreview, setShowCameraPreview] = useState(true);
 
   // Export list - curated snapshots for client report
-  const [exportList, setExportList] = useState<{
-    id: string;
-    type: 'plan' | '3d' | 'camera';
-    label: string;
-    dataUrl: string;
-    cameraId?: string;
-  }[]>([]);
+  const [exportList, setExportList] = useProjectField("exportList");
   const [exportNotice, setExportNotice] = useState<{
     id: number;
     message: string;
@@ -1167,20 +1130,9 @@ export default function SecurityPlanner() {
   const exportNoticeTimerRef = useRef<number | null>(null);
 
   // 3D Visualization Settings
-  const [frustumSettings, setFrustumSettings] = useState({
-    visible: true,
-    opacity: 0.15,
-    edgeOpacity: 0.6,
-    useCameraColor: true,
-    color: '#3b82f6',
-    showAll: true,
-    mode: 'volume' // 'volume' | 'floor'
-  });
-  const [sceneBackgroundImg, setSceneBackgroundImg] = useState<string | null>(null);
-  const [backgroundMode, setBackgroundMode] = useState<'flat' | 'panorama'>('flat'); // 'flat' = image, 'panorama' = 360° equirectangular
-  useEffect(() => { frustumSettingsRef.current = frustumSettings; }, [frustumSettings]);
-  useEffect(() => { sceneBackgroundImgRef.current = sceneBackgroundImg; }, [sceneBackgroundImg]);
-  useEffect(() => { backgroundModeRef.current = backgroundMode; }, [backgroundMode]);
+  const [frustumSettings, setFrustumSettings] = useProjectField("frustumSettings");
+  const [sceneBackgroundImg, setSceneBackgroundImg] = useProjectField("sceneBackgroundImg");
+  const [backgroundMode, setBackgroundMode] = useProjectField("backgroundMode"); // 'flat' = image, 'panorama' = 360° equirectangular
 
   useEffect(() => {
     if (isApplyingHistoryRef.current) return;
@@ -4173,11 +4125,10 @@ export default function SecurityPlanner() {
   }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
-  const itemsRef = useRef(items);
+  const itemsRef = projectRef("items");
   const modeRef = useRef(mode);
   const selectedIdRef = useRef(selectedId);
 
-  useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
