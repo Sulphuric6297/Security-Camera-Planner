@@ -1559,7 +1559,7 @@ export default function SecurityPlanner() {
         newItem = {
           ...common,
           type: "tree",
-          radius: 25,
+          radius: 12,
           color: COLORS.tree[0]
         };
         break;
@@ -4945,7 +4945,7 @@ export default function SecurityPlanner() {
                 newItem = {
                   ...common,
                   type: "tree",
-                  radius: 25,
+                  radius: 12,
                   color: COLORS.tree[0]
                 } as TreeItem;
                 break;
@@ -8284,10 +8284,10 @@ export default function SecurityPlanner() {
                 <div className={panelSection}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Width (ft)</label>
                       <input
                         type="number"
-                      value={(selectedItem as any).width}
+                      value={Math.round((selectedItem as any).width * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
                           ? updateBuildingSize(selectedItem.id, parseInt(e.target.value), (selectedItem as BuildingItem).height)
@@ -8298,11 +8298,11 @@ export default function SecurityPlanner() {
                     </div>
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase">
-                        {selectedItem.type === "parking" ? "Depth" : "Height"}
+                        {selectedItem.type === "parking" ? "Length (ft)" : "Depth (ft)"}
                       </label>
                       <input
                         type="number"
-                      value={(selectedItem as any).height}
+                      value={Math.round((selectedItem as any).height * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
                           ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, parseInt(e.target.value))
@@ -8393,7 +8393,7 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Height (Z)</span>
-                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} units</span>
+                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} ft</span>
                   </label>
                   <div className="flex gap-2">
                     <input
@@ -8421,14 +8421,14 @@ export default function SecurityPlanner() {
                 <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
-                    <span>{(selectedItem as BuildingItem).wallHeight ?? 60} units</span>
+                    <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>
                   </label>
                   <div className="flex gap-2">
                     <input
                       type="range"
-                      min="10"
-                      max="300"
-                      value={(selectedItem as BuildingItem).wallHeight ?? 60}
+                      min="6"
+                      max="150"
+                      value={(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight}
                       onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600 self-center"
                     />
@@ -8647,7 +8647,7 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Canopy Size</span>
-                      <span>{(selectedItem as TreeItem).radius}px</span>
+                      <span>{(selectedItem as TreeItem).radius * 2} ft across</span>
                     </label>
                     <input
                       type="range"
@@ -8769,7 +8769,7 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Range</span>
-                      <span>{Math.round((selectedItem as CameraItem).range)}px</span>
+                      <span>{Math.round((selectedItem as CameraItem).range)} ft</span>
                     </label>
                     <input
                       type="range"
@@ -9089,7 +9089,7 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Grid Size</span>
-                    <span>{gridSize}px</span>
+                    <span>{gridSize} ft</span>
                   </label>
                   <input
                     type="range"
