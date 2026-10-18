@@ -3331,7 +3331,73 @@ export default function SecurityPlanner() {
       disposeGroup(frustumGroup);
     }
 
-    // Floor projection removed
+    // Ground footprint: what the camera covers on the (terrain-following) ground, colored by DORI zone.
+    if (shouldShow) {
+      const obstacles = itemsRef.current.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
+      const poly = getVisibilityPolygon(cameraPos, range, hFov, cameraItem.rotation, obstacles);
+      const zones = getDoriDistances(cameraItem);
+      const mountH = cameraItem.mount?.height ?? cameraItem.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+      const vf = cameraItem.vFov ?? vFovFromH(hFov, getCameraAspectValue(cameraItem));
+      const coverage = getGroundCoverage(mountH, THREE.MathUtils.radToDeg(pitchRad), vf);
+      const start = Number.isFinite(coverage.near) ? Math.min(coverage.near, range) : range;
+      const end = Math.min(range, Number.isFinite(coverage.far) ? coverage.far : range);
+      if (poly.length > 1 && end > start) {
+        const stops = new Set<number>([start, end]);
+        zones.forEach(z => { if (z.distance > start && z.distance < end) stops.add(z.distance); });
+        const step = Math.max(2, (end - start) / 14);
+        for (let d = start + step; d < end; d += step) stops.add(d);
+        const radii = Array.from(stops).sort((a, b) => a - b);
+        const bandColor = (d: number) => {
+          if (!showDoriZones) return new THREE.Color(cameraItem.color);
+          const zone = zones.find(z => d <= z.distance);
+          return new THREE.Color(zone ? zone.color : cameraItem.color);
+        };
+        const positions: number[] = [];
+        const colors: number[] = [];
+        const vertex = (dir: { x: number; y: number }, len: number, r: number) => {
+          const t = Math.min(r, len);
+          const wx = cameraPos.x + dir.x * t;
+          const wz = cameraPos.y + dir.y * t;
+          positions.push(wx, getGridHeight(wx, wz) + 0.3, wz);
+        };
+        const rays = poly.map(p => {
+          const len = Math.hypot(p.x, p.y);
+          return { dir: { x: p.x / (len || 1), y: p.y / (len || 1) }, len };
+        });
+        for (let i = 0; i < rays.length - 1; i++) {
+          const a = rays[i];
+          const b = rays[i + 1];
+          for (let j = 0; j < radii.length - 1; j++) {
+            const r0 = radii[j];
+            const r1 = radii[j + 1];
+            if (r0 >= a.len && r0 >= b.len) break;
+            const c = bandColor((r0 + r1) / 2);
+            vertex(a.dir, a.len, r0); vertex(b.dir, b.len, r0); vertex(a.dir, a.len, r1);
+            vertex(b.dir, b.len, r0); vertex(b.dir, b.len, r1); vertex(a.dir, a.len, r1);
+            for (let k = 0; k < 6; k++) colors.push(c.r, c.g, c.b);
+          }
+        }
+        if (positions.length) {
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+          geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+          const floor = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.32,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -4,
+            polygonOffsetUnits: -8
+          }));
+          floor.name = `camera-floor-${cameraItem.id}`;
+          floor.renderOrder = 2;
+          floor.raycast = () => {};
+          state.group.add(floor);
+        }
+      }
+    }
   };
 
   // Fast position-only update for 3D objects (used during dragging)
@@ -5233,7 +5299,7 @@ export default function SecurityPlanner() {
       }
     });
     return () => window.cancelAnimationFrame(id);
-  }, [frustumSettings, selectedId, viewMode]);
+  }, [frustumSettings, selectedId, viewMode, showDoriZones]);
 
   useEffect(() => {
     if (viewMode !== "iso3d") return;
