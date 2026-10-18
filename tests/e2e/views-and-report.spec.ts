@@ -40,6 +40,32 @@ test.describe("3D, camera views and report", () => {
     expect(info.halfH).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
   });
 
+  test("3D buildings get real roofs textured with the photo; the roof can be changed", async ({ page }) => {
+    await importSite(page);
+    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
+    const roofs = () =>
+      page.evaluate(() => {
+        const out: { id: string; kind: string; photo: boolean }[] = [];
+        (window as any).__scpThree().scene.traverse((o: any) => {
+          if (o.name === "building-roof") out.push({ id: o.userData.itemId, kind: o.userData.roofKind, photo: !!o.material.map });
+        });
+        return out;
+      });
+    await expect.poll(async () => (await roofs()).length).toBe(2);
+    const before = await roofs();
+    expect(before.every(r => r.photo)).toBe(true);
+    expect(before.some(r => r.kind === "hip" || r.kind === "gable")).toBe(true);
+
+    // Change one building's roof to flat in the inspector
+    const target = before.find(r => r.kind !== "flat")!;
+    await page.keyboard.press("2");
+    await page.evaluate(id => (window as any).__scpSelect?.(id), target.id);
+    await page.getByRole("group", { name: "Roof shape" }).getByRole("button", { name: "flat" }).click();
+    await page.keyboard.press("3");
+    await expect.poll(async () => (await roofs()).find(r => r.id === target.id)?.kind).toBe("flat");
+  });
+
   test("Camera wall shows one tile per camera", async ({ page }) => {
     await placeWithKey(page, "c", 0.3, 0.5);
     await placeWithKey(page, "c", 0.7, 0.5);

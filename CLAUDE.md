@@ -45,9 +45,10 @@ Useful commands:
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
-| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), camera wall tiles, PDF report contents |
+| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), photo-textured roofs + roof picker, camera wall tiles, PDF report contents |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
+| `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
@@ -60,8 +61,8 @@ When you add a feature in a new area, add a new spec file and a row to this tabl
   there (anything not stubbed is aborted).
 - The `test` fixture starts each test with empty storage and fails the test on any uncaught
   page error.
-- Tests read the app state through `window.__scpProject()` (zustand store) and
-  `window.__scpHistory`. Keep these hooks.
+- Tests read the app state through `window.__scpProject()` (zustand store), `window.__scpHistory`,
+  `window.__scpThree()` (3D scene) and `window.__scpSelect(id)`. Keep these hooks.
 - The plan SVG has `data-testid="plan"`. Prefer roles, titles and test ids over CSS classes in
   selectors.
 - Keep test titles ASCII. Playwright's `setFiles` silently fails when a test's output path

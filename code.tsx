@@ -65,6 +65,7 @@ import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, i
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { disposeObjectDeep } from "./src/three/dispose";
+import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, type PhotoRect } from "./src/three/buildings";
 import { create3dCar, create3dTree, getCarSignature, getItemTypeLabel, getTreeSignature, resolveVehicleType } from "./src/three/models";
 import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
@@ -209,6 +210,7 @@ export default function SecurityPlanner() {
     // Read access for the automated test suite: undo stack position.
     (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
     (window as any).__scpThree = () => threeStateRef.current;
+    (window as any).__scpSelect = (id: string | null) => setSelectedId(id);
   }
   const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
   const canRedo = historyVersion >= 0 && historyIndexRef.current < historyRef.current.length - 1;
@@ -2272,10 +2274,12 @@ export default function SecurityPlanner() {
     ground.position.set(centerX, 0, centerY);
     scene.add(ground);
 
-    // Background image (terrain deformed)
+    // Background image (terrain deformed); roofs sample the same photo.
+    let viewRoofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
     if (bgImageRef.current) {
       const tex = new THREE.CanvasTexture(bgImageRef.current);
       tex.colorSpace = THREE.SRGBColorSpace;
+      viewRoofPhoto = { texture: tex, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
 
       const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
       const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
@@ -2309,7 +2313,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const baseH = getBuildingBaseHeight(bld);
-        const mesh = createBuildingMesh3d(bld, baseH);
+        const mesh = createBuildingMesh3d(bld, baseH, viewRoofPhoto);
         scene.add(mesh);
       }
       if (item.type === "tree") {
@@ -3095,46 +3099,50 @@ export default function SecurityPlanner() {
     return sprite;
   };
 
-  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number) => {
+  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number, photo?: { texture: THREE.Texture; rect: PhotoRect } | null) => {
     const points = getBuildingPoints(building);
     const buildingHeight = building.wallHeight ?? 60;
-    const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-    const extrudeSettings = {
-      depth: buildingHeight,
-      bevelEnabled: true,
-      bevelThickness: 2,
-      bevelSize: 1,
-      bevelSegments: 2
-    };
-    const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-    geometry.rotateX(-Math.PI / 2);
+    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
 
+    // Walls: exact height (no bevel), tinted with the building color.
     const buildingMaterial = new THREE.MeshStandardMaterial({
       color: building.color,
-      roughness: 0.6,
-      metalness: 0.1
+      roughness: 0.85,
+      metalness: 0.02
     });
-    const mesh = new THREE.Mesh(geometry, buildingMaterial);
+    const mesh = new THREE.Mesh(buildWalls(points, buildingHeight), buildingMaterial);
     mesh.position.set(building.x, baseHeight, building.y);
     mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
 
+    // Roof: flat, gable or hip, with the aerial photo on top when there is one.
+    const roofKind = !building.roofType || building.roofType === "auto" ? chooseRoof(points, buildingHeight, unitsPerFoot) : building.roofType;
+    const parts = buildRoof(points, roofKind, { pitch: 0.45, eave: 1.5 * unitsPerFoot, maxRise: Math.min(12 * unitsPerFoot, buildingHeight * 0.6) });
+    if (photo) applyPhotoUVs(parts.roof, { x: building.x, y: building.y, rotation: building.rotation }, photo.rect);
     const roofMaterial = new THREE.MeshStandardMaterial({
-      color: adjustColor(building.color, -20),
-      roughness: 0.7,
-      metalness: 0.05
+      color: photo ? 0xffffff : adjustColor(building.color, -35),
+      map: photo?.texture ?? null,
+      roughness: 0.9,
+      metalness: 0,
+      side: THREE.DoubleSide
     });
-    const roofShape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-    const roofGeometry = new THREE.ShapeGeometry(roofShape);
-    roofGeometry.rotateX(-Math.PI / 2);
-    const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-    roof.position.set(0, buildingHeight, 0);
+    const roof = new THREE.Mesh(parts.roof, roofMaterial);
+    roof.position.set(0, buildingHeight + (roofKind === "flat" ? 0.05 : 0), 0);
     roof.name = "building-roof";
     roof.userData.itemId = building.id;
     roof.userData.isRoof = true;
+    roof.userData.roofKind = roofKind;
+    roof.castShadow = roofKind !== "flat";
     roof.receiveShadow = true;
     mesh.add(roof);
+    if (parts.gables) {
+      const gables = new THREE.Mesh(parts.gables, new THREE.MeshStandardMaterial({ color: building.color, roughness: 0.85, side: THREE.DoubleSide }));
+      gables.userData.itemId = building.id;
+      gables.castShadow = true;
+      roof.add(gables);
+    }
+    const roofTop = buildingHeight + parts.rise;
 
     const font = getBuildingLabelFont(building);
     const label = createTextSprite(building.label, {
@@ -3148,7 +3156,7 @@ export default function SecurityPlanner() {
       label.userData.itemId = building.id;
       label.userData.isLabel = true;
       label.userData.signature = getBuildingLabelSignature(building);
-      label.position.set(labelOffset.x, buildingHeight + 15, labelOffset.y);
+      label.position.set(labelOffset.x, roofTop + 10 * unitsPerFoot, labelOffset.y);
       mesh.add(label);
     }
 
@@ -3819,6 +3827,7 @@ export default function SecurityPlanner() {
         if (prevB.width !== nextB.width || prevB.height !== nextB.height || prevB.wallHeight !== nextB.wallHeight) return true;
         if (JSON.stringify(prevB.points) !== JSON.stringify(nextB.points)) return true;
         if (prevB.color !== nextB.color) return true;
+        if (prevB.roofType !== nextB.roofType) return true;
       }
 
       if (nextItem.type === "label") {
@@ -3958,6 +3967,7 @@ export default function SecurityPlanner() {
     group.add(boundaryLine);
 
     // Background image
+    let roofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
     if (backgroundImg) {
       const mapPlaneMaterial = new THREE.MeshBasicMaterial({
         color: 0xffffff,
@@ -3969,19 +3979,18 @@ export default function SecurityPlanner() {
         polygonOffsetFactor: -2,
         polygonOffsetUnits: -4
       });
-      new THREE.TextureLoader().load(backgroundImg, texture => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
-        texture.generateMipmaps = true;
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-        mapPlaneMaterial.map = texture;
-        mapPlaneMaterial.needsUpdate = true;
-        renderer.render(scene, state.camera);
-      });
+      // One texture for the ground and every roof (roofs sample the photo straight below them).
+      const texture = new THREE.TextureLoader().load(backgroundImg, () => renderer.render(scene, state.camera));
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
+      texture.generateMipmaps = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      mapPlaneMaterial.map = texture;
+      roofPhoto = { texture, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
 
       // Create subdivided geometry to deform with terrain
       const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
@@ -4025,7 +4034,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const building = item as BuildingItem;
         const baseH = getBuildingBaseHeight(building);
-        const mesh = createBuildingMesh3d(building, baseH);
+        const mesh = createBuildingMesh3d(building, baseH, roofPhoto);
         mesh.userData.itemId = building.id;
         mesh.renderOrder = 1;
         threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
@@ -4081,7 +4090,9 @@ export default function SecurityPlanner() {
         cameraGroup.userData.itemId = cameraItem.id; // For raycasting selection
         cameraGroup.renderOrder = 1;
 
-        const cameraScale = 0.6;
+        // ~2 ft long: real bullet cameras are under a foot, slightly enlarged so they stay visible
+        // (the colored view cone and label mark them from afar).
+        const cameraScale = 0.12 * (planGeoRef?.unitsPerFoot ?? 1);
         const bodyRadius = 4.2 * cameraScale;
         const bodyLength = 16 * cameraScale;
         const bezelLength = 3.2 * cameraScale;
@@ -8548,6 +8559,26 @@ export default function SecurityPlanner() {
                       onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
+                  </div>
+                  <div className="space-y-1.5 pt-1">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Roof</label>
+                    <div className="grid grid-cols-4 gap-1" role="group" aria-label="Roof shape">
+                      {(["auto", "gable", "hip", "flat"] as const).map(kind => {
+                        const current = (selectedItem as BuildingItem).roofType ?? "auto";
+                        return (
+                          <button
+                            key={kind}
+                            type="button"
+                            aria-pressed={current === kind}
+                            title={kind === "auto" ? "Pick from the footprint: pitched for houses, flat for large buildings" : `${kind[0].toUpperCase()}${kind.slice(1)} roof`}
+                            onClick={() => updateItem(selectedItem.id, { roofType: kind })}
+                            className={`py-1.5 rounded-lg text-[11px] font-semibold border capitalize ${current === kind ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                          >
+                            {kind}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}

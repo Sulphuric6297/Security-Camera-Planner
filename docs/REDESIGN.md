@@ -52,7 +52,7 @@ and previews that look exact without saying they are estimates.
 
 ## Phases
 
-### Phase 1: 3D that looks real
+### Phase 1: 3D that looks real (in progress: photo roofs, roof shapes, trees and real-size cameras/cars done)
 - Texture roof tops with the aerial photo (project the plan image onto each roof), so 3D buildings
   look like the satellite view from above.
 - Give roofs real shapes: flat or gable (hip/gable for houses, flat for large commercial

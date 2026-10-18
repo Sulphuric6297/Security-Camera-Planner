@@ -383,32 +383,44 @@ export const create3dTree = (item: TreeItem): THREE.Group => {
   const trunkColor = '#4a3728';
   const trunkMat = new THREE.MeshStandardMaterial({ color: trunkColor, roughness: 1.0, flatShading: true });
 
+  // Deterministic per-tree variation
+  const seed = item.id.split('').reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) >>> 0, 7);
+  const rand = (i: number) => {
+    const x = Math.sin(seed * 0.0001 + i * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+  };
+  // Real trunks are ~1 ft across for a yard tree, not a fifth of the canopy.
+  const trunkRadiusFor = (canopyR: number) => clamp(canopyR * 0.055, 0.25, 1.4);
+  const shades = (base: string) => [-0.12, 0, 0.1].map(d => {
+    const c = new THREE.Color(base);
+    const hsl = { h: 0, s: 0, l: 0 };
+    c.getHSL(hsl);
+    c.setHSL(hsl.h, hsl.s, clamp(hsl.l + d, 0.05, 0.8));
+    return new THREE.MeshStandardMaterial({ color: c, roughness: 0.9 });
+  });
+
   if (treeType === 'conifer') {
-    // Conifer/Pine Tree: Stacked Cones
-    const trunkRadius = item.radius * 0.2;
-    const trunkH = treeHeight * 0.3;
-    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, trunkH, 6);
-    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-    trunk.position.y = trunkH / 2;
+    // Conifer: slim trunk, stacked tapering cones from low branches to a pointed top.
+    const canopyR = item.radius * widthMultiplier;
+    const trunkR = trunkRadiusFor(canopyR);
+    const trunkH = treeHeight * 0.2;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(trunkR * 0.7, trunkR, trunkH + treeHeight * 0.3, 8), trunkMat);
+    trunk.position.y = (trunkH + treeHeight * 0.3) / 2;
     trunk.castShadow = true;
     group.add(trunk);
 
-    const foliageMat = new THREE.MeshStandardMaterial({ color: '#1e4620', roughness: 0.8, flatShading: true });
-    const layers = 5;
-    const canopyHeight = treeHeight * 0.8;
-    const layerH = canopyHeight / layers;
-
+    const mats = shades(item.color);
+    const layers = 6;
+    const span = treeHeight - trunkH;
     for (let i = 0; i < layers; i++) {
-      const t = i / (layers - 1);
-      const r = item.radius * widthMultiplier * (1 - t * 0.7);
-      const y = trunkH * 0.5 + i * (layerH * 0.85);
-
-      const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(r, layerH * 1.4, 8),
-        foliageMat
-      );
-      cone.position.y = y;
+      const t = i / layers;
+      const r = canopyR * (1 - t * 0.85) * (0.92 + rand(i) * 0.16);
+      const h = (span / layers) * 1.9;
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(r, h, 12), mats[i % mats.length]);
+      cone.position.y = trunkH + t * span + h / 2 - (span / layers) * 0.35;
+      cone.rotation.y = rand(i + 10) * Math.PI;
       cone.castShadow = true;
+      cone.receiveShadow = true;
       group.add(cone);
     }
   } else if (treeType === 'palm') {
@@ -484,42 +496,43 @@ export const create3dTree = (item: TreeItem): THREE.Group => {
       group.add(clump);
     }
   } else {
-    // Deciduous Tree (default): Fluffy spherical canopy
-    const trunkRadius = item.radius * 0.2;
-    const trunkH = treeHeight * 0.4;
-    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.7, trunkRadius, trunkH, 6);
-    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-    trunk.position.y = trunkH / 2;
+    // Deciduous (default): trunk to about a third of the height, then a full rounded canopy of
+    // overlapping leaf clusters filling the rest, in a few shades so it reads as foliage.
+    const canopyR = item.radius * widthMultiplier;
+    const trunkR = trunkRadiusFor(canopyR);
+    const canopyBottom = treeHeight * 0.32;
+    const canopyH = treeHeight - canopyBottom;
+    const centerY = canopyBottom + canopyH / 2;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(trunkR * 0.65, trunkR, centerY, 8), trunkMat);
+    trunk.position.y = centerY / 2;
     trunk.castShadow = true;
     group.add(trunk);
 
-    const foliageMat = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.8, flatShading: true });
-    const canopyRadius = item.radius * widthMultiplier;
-
-    // Main center sphere
-    const mainGeo = new THREE.IcosahedronGeometry(canopyRadius * 0.9, 1);
-    const main = new THREE.Mesh(mainGeo, foliageMat);
-    main.position.y = trunkH + canopyRadius * 0.5;
-    main.castShadow = true;
-    group.add(main);
-
-    // Random clumps for fullness
-    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-    const clumps = 8;
-    for (let i = 0; i < clumps; i++) {
-      const theta = ((hash + i * 13) % 100) / 100 * Math.PI * 2;
-      const phi = ((hash + i * 7) % 100) / 100 * Math.PI;
-      const size = canopyRadius * (0.35 + ((hash + i * 3) % 5) / 12);
-      const dist = canopyRadius * 0.65;
-
-      const sub = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), foliageMat);
-      sub.position.set(
-        Math.sin(phi) * Math.cos(theta) * dist,
-        main.position.y + Math.cos(phi) * dist * 0.7,
-        Math.sin(phi) * Math.sin(theta) * dist
+    const mats = shades(item.color);
+    // Core volume
+    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 2), mats[1]);
+    core.scale.set(canopyR * 0.82, canopyH * 0.42, canopyR * 0.82);
+    core.position.y = centerY;
+    core.castShadow = true;
+    core.receiveShadow = true;
+    group.add(core);
+    // Leaf clusters around the surface (more and smaller toward the top)
+    const clusters = 14;
+    for (let i = 0; i < clusters; i++) {
+      const theta = rand(i) * Math.PI * 2;
+      const up = rand(i + 50) * 2 - 1; // -1 bottom .. 1 top
+      const ring = Math.sqrt(Math.max(0, 1 - up * up));
+      const size = canopyR * (0.32 + rand(i + 100) * 0.18) * (up > 0.4 ? 0.85 : 1);
+      const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 1), mats[up > 0.3 ? 2 : up < -0.3 ? 0 : 1]);
+      blob.position.set(
+        Math.cos(theta) * ring * canopyR * 0.72,
+        centerY + up * canopyH * 0.36,
+        Math.sin(theta) * ring * canopyR * 0.72
       );
-      sub.castShadow = true;
-      group.add(sub);
+      blob.scale.y = 0.85;
+      blob.castShadow = true;
+      blob.receiveShadow = true;
+      group.add(blob);
     }
   }
 

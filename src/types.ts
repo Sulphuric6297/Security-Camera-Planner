@@ -97,7 +97,8 @@ export interface BuildingItem extends BaseItem {
   importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
   width: number;
   height: number;
-  wallHeight?: number; // Vertical height in 3D
+  wallHeight?: number; // Vertical height in 3D (to the eaves)
+  roofType?: "auto" | "flat" | "gable" | "hip"; // 3D roof shape; "auto" picks from the footprint
   label: string;
   color: string;
   points?: { x: number; y: number }[];
