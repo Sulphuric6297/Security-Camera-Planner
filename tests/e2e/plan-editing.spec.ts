@@ -68,4 +68,29 @@ test.describe("2D plan editing", () => {
     expect(after.x - before.x).toBeCloseTo(-100, -1);
     expect(after.y - before.y).toBeCloseTo(-50, -1);
   });
+
+  test("vehicles are placed at real size; picking a type sets its size", async ({ page }) => {
+    await placeWithKey(page, "p", 0.5, 0.5);
+    const [car] = await itemsOfType(page, "parking");
+    expect(car.width).toBeLessThan(8);
+    expect(car.height).toBeLessThan(20);
+    await page.getByRole("button", { name: "Pickup" }).click();
+    const [truck] = await itemsOfType(page, "parking");
+    expect(truck.vehicleType).toBe("truck");
+    expect(truck.height).toBeGreaterThan(car.height);
+    expect(truck.height).toBeLessThan(21);
+  });
+
+  test("placing in the 3D view uses the same real sizes", async ({ page }) => {
+    await page.keyboard.press("3");
+    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
+    await page.keyboard.press("p");
+    const canvas = page.locator("canvas").first();
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(async () => (await itemsOfType(page, "parking")).length).toBe(1);
+    const [car] = await itemsOfType(page, "parking");
+    expect(car.width).toBeLessThan(8);
+    expect(car.height).toBeLessThan(20);
+  });
 });

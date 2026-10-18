@@ -36,7 +36,15 @@ import {
   LoaderCircle,
   MapPin,
   Hand,
-  SquareDashed
+  SquareDashed,
+  Copy,
+  RotateCw,
+  Maximize2,
+  ZoomIn,
+  ZoomOut,
+  Crosshair,
+  Navigation2,
+  ChevronDown
 } from "lucide-react";
 import GridLayoutBase from "react-grid-layout";
 // react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
@@ -48,22 +56,31 @@ import { useProjectField, getProject, useProject, createEmptyProject, projectRef
 import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
-import { ProjectOverview } from "./src/components/ProjectOverview";
+import { StepPanel } from "./src/components/StepPanel";
+import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
+import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
+import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
+import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
+import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
+import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
+import { shiftGeoPoints } from "./src/lib/geo/align";
+import { TARGET_KINDS, VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize } from "./src/lib/geometry";
+import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { disposeObjectDeep } from "./src/three/dispose";
+import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, type PhotoRect } from "./src/three/buildings";
 import { create3dCar, create3dTree, getCarSignature, getItemTypeLabel, getTreeSignature, resolveVehicleType } from "./src/three/models";
-import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
+import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
@@ -99,6 +116,9 @@ export default function SecurityPlanner() {
   const [importBuildings, setImportBuildings] = useState(true);
   const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
   const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  // Lining the found footprints up with the photo: automatic, with manual nudges as a fallback.
+  const [buildingAlign, setBuildingAlign] = useState<{ state: "idle" | "working" | "done" | "none"; movedM: number; nudged: boolean }>({ state: "idle", movedM: 0, nudged: false });
+  const originalCandidatesRef = useRef<BuildingCandidate[]>([]);
   const [selectViewSignal, setSelectViewSignal] = useState(0);
   const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
   const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false);
@@ -147,6 +167,17 @@ export default function SecurityPlanner() {
   });
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+  // On-screen size of the plan SVG (for the scale bar and the floating action bar).
+  const [planRect, setPlanRect] = useState({ width: 0, height: 0 });
+  const [show3dMenu, setShow3dMenu] = useState(false);
+  // Inspector: rarely used settings stay folded away until asked for.
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
+  // Coverage: blind-spot overlay and "aim this camera at the next click".
+  const [showBlindSpots, setShowBlindSpots] = useState(false);
+  const [aimingCameraId, setAimingCameraId] = useState<string | null>(null);
+  // Set when a press already did its job (aimed a camera, placed an item on top of another), so the
+  // click that follows doesn't also deselect or place again.
+  const consumedClickRef = useRef(false);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, panX: 0, panY: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -202,6 +233,8 @@ export default function SecurityPlanner() {
   if (typeof window !== "undefined") {
     // Read access for the automated test suite: undo stack position.
     (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
+    (window as any).__scpThree = () => threeStateRef.current;
+    (window as any).__scpSelect = (id: string | null) => setSelectedId(id);
   }
   const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
   const canRedo = historyVersion >= 0 && historyIndexRef.current < historyRef.current.length - 1;
@@ -855,15 +888,29 @@ export default function SecurityPlanner() {
     if (dims.widthFt > SITE_MAX_WIDTH_FT || dims.heightFt > SITE_MAX_WIDTH_FT) return;
     let cancelled = false;
     setBuildingScan({ state: "loading", message: "Looking for buildings…" });
+    setBuildingAlign({ state: "idle", movedM: 0, nudged: false });
     const timer = window.setTimeout(async () => {
       try {
         const result = await findBuildingCandidates(siteBounds);
         if (cancelled) return;
         setBuildingCandidates(result.candidates);
+        originalCandidatesRef.current = result.candidates;
         if (!result.osmOk && !result.detectedOk) {
           setBuildingScan({ state: "error", message: "Couldn't reach the building services. You can still import and draw buildings yourself." });
+          return;
+        }
+        setBuildingScan({ state: "done", message: "" });
+        // Footprint datasets are often a few meters off the photo: line them up automatically.
+        if (result.candidates.length === 0) return;
+        setBuildingAlign({ state: "working", movedM: 0, nudged: false });
+        const aligned = await alignToSatelliteTiles(result.candidates, siteBounds).catch(() => null);
+        if (cancelled) return;
+        if (aligned && aligned.stats.adjusted > 0) {
+          // Keep the user's keep/remove choices made while this ran.
+          setBuildingCandidates(prev => aligned.items.map(a => ({ ...a, selected: prev.find(p => p.id === a.id)?.selected ?? a.selected })));
+          setBuildingAlign({ state: "done", movedM: aligned.stats.movedMeters, nudged: false });
         } else {
-          setBuildingScan({ state: "done", message: "" });
+          setBuildingAlign({ state: "none", movedM: 0, nudged: false });
         }
       } catch (err) {
         if (!cancelled) setBuildingScan({ state: "error", message: "Couldn't look up buildings for this area." });
@@ -874,6 +921,17 @@ export default function SecurityPlanner() {
       window.clearTimeout(timer);
     };
   }, [siteBounds, showElevationDialog, importBuildings]);
+
+  // Manual fallback: move every found footprint by a small step (meters east/north).
+  const nudgeBuildingCandidates = (eastM: number, northM: number) => {
+    setBuildingCandidates(prev => prev.map(c => ({ ...c, points: shiftGeoPoints(c.points, eastM, northM) })));
+    setBuildingAlign(a => ({ ...a, nudged: true }));
+  };
+  const resetBuildingCandidatePositions = () => {
+    const original = new Map(originalCandidatesRef.current.map(c => [c.id, c.points]));
+    setBuildingCandidates(prev => prev.map(c => ({ ...c, points: original.get(c.id) ?? c.points })));
+    setBuildingAlign({ state: "none", movedM: 0, nudged: true });
+  };
 
   const toggleBuildingCandidate = (id: string) =>
     setBuildingCandidates(prev => prev.map(c => (c.id === id ? { ...c, selected: !c.selected } : c)));
@@ -909,13 +967,18 @@ export default function SecurityPlanner() {
     });
     const result: BuildingItem[] = [];
     osm.forEach(b => {
-      const world = b.points.map(toPlan);
+      const full = b.points.map(toPlan);
+      const fullBox = getPointsBounds(full);
+      const fcx = fullBox.minX + fullBox.width / 2;
+      const fcy = fullBox.minY + fullBox.height / 2;
+      // Keep buildings whose center is on the map, cut at the map edge (the terrain ends there).
+      if (fcx < area.x || fcy < area.y || fcx > area.x + area.width || fcy > area.y + area.height) return;
+      const world = clipPolygonToRect(full, area);
+      // Skip slivers.
+      if (world.length < 3 || polygonArea(world) < 30 * unitsPerFoot * unitsPerFoot) return;
       const box = getPointsBounds(world);
       const cx = box.minX + box.width / 2;
       const cy = box.minY + box.height / 2;
-      // Keep buildings whose center is on the map; skip slivers.
-      if (cx < area.x || cy < area.y || cx > area.x + area.width || cy > area.y + area.height) return;
-      if (box.width * box.height < 30 * unitsPerFoot * unitsPerFoot) return;
       result.push({
         id: generateId(),
         type: "building",
@@ -1057,7 +1120,14 @@ export default function SecurityPlanner() {
       applyDemToTerrain(dem, { preview, transform, scale, offset: 0, normalize: true, canvas, save: false });
 
       setElevationStatus({ state: "loading", message: "Building 3D buildings…" });
-      const osm = await buildingsJob;
+      let osm = await buildingsJob;
+      // Fine-tune against the exact image now in the plan (it can differ from the picker's tiles),
+      // unless the user lined them up by hand.
+      const importedImage = backgroundImgRef.current;
+      if (osm && osm.length && imagery === "satellite" && importedImage && !buildingAlign.nudged) {
+        const refined = await alignToImageUrl(osm, geoBounds, importedImage, buildingAlign.state === "done" ? 4 : 8).catch(() => null);
+        if (refined) osm = refined.items;
+      }
       let buildingText = "";
       if (importBuildings) {
         if (osm === null) {
@@ -1090,6 +1160,17 @@ export default function SecurityPlanner() {
               });
             return [...rest, ...merged];
           });
+          // Show the property: zoom to the buildings near the middle of the area (the searched address).
+          const mid = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
+          const nearby = newBuildings.filter(b => Math.hypot(b.x - mid.x, b.y - mid.y) < 150 * unitsPerFoot);
+          const near = boundsOfPoints(nearby.flatMap(b => (b.points ?? []).map(p => ({ x: b.x + p.x, y: b.y + p.y }))));
+          if (near) {
+            const f = fitBounds(near, canvasSizeRef.current, { margin: 1.4, minSpan: 220 * unitsPerFoot });
+            if (f.zoom > 1.05) {
+              setZoom(f.zoom);
+              setPanOffset(f.pan);
+            }
+          }
           buildingText = newBuildings.length > 0
             ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
             : " No buildings were added. Draw them over the satellite image with the Building tool.";
@@ -1235,6 +1316,9 @@ export default function SecurityPlanner() {
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
   const [reviewVisited, setReviewVisited] = useState(false);
+  // Which workflow step's panel is showing (null = follow progress: the first unfinished step).
+  const [activeStepChoice, setActiveStepChoice] = useState<WorkflowStepId | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   useEffect(() => {
     if (viewMode !== "plan") setReviewVisited(true);
   }, [viewMode]);
@@ -1606,82 +1690,26 @@ export default function SecurityPlanner() {
     const x = snapValue(pos.x);
     const y = snapValue(pos.y);
 
-    let newItem: CanvasItem;
+    placeNewItemAt(type, x, y);
+  };
 
-    const common = {
-      id: generateId(),
-      x,
-      y,
-      rotation: 0
-    };
-
-    switch (type) {
-      case "add-camera":
-        newItem = {
-          ...common,
-          type: "camera",
-          rotation: 45,
-          label: `Camera ${items.filter(i => i.type === "camera").length + 1}`,
-          description: "",
-          fov: DEFAULT_CAMERA_HFOV,
-          hFov: DEFAULT_CAMERA_HFOV,
-          vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
-          pitch: DEFAULT_CAMERA_PITCH,
-          height: DEFAULT_CAMERA_HEIGHT_FT,
-          aspect: 16 / 9,
-          mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
-          range: DEFAULT_CAMERA_RANGE_FT,
-          color: COLORS.camera[items.filter(i => i.type === "camera").length % COLORS.camera.length],
-          connectorDashSize: 3
-        };
-        break;
-      case "add-building":
-        newItem = {
-          ...common,
-          type: "building",
-          width: DEFAULT_BUILDING.width,
-          height: DEFAULT_BUILDING.depth,
-          wallHeight: DEFAULT_BUILDING.wallHeight,
-          label: "Building",
-          color: COLORS.building[0],
-          points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
-        };
-        break;
-      case "add-tree":
-        newItem = {
-          ...common,
-          type: "tree",
-          radius: 12,
-          color: COLORS.tree[0]
-        };
-        break;
-      case "add-parking":
-        newItem = {
-          ...common,
-          type: "parking",
-          width: 24,
-          height: 48,
-          color: COLORS.parking[0],
-          vehicleHeight: 14
-        };
-        break;
-      case "add-label":
-        newItem = {
-          ...common,
-          type: "label",
-          text: "Text",
-          fontSize: 14,
-          color: COLORS.label[0]
-        };
-        break;
-      default:
-        return;
-    }
+  // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
+  // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
+  const placeNewItemAt = (type: ToolMode, x: number, y: number) => {
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target" } as Partial<Record<ToolMode, NewItemKind>>)[type];
+    if (!kind) return null;
+    const newItem = createItem(kind, x, y, {
+      unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
+      cameraIndex: itemsRef.current.filter(i => i.type === "camera").length,
+      targetIndex: itemsRef.current.filter(i => i.type === "target").length
+    });
 
     if (newItem.type === "camera") {
-      const edge = findNearestBuildingEdge({ x, y });
-      // Snap onto a wall only when placed right next to it, so cameras land where the user clicked.
-      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
+      // Clicked on a building: mount on its nearest wall. Otherwise snap onto a wall only when placed
+      // right next to it, so cameras land where the user clicked.
+      const onBuilding = items.find(i => i.type === "building" && pointInPolygonXY({ x, y }, getBuildingEdgePointsWorld(i as BuildingItem)));
+      const edge = findNearestBuildingEdge({ x, y }, onBuilding ? [onBuilding] : items);
+      if (edge && (onBuilding || edge.distance < CAMERA_WALL_SNAP_FT)) {
         const cam = newItem as CameraItem;
         cam.x = edge.point.x;
         cam.y = edge.point.y;
@@ -1702,10 +1730,13 @@ export default function SecurityPlanner() {
       setCameraPlacementPreview(null);
     }
 
-    setItems([...items, newItem]);
+    setItems(prev => [...prev, newItem]);
     setSelectedId(newItem.id);
     setMode("select");
+    return newItem;
   };
+  const placeNewItemAtRef = useRef(placeNewItemAt);
+  placeNewItemAtRef.current = placeNewItemAt;
   const addImageElement = (src: string) => {
     const newItem: ImageItem = {
       id: generateId(),
@@ -2284,10 +2315,12 @@ export default function SecurityPlanner() {
     ground.position.set(centerX, 0, centerY);
     scene.add(ground);
 
-    // Background image (terrain deformed)
+    // Background image (terrain deformed); roofs sample the same photo.
+    let viewRoofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
     if (bgImageRef.current) {
       const tex = new THREE.CanvasTexture(bgImageRef.current);
       tex.colorSpace = THREE.SRGBColorSpace;
+      viewRoofPhoto = { texture: tex, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
 
       const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
       const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
@@ -2321,7 +2354,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const baseH = getBuildingBaseHeight(bld);
-        const mesh = createBuildingMesh3d(bld, baseH);
+        const mesh = createBuildingMesh3d(bld, baseH, viewRoofPhoto);
         scene.add(mesh);
       }
       if (item.type === "tree") {
@@ -2599,6 +2632,75 @@ export default function SecurityPlanner() {
       <p class="note">Identify ≈ recognize a stranger's face or read a plate (250 px/m); Recognize ≈ tell if it's someone you know (125 px/m); Detect ≈ notice someone is there (25 px/m), per IEC 62676-4. Distances assume good lighting.</p>`;
   };
 
+  // Report data: cameras (numbered in plan order) and protected spots with their coverage.
+  const buildReportCameras = (withViews: boolean): ReportCamera[] =>
+    (items.filter(i => i.type === "camera") as CameraItem[]).map((cam, i) => {
+      const dori = getDoriDistances(cam);
+      const heightFt = cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+      const hFov = getCameraHFov(cam);
+      const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
+      const vFov = cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam));
+      const ground = getGroundCoverage(heightFt, pitch, vFov);
+      const building = cam.mount?.type === "building" && cam.mount.buildingId ? (getBuildingById(cam.mount.buildingId) as BuildingItem | undefined) : undefined;
+      let viewImage: string | undefined;
+      if (withViews) {
+        try {
+          viewImage = renderCameraViewToDataUrl(cam);
+        } catch (err) {
+          console.error("Camera view failed", err);
+        }
+      }
+      return {
+        number: i + 1,
+        label: cam.label,
+        color: cam.color,
+        heightFt,
+        mount: building ? `on ${building.label?.trim() || "building"}` : "free-standing",
+        lensLabel: LENS_PRESETS.find(l => l.id === cam.lensPreset)?.label ?? `${Math.round(hFov)}°`,
+        hFov,
+        resolutionLabel: RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`,
+        tiltDeg: pitch,
+        facing: compassFromRotation(cam.rotation),
+        identifyFt: dori[0].distance,
+        recognizeFt: dori[1].distance,
+        detectFt: dori[3].distance,
+        blindSpotFt: Number.isFinite(ground.near) ? ground.near : null,
+        notes: cam.description || "",
+        covers: targetItems
+          .filter(t => targetResults.get(t.id)?.best?.cameraId === cam.id)
+          .map(t => `${t.label} (${LEVEL_LABEL[targetResults.get(t.id)!.best!.level]})`),
+        viewImage
+      };
+    });
+  const buildReportSpots = (): ReportSpot[] => {
+    const cams = items.filter(i => i.type === "camera") as CameraItem[];
+    return targetItems.map(t => {
+      const r = targetResults.get(t.id);
+      const cam = r?.best ? cams.find(c => c.id === r.best!.cameraId) : undefined;
+      return {
+        label: t.label,
+        kind: TARGET_KINDS[t.kind]?.label ?? t.kind,
+        needs: GOAL_LABEL[t.goal],
+        status: targetStatus(r),
+        camera: cam ? `${cams.indexOf(cam) + 1}. ${cam.label}` : undefined,
+        got: r?.best ? LEVEL_LABEL[r.best.level] : undefined,
+        reason: r && !r.best ? `Not covered: ${REASON_TEXT[r.reason ?? "outside-view"]}` : undefined
+      };
+    });
+  };
+
+  const handleDownloadCamerasCsv = () => {
+    const blob = new Blob([camerasCsv(buildReportCameras(false))], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(projectName || "security_plan").replace(/[^\w-]+/g, "_")}_cameras.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const handleExportReportPdf = async () => {
     // Open the window synchronously (inside the click) so popup blockers allow it.
     const printWindow = window.open('', '_blank');
@@ -2608,76 +2710,29 @@ export default function SecurityPlanner() {
     }
     printWindow.document.write("<p style='font-family:system-ui;padding:40px;color:#334155'>Preparing your report…</p>");
 
-    // No views added yet? Build the full report automatically: plan + every camera's view.
-    let views = exportList;
-    if (views.length === 0) {
-      const auto: typeof exportList = [];
-      try {
-        auto.push({ id: "plan", type: "plan", label: "Site plan", dataUrl: await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" }) });
-      } catch (err) {
-        console.error("Plan capture failed", err);
-      }
-      (items.filter(i => i.type === "camera") as CameraItem[]).forEach(cam => {
-        try {
-          auto.push({ id: cam.id, type: "camera", label: `${cam.label} view`, dataUrl: renderCameraViewToDataUrl(cam), cameraId: cam.id });
-        } catch (err) {
-          console.error("Camera view failed", err);
-        }
-      });
-      views = auto;
+    // The site plan always leads; picked views ("Add to report") replace the automatic camera views.
+    let planImage: string | undefined;
+    try {
+      planImage = await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" });
+    } catch (err) {
+      console.error("Plan capture failed", err);
     }
-
-    const site = siteLocation ? `<div><b>Site:</b> ${escapeHtml(siteLocation.label)} (${siteLocation.lat.toFixed(5)}, ${siteLocation.lon.toFixed(5)})</div>` : "";
-    const counts = `${items.filter(i => i.type === "camera").length} cameras · ${items.filter(i => i.type === "building").length} buildings`;
-
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>${escapeHtml(projectName || 'Security Plan Report')}</title>
-        <style>
-          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; color: #0f172a; }
-          h1 { margin-bottom: 5px; }
-          h2 { margin-top: 32px; font-size: 18px; }
-          .meta { color: #64748b; font-size: 14px; margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; line-height: 1.6; }
-          table { width: 100%; border-collapse: collapse; font-size: 12px; }
-          th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-          th { background: #f8fafc; font-weight: 600; }
-          .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-          .note { color: #64748b; font-size: 11px; }
-          .item { margin-bottom: 32px; page-break-inside: avoid; }
-          .item h3 { color: #334155; margin-bottom: 10px; }
-          .item img { width: 100%; border: 1px solid #e2e8f0; border-radius: 4px; }
-          @media print {
-            body { padding: 0; }
-            .no-print { display: none; }
-          }
-        </style>
-      </head>
-      <body>
-        <h1>${escapeHtml(projectName || 'Security Camera Plan')}</h1>
-        <div class="meta">${site}<div>${counts} · Prepared ${new Date().toLocaleString()}</div></div>
-        ${buildCameraScheduleHtml()}
-        ${views.length ? "<h2>Views</h2>" : ""}
-        ${views.map(item => `
-          <div class="item">
-            <h3>${escapeHtml(item.label)}</h3>
-            <img src="${item.dataUrl}" />
-          </div>
-        `).join('')}
-        <script>
-          window.onload = () => {
-             setTimeout(() => {
-               window.print();
-             }, 500);
-          }
-        </script>
-      </body>
-      </html>
-    `;
-
+    const picked = exportList.map(v => ({ label: v.label, dataUrl: v.dataUrl }));
+    const html = buildReportHtml(
+      {
+        title: projectName,
+        site: siteLocation,
+        preparedAt: new Date().toLocaleString(),
+        planImage: picked.length ? undefined : planImage,
+        pickedViews: picked,
+        cameras: buildReportCameras(picked.length === 0),
+        spots: buildReportSpots(),
+        counts: { buildings: items.filter(i => i.type === "building").length }
+      },
+      { autoPrint: true }
+    );
     printWindow.document.open();
-    printWindow.document.write(htmlContent);
+    printWindow.document.write(html);
     printWindow.document.close();
   };
 
@@ -2685,7 +2740,7 @@ export default function SecurityPlanner() {
   // doesn't contain is reset rather than left over from the previous project).
   const applyProjectData = (projectData: any) => {
     suppressDemAutoApply();
-    setItems(Array.isArray(projectData.items) ? projectData.items : []);
+    setItems(Array.isArray(projectData.items) ? migrateItems(projectData.items, projectData.planGeoRef?.unitsPerFoot ?? 1) : []);
     setSelectedId(null);
     setMode("select");
     setTerrainHeights(projectData.terrainHeights && typeof projectData.terrainHeights === "object" ? projectData.terrainHeights : {});
@@ -3107,46 +3162,50 @@ export default function SecurityPlanner() {
     return sprite;
   };
 
-  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number) => {
+  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number, photo?: { texture: THREE.Texture; rect: PhotoRect } | null) => {
     const points = getBuildingPoints(building);
     const buildingHeight = building.wallHeight ?? 60;
-    const shape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-    const extrudeSettings = {
-      depth: buildingHeight,
-      bevelEnabled: true,
-      bevelThickness: 2,
-      bevelSize: 1,
-      bevelSegments: 2
-    };
-    const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-    geometry.rotateX(-Math.PI / 2);
+    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
 
+    // Walls: exact height (no bevel), tinted with the building color.
     const buildingMaterial = new THREE.MeshStandardMaterial({
       color: building.color,
-      roughness: 0.6,
-      metalness: 0.1
+      roughness: 0.85,
+      metalness: 0.02
     });
-    const mesh = new THREE.Mesh(geometry, buildingMaterial);
+    const mesh = new THREE.Mesh(buildWalls(points, buildingHeight), buildingMaterial);
     mesh.position.set(building.x, baseHeight, building.y);
     mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
 
+    // Roof: flat, gable or hip, with the aerial photo on top when there is one.
+    const roofKind = !building.roofType || building.roofType === "auto" ? chooseRoof(points, buildingHeight, unitsPerFoot) : building.roofType;
+    const parts = buildRoof(points, roofKind, { pitch: 0.45, eave: 1.5 * unitsPerFoot, maxRise: Math.min(12 * unitsPerFoot, buildingHeight * 0.6) });
+    if (photo) applyPhotoUVs(parts.roof, { x: building.x, y: building.y, rotation: building.rotation }, photo.rect);
     const roofMaterial = new THREE.MeshStandardMaterial({
-      color: adjustColor(building.color, -20),
-      roughness: 0.7,
-      metalness: 0.05
+      color: photo ? 0xffffff : adjustColor(building.color, -35),
+      map: photo?.texture ?? null,
+      roughness: 0.9,
+      metalness: 0,
+      side: THREE.DoubleSide
     });
-    const roofShape = new THREE.Shape(points.map(p => new THREE.Vector2(p.x, -p.y)));
-    const roofGeometry = new THREE.ShapeGeometry(roofShape);
-    roofGeometry.rotateX(-Math.PI / 2);
-    const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-    roof.position.set(0, buildingHeight, 0);
+    const roof = new THREE.Mesh(parts.roof, roofMaterial);
+    roof.position.set(0, buildingHeight + (roofKind === "flat" ? 0.05 : 0), 0);
     roof.name = "building-roof";
     roof.userData.itemId = building.id;
     roof.userData.isRoof = true;
+    roof.userData.roofKind = roofKind;
+    roof.castShadow = roofKind !== "flat";
     roof.receiveShadow = true;
     mesh.add(roof);
+    if (parts.gables) {
+      const gables = new THREE.Mesh(parts.gables, new THREE.MeshStandardMaterial({ color: building.color, roughness: 0.85, side: THREE.DoubleSide }));
+      gables.userData.itemId = building.id;
+      gables.castShadow = true;
+      roof.add(gables);
+    }
+    const roofTop = buildingHeight + parts.rise;
 
     const font = getBuildingLabelFont(building);
     const label = createTextSprite(building.label, {
@@ -3160,7 +3219,7 @@ export default function SecurityPlanner() {
       label.userData.itemId = building.id;
       label.userData.isLabel = true;
       label.userData.signature = getBuildingLabelSignature(building);
-      label.position.set(labelOffset.x, buildingHeight + 15, labelOffset.y);
+      label.position.set(labelOffset.x, roofTop + 10 * unitsPerFoot, labelOffset.y);
       mesh.add(label);
     }
 
@@ -3831,6 +3890,7 @@ export default function SecurityPlanner() {
         if (prevB.width !== nextB.width || prevB.height !== nextB.height || prevB.wallHeight !== nextB.wallHeight) return true;
         if (JSON.stringify(prevB.points) !== JSON.stringify(nextB.points)) return true;
         if (prevB.color !== nextB.color) return true;
+        if (prevB.roofType !== nextB.roofType) return true;
       }
 
       if (nextItem.type === "label") {
@@ -3970,6 +4030,7 @@ export default function SecurityPlanner() {
     group.add(boundaryLine);
 
     // Background image
+    let roofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
     if (backgroundImg) {
       const mapPlaneMaterial = new THREE.MeshBasicMaterial({
         color: 0xffffff,
@@ -3981,19 +4042,18 @@ export default function SecurityPlanner() {
         polygonOffsetFactor: -2,
         polygonOffsetUnits: -4
       });
-      new THREE.TextureLoader().load(backgroundImg, texture => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
-        texture.generateMipmaps = true;
-        texture.minFilter = THREE.LinearMipmapLinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-        mapPlaneMaterial.map = texture;
-        mapPlaneMaterial.needsUpdate = true;
-        renderer.render(scene, state.camera);
-      });
+      // One texture for the ground and every roof (roofs sample the photo straight below them).
+      const texture = new THREE.TextureLoader().load(backgroundImg, () => renderer.render(scene, state.camera));
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
+      texture.generateMipmaps = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      mapPlaneMaterial.map = texture;
+      roofPhoto = { texture, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
 
       // Create subdivided geometry to deform with terrain
       const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
@@ -4037,7 +4097,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const building = item as BuildingItem;
         const baseH = getBuildingBaseHeight(building);
-        const mesh = createBuildingMesh3d(building, baseH);
+        const mesh = createBuildingMesh3d(building, baseH, roofPhoto);
         mesh.userData.itemId = building.id;
         mesh.renderOrder = 1;
         threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
@@ -4093,7 +4153,9 @@ export default function SecurityPlanner() {
         cameraGroup.userData.itemId = cameraItem.id; // For raycasting selection
         cameraGroup.renderOrder = 1;
 
-        const cameraScale = 0.6;
+        // ~2 ft long: real bullet cameras are under a foot, slightly enlarged so they stay visible
+        // (the colored view cone and label mark them from afar).
+        const cameraScale = 0.12 * (planGeoRef?.unitsPerFoot ?? 1);
         const bodyRadius = 4.2 * cameraScale;
         const bodyLength = 16 * cameraScale;
         const bezelLength = 3.2 * cameraScale;
@@ -4320,6 +4382,58 @@ export default function SecurityPlanner() {
     return copy as CanvasItem;
   };
 
+  // --- Plan view: zoom to fit / to the selection ---
+  const itemPlanBounds = (item: CanvasItem): Bounds | null => {
+    if (item.type === "building") return boundsOfPoints(getBuildingEdgePointsWorld(item as BuildingItem));
+    if (item.type === "camera") {
+      const p = getCameraPlanPosition(item as CameraItem);
+      return { minX: p.x, minY: p.y, maxX: p.x, maxY: p.y };
+    }
+    if (item.type === "target") return { minX: item.x, minY: item.y, maxX: item.x, maxY: item.y };
+    const r = item.type === "tree" ? (item as TreeItem).radius : Math.max((item as any).width ?? 0, (item as any).height ?? 0) / 2;
+    return { minX: item.x - r, minY: item.y - r, maxX: item.x + r, maxY: item.y + r };
+  };
+  const zoomToBounds = (b: Bounds | null, minSpanFt = 60, canvas = canvasSizeRef.current) => {
+    if (!b) return;
+    const f = fitBounds(b, canvas, { margin: 1.3, minSpan: minSpanFt * (planGeoRef?.unitsPerFoot ?? 1) });
+    setZoom(f.zoom);
+    setPanOffset(f.pan);
+  };
+  const zoomToFit = () => {
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+  const zoomToSelection = () => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (item) zoomToBounds(itemPlanBounds(item), item.type === "camera" ? 80 : 50);
+    else zoomToFit();
+  };
+  const zoomBy = (factor: number) => {
+    // Zoom around the middle of the view
+    const cx = canvasSize.width / 2;
+    const cy = canvasSize.height / 2;
+    const next = clamp(zoom * factor, 0.3, MAX_ZOOM);
+    setPanOffset({ x: cx - ((cx - panOffset.x) / zoom) * next, y: cy - ((cy - panOffset.y) / zoom) * next });
+    setZoom(next);
+  };
+
+  // --- Actions on the selection (shared by the floating action bar and shortcuts) ---
+  const duplicateSelected = () => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (!item) return;
+    const copy = pastedCopy(item);
+    const nextItems = [...items, copy];
+    setItems(nextItems);
+    setSelectedId(copy.id);
+    saveHistory(nextItems);
+  };
+  const rotateSelected = (deg: number) => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (!item) return;
+    updateItem(item.id, { rotation: (((item.rotation + deg) % 360) + 360) % 360 });
+    setTimeout(() => saveHistory(), 50);
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -4337,6 +4451,9 @@ export default function SecurityPlanner() {
         }
         if (event.key === "2") { setViewMode("plan"); return; }
         if (event.key === "3") { setViewMode("iso3d"); return; }
+        if (event.key === "?") { event.preventDefault(); setShowShortcuts(true); return; }
+        if (viewMode === "plan" && event.key === "0") { event.preventDefault(); zoomToFit(); return; }
+        if (viewMode === "plan" && event.key.toLowerCase() === "f") { event.preventDefault(); zoomToSelection(); return; }
         // Nudge the selection with the arrow keys (Shift = 10 ft)
         if (selectedId && event.key.startsWith("Arrow")) {
           const item = items.find(i => i.id === selectedId);
@@ -4390,15 +4507,8 @@ export default function SecurityPlanner() {
 
         // Duplicate (Ctrl/Cmd+D)
         if (key === "d" && selectedId) {
-          const item = items.find(i => i.id === selectedId);
-          if (item) {
-            event.preventDefault();
-            const copy = pastedCopy(item);
-            const nextItems = [...items, copy];
-            setItems(nextItems);
-            setSelectedId(copy.id);
-            saveHistory(nextItems);
-          }
+          event.preventDefault();
+          duplicateSelected();
         }
 
         // Copy (Ctrl+C)
@@ -4428,6 +4538,11 @@ export default function SecurityPlanner() {
       }
 
       if (event.key === "Escape") {
+        // Esc while aiming only cancels the aim (the camera stays selected).
+        if (aimingCameraId) {
+          setAimingCameraId(null);
+          return;
+        }
         setSelectedId(null);
         setMode("select");
         setVertexInsertMode(false);
@@ -4446,7 +4561,7 @@ export default function SecurityPlanner() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [items, selectedId, handleSaveProject, viewMode]);
+  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId]);
 
 
   // Effect to handle environment background updates (HDRI / Panorama)
@@ -4756,7 +4871,7 @@ export default function SecurityPlanner() {
     // Scene setup with improved atmosphere
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#09090b");
-    scene.fog = new THREE.Fog("#09090b", 200, 2000);
+    // No fog: this is an orthographic overview, and fog darkened the far side of large sites.
 
     // Orthographic camera for isometric-style view
     const camera = new THREE.OrthographicCamera(-500, 500, 500, -500, 0.1, 6000);
@@ -4770,12 +4885,28 @@ export default function SecurityPlanner() {
     const hemiLight = new THREE.HemisphereLight(0xddeeff, 0x202020, 0.6);
     scene.add(hemiLight);
 
+    // Sun from the south-west, with a shadow camera that covers the whole site
+    // (the default one only covered ~10 ft around the origin, so most shadows were missing).
+    const siteSpan = Math.max(canvasSize.width, canvasSize.height);
+    const siteCenter = new THREE.Vector3(canvasSize.width / 2, 0, canvasSize.height / 2);
     const dirLight = new THREE.DirectionalLight(0xfffee0, 2.0);
-    dirLight.position.set(50, 100, 50);
+    dirLight.position.copy(siteCenter).add(new THREE.Vector3(-0.5, 1, 0.6).normalize().multiplyScalar(siteSpan * 1.5));
+    dirLight.target.position.copy(siteCenter);
     dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.mapSize.width = 4096;
+    dirLight.shadow.mapSize.height = 4096;
+    const shadowCam = dirLight.shadow.camera;
+    shadowCam.left = -siteSpan * 0.8;
+    shadowCam.right = siteSpan * 0.8;
+    shadowCam.top = siteSpan * 0.8;
+    shadowCam.bottom = -siteSpan * 0.8;
+    shadowCam.near = 1;
+    shadowCam.far = siteSpan * 4;
+    shadowCam.updateProjectionMatrix();
+    dirLight.shadow.bias = -0.0005;
+    dirLight.shadow.normalBias = 0.5;
     scene.add(dirLight);
+    scene.add(dirLight.target);
 
     // Initial orbit state with good default viewing angle
     const orbit = {
@@ -5031,82 +5162,7 @@ export default function SecurityPlanner() {
             const x = snapEnabled ? Math.round(groundPos.x / snapSize) * snapSize : groundPos.x;
             const y = snapEnabled ? Math.round(groundPos.z / snapSize) * snapSize : groundPos.z; // z in 3D maps to y in 2D
 
-            const common = {
-              id: generateId(),
-              x,
-              y,
-              rotation: 0
-            };
-
-            let newItem: CanvasItem | null = null;
-
-            switch (currentMode) {
-              case "add-camera":
-                newItem = {
-                  ...common,
-                  type: "camera",
-                  rotation: 45,
-                  label: `Camera ${itemsRef.current.filter(i => i.type === "camera").length + 1}`,
-                  description: "",
-                  fov: DEFAULT_CAMERA_HFOV,
-                  hFov: DEFAULT_CAMERA_HFOV,
-                  vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
-                  pitch: DEFAULT_CAMERA_PITCH,
-                  height: DEFAULT_CAMERA_HEIGHT_FT,
-                  aspect: 16 / 9,
-                  mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
-                  range: DEFAULT_CAMERA_RANGE_FT,
-                  color: COLORS.camera[itemsRef.current.filter(i => i.type === "camera").length % COLORS.camera.length],
-                  connectorDashSize: 3
-                } as CameraItem;
-                break;
-              case "add-building":
-                newItem = {
-                  ...common,
-                  type: "building",
-                  width: DEFAULT_BUILDING.width,
-                  height: DEFAULT_BUILDING.depth,
-                  wallHeight: DEFAULT_BUILDING.wallHeight,
-                  label: "Building",
-                  color: COLORS.building[0],
-                  points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
-                } as BuildingItem;
-                break;
-              case "add-tree":
-                newItem = {
-                  ...common,
-                  type: "tree",
-                  radius: 12,
-                  color: COLORS.tree[0]
-                } as TreeItem;
-                break;
-              case "add-parking":
-                newItem = {
-                  ...common,
-                  type: "parking",
-                  width: 24,
-                  height: 48,
-                  color: COLORS.parking[0],
-                  vehicleHeight: 14
-                } as ParkingItem;
-                break;
-              case "add-label":
-                newItem = {
-                  ...common,
-                  type: "label",
-                  text: "Label",
-                  fontSize: 14,
-                  color: COLORS.label[0]
-                } as LabelItem;
-                break;
-            }
-
-            if (newItem) {
-              setItems(prev => [...prev, newItem!]);
-              setSelectedId(newItem.id);
-              setMode("select");
-              setTimeout(() => saveHistory(), 50);
-            }
+            if (placeNewItemAtRef.current(currentMode as ToolMode, x, y)) setTimeout(() => saveHistory(), 50);
           }
           return;
         }
@@ -5545,7 +5601,15 @@ export default function SecurityPlanner() {
     getSvgMousePosFor(demMiniRef.current, e);
 
   const handleMouseDown = (e: React.MouseEvent, id: string, type: InteractionType = "move", variant?: string) => {
-    if (mode !== "select") return;
+    if (mode !== "select") {
+      // Placing something on top of an existing item (e.g. a camera onto a house) still places it.
+      if (mode.startsWith("add-") && viewMode === "plan") {
+        e.stopPropagation();
+        handleAddItem(e, mode);
+        consumedClickRef.current = true;
+      }
+      return;
+    }
     if (viewMode === "iso3d") return;
     if (e.altKey) return;
     e.stopPropagation();
@@ -5821,6 +5885,10 @@ export default function SecurityPlanner() {
 
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
+    if (consumedClickRef.current) {
+      consumedClickRef.current = false;
+      return;
+    }
     if (wasPlanDrag(e)) return;
     if (isTerrainMode) return;
     if (mode === "trace-building") {
@@ -5925,12 +5993,90 @@ export default function SecurityPlanner() {
     const worldX = (rawX - panOffset.x) / zoom;
     const worldY = (rawY - panOffset.y) / zoom;
 
-    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.3, 3.5);
+    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.3, MAX_ZOOM);
     const nextPanX = rawX - worldX * nextZoom;
     const nextPanY = rawY - worldY * nextZoom;
 
     setZoom(nextZoom);
     setPanOffset({ x: nextPanX, y: nextPanY });
+  };
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || viewMode !== "plan") return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setPlanRect(prev => (prev.width === r.width && prev.height === r.height ? prev : { width: r.width, height: r.height }));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [viewMode]);
+
+  // Plan point -> pixel position inside the plan container.
+  const planToScreen = (p: { x: number; y: number }) => {
+    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
+    const offX = (planRect.width - canvasSize.width * scale) / 2;
+    const offY = (planRect.height - canvasSize.height * scale) / 2;
+    return { x: offX + (panOffset.x + p.x * zoom) * scale, y: offY + (panOffset.y + p.y * zoom) * scale, scale };
+  };
+
+  const renderPlanOverlays = () => {
+    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
+    const pxPerFoot = (scale * zoom) / (planGeoRef?.unitsPerFoot ?? 1);
+    const bar = niceScaleBar(pxPerFoot, 110);
+    const sel = selectedId ? items.find(i => i.id === selectedId) : null;
+    const selBounds = sel ? itemPlanBounds(sel) : null;
+    let actionBar: React.ReactNode = null;
+    if (sel && selBounds && mode === "select" && !interactionState.type && !isTerrainMode && planRect.width > 0) {
+      const top = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.minY });
+      const bottom = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.maxY });
+      const above = top.y - (sel.type === "camera" ? 70 : 66);
+      const y = above > 70 ? above : bottom.y + (sel.type === "camera" ? 40 : 14);
+      const x = clamp(top.x, 110, Math.max(110, planRect.width - 110));
+      const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
+      actionBar = (
+        <div
+          role="toolbar"
+          aria-label="Selection actions"
+          className="absolute z-30 flex items-center gap-0.5 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl backdrop-blur"
+          style={{ left: x, top: y, transform: "translateX(-50%)" }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <button className={btn} title="Duplicate (Ctrl/⌘+D)" aria-label="Duplicate" onClick={duplicateSelected}><Copy className="w-4 h-4" /></button>
+          <button className={btn} title={sel.type === "camera" ? "Turn 15° clockwise" : "Rotate 15° clockwise"} aria-label="Rotate" onClick={() => rotateSelected(15)}><RotateCw className="w-4 h-4" /></button>
+          <button className={btn} title="Zoom to it (F)" aria-label="Zoom to selection" onClick={zoomToSelection}><Crosshair className="w-4 h-4" /></button>
+          <span className="w-px h-5 bg-white/10 mx-0.5" />
+          <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={() => { deleteItem(sel.id); setTimeout(() => saveHistory(), 50); }}><Trash2 className="w-4 h-4" /></button>
+        </div>
+      );
+    }
+    const ctl = "w-8 h-8 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10";
+    return (
+      <>
+        {actionBar}
+        <div className="absolute top-20 right-4 z-20 flex items-start gap-2">
+          {bar && (
+            <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
+              <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
+              <div data-testid="scale-bar" style={{ width: bar.px }} className="h-1.5 border-x-2 border-b-2 border-slate-200" />
+            </div>
+          )}
+          {planGeoRef && (
+            <div className="w-10 h-12 rounded-lg bg-zinc-900/85 border border-white/10 flex flex-col items-center justify-center text-slate-200 shadow" title="North is up" aria-label="North arrow">
+              <Navigation2 className="w-4 h-4 fill-current" />
+              <span className="text-[10px] font-bold leading-none mt-0.5">N</span>
+            </div>
+          )}
+          <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
+            <button className={ctl} title="Zoom in" aria-label="Zoom in" onClick={() => zoomBy(1.25)}><ZoomIn className="w-4 h-4" /></button>
+            <button className={ctl} title="Zoom out" aria-label="Zoom out" onClick={() => zoomBy(0.8)}><ZoomOut className="w-4 h-4" /></button>
+            <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={zoomToFit}><Maximize2 className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </>
+    );
   };
 
   // --- Render Helpers ---
@@ -5939,8 +6085,93 @@ export default function SecurityPlanner() {
   // regardless of how many feet the site spans or how far you zoom.
   const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
 
+  // Building inspector order: the everyday settings first, the rest folded under "More options".
+  // (Other item types keep their natural order.)
+  const inspectorOrder = (slot: "name" | "main" | "size" | "color" | "toggle" | "advanced") => {
+    if (selectedItem?.type !== "building") return "";
+    const order = { name: "order-1", main: "order-2", size: "order-3", color: "order-4", toggle: "order-5", advanced: "order-6" }[slot];
+    return slot === "advanced" && !showMoreOptions ? `${order} hidden` : order;
+  };
+
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
+
+  // --- Coverage: which protected spots are seen, and where nothing is ---
+  const coverageModel = useMemo(() => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const cameras: CoverageCamera[] = (items.filter(i => i.type === "camera") as CameraItem[]).map(cam => {
+      const pos = getCameraPlanPosition(cam);
+      const hFov = getCameraHFov(cam);
+      return {
+        id: cam.id,
+        x: pos.x,
+        y: pos.y,
+        rotation: cam.rotation,
+        hFov,
+        vFov: cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam)),
+        pitch: cam.pitch ?? DEFAULT_CAMERA_PITCH,
+        heightFt: (cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT),
+        range: cam.range,
+        camera: cam
+      };
+    });
+    const obstacles: Obstacle[] = [];
+    items.forEach(item => {
+      if (item.type === "building") {
+        const b = item as BuildingItem;
+        obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf });
+      } else if (item.type === "tree") {
+        const t = item as TreeItem;
+        const h = (t.height ?? 30) / upf;
+        obstacles.push({ kind: "tree", id: t.id, x: t.x, y: t.y, radius: t.radius * (t.width ?? 1), bottomFt: h * 0.3, topFt: h });
+      }
+    });
+    return { cameras, obstacles, upf };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, planGeoRef]);
+  const targetItems = items.filter(i => i.type === "target") as TargetItem[];
+  const targetResults = useMemo(
+    () => new Map(evaluateTargets(coverageModel.cameras, targetItems, coverageModel.obstacles, coverageModel.upf).map(r => [r.targetId, r])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coverageModel, items]
+  );
+  const blindSpots = useMemo(() => {
+    if (!showBlindSpots || viewMode !== "plan") return null;
+    // Your property, not the whole imported area: around the cameras, the marked spots and the
+    // buildings the cameras are on (falls back to the whole plan with nothing placed).
+    const pts: { x: number; y: number }[] = [...coverageModel.cameras, ...targetItems];
+    items.forEach(i => {
+      if (i.type === "camera" && (i as CameraItem).mount?.type === "building") {
+        const b = items.find(x => x.id === (i as CameraItem).mount?.buildingId) as BuildingItem | undefined;
+        if (b) pts.push(...getBuildingEdgePointsWorld(b));
+      }
+    });
+    const b = boundsOfPoints(pts);
+    const pad = 50 * coverageModel.upf;
+    const area = b
+      ? {
+        x: Math.max(0, b.minX - pad),
+        y: Math.max(0, b.minY - pad),
+        width: Math.min(canvasSize.width, b.maxX + pad) - Math.max(0, b.minX - pad),
+        height: Math.min(canvasSize.height, b.maxY + pad) - Math.max(0, b.minY - pad)
+      }
+      : { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
+    const cell = Math.max(area.width, area.height) / 80;
+    return { ...blindSpotCells(coverageModel.cameras, area, cell, coverageModel.obstacles, coverageModel.upf), area };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showBlindSpots, viewMode, coverageModel, canvasSize.width, canvasSize.height]);
+
+  // Point a camera at a plan position: turn toward it and tilt to center it at head height.
+  const aimCameraAt = (cameraId: string, pt: { x: number; y: number }) => {
+    const cam = items.find(i => i.id === cameraId) as CameraItem | undefined;
+    if (!cam) return;
+    const pos = getCameraPlanPosition(cam);
+    const rotation = ((((Math.atan2(pt.y - pos.y, pt.x - pos.x) * 180) / Math.PI) % 360) + 360) % 360;
+    const distanceFt = Math.hypot(pt.x - pos.x, pt.y - pos.y) / (planGeoRef?.unitsPerFoot ?? 1);
+    const pitch = suggestPitchForDistance(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT, distanceFt);
+    updateItem(cam.id, { rotation, pitch });
+    setTimeout(() => saveHistory(), 50);
+  };
 
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
@@ -5953,7 +6184,9 @@ export default function SecurityPlanner() {
       case "add-tree": return "Click to place a tree";
       case "add-parking": return "Click to place a vehicle";
       case "add-label": return "Click to add a text label";
+      case "add-target": return "Click a door, gate or driveway you want covered · Esc to cancel";
       default:
+        if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
         if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
         if (selectedItem?.type === "building") return "Drag to move · drag corners to reshape · Shift+click an edge to add a corner · drag the label to move it";
         return null;
@@ -5968,26 +6201,25 @@ export default function SecurityPlanner() {
     review: reviewVisited,
     report: exportList.length > 0
   };
+  const WORKFLOW_ORDER: WorkflowStepId[] = ["site", "buildings", "cameras", "review", "report"];
+  const activeStep: WorkflowStepId = activeStepChoice ?? WORKFLOW_ORDER.find(id => !workflowStepsDone[id]) ?? "report";
+  // A step shows its panel (a workspace with that step's tools); it never locks the user in.
   const handleWorkflowStep = (step: WorkflowStepId) => {
+    setActiveStepChoice(step);
+    setSelectedId(null);
+    setRightPanelMode("properties");
+    setIsRightPanelOpen(true);
+    if (mode !== "select") setMode("select");
     switch (step) {
       case "site":
-        openElevationDialog();
+        if (!workflowStepsDone.site) openElevationDialog();
         break;
       case "buildings":
-        setViewMode("plan");
-        setMode("add-building");
-        break;
       case "cameras":
-        setViewMode("plan");
-        setMode("add-camera");
+        if (viewMode === "nvr") setViewMode("plan");
         break;
       case "review":
         setReviewVisited(true);
-        setMode("select");
-        setViewMode("iso3d");
-        break;
-      case "report":
-        setShowExportPanel(true);
         break;
     }
   };
@@ -6074,7 +6306,7 @@ export default function SecurityPlanner() {
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Report</p>
-                <h2 className="text-lg font-semibold text-slate-200">Export Report</h2>
+                <h2 className="text-lg font-semibold text-slate-200">Report options</h2>
               </div>
               <button onClick={() => setShowExportPanel(false)} className="p-2 text-slate-400 hover:text-slate-600">
                 <X className="w-5 h-5" />
@@ -6107,9 +6339,9 @@ export default function SecurityPlanner() {
                   )}
                 </div>
                 {exportList.length === 0 ? (
-                  <div className="bg-slate-50 rounded-lg p-4 text-center text-slate-400 text-sm">
+                  <div className="bg-white/5 border border-white/10 rounded-lg p-4 text-center text-slate-400 text-sm">
                     <p>No views picked yet</p>
-                    <p className="text-xs mt-1">"Report PDF" will include the site plan, the camera schedule and every camera's view automatically.</p>
+                    <p className="text-xs mt-1">The PDF report includes the site plan, the coverage checklist, the camera list, a parts list and every camera's view automatically.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
@@ -6149,9 +6381,12 @@ export default function SecurityPlanner() {
                 )}
               </div>
 
+              <details className="group rounded-lg border border-white/10 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-semibold text-slate-300">Plan image options (size, margins, grid, legend)</summary>
+              <div className="mt-3 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Scale</label>
+                  <label className="text-xs font-semibold text-slate-400 uppercase">Image size (×)</label>
                   <input
                     type="number"
                     min="1"
@@ -6162,7 +6397,7 @@ export default function SecurityPlanner() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Padding</label>
+                  <label className="text-xs font-semibold text-slate-400 uppercase">Margin (px)</label>
                   <input
                     type="number"
                     min="0"
@@ -6191,7 +6426,7 @@ export default function SecurityPlanner() {
                             [option.key]: !active
                           })
                         }
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${active ? "bg-emerald-100 border-emerald-200 text-emerald-700" : "bg-white border-slate-200 text-slate-400"
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${active ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-200" : "bg-white/5 border-white/10 text-slate-400"
                           }`}
                       >
                         {option.label}
@@ -6200,12 +6435,14 @@ export default function SecurityPlanner() {
                   })}
                 </div>
               </div>
-              <p className="text-xs text-slate-400">Tip: Add views using "Add to Report" buttons, then export a client report.</p>
+              </div>
+              </details>
+              <p className="text-xs text-slate-400">Tip: pick specific views with "Add to report" (3D Snapshot menu or the More menu); otherwise every camera's view is included.</p>
             </div>
-            <div className="px-5 py-4 border-t border-white/10 bg-slate-50 flex flex-wrap justify-end gap-2">
+            <div className="px-5 py-4 border-t border-white/10 bg-black/20 flex flex-wrap justify-end gap-2">
               <button
                 onClick={() => setShowExportPanel(false)}
-                className="px-4 py-2 text-sm font-medium text-slate-400 hover:text-slate-800"
+                className="px-4 py-2 text-sm font-medium text-slate-400 hover:text-slate-200"
               >
                 Cancel
               </button>
@@ -6216,7 +6453,7 @@ export default function SecurityPlanner() {
                 }}
                 className="px-4 py-2 text-sm font-semibold bg-slate-600 hover:bg-slate-700 text-white rounded-lg"
               >
-                Plan PNG
+                Plan image
               </button>
               <button
                 onClick={() => {
@@ -6225,11 +6462,11 @@ export default function SecurityPlanner() {
                 }}
                 disabled={exportList.length === 0}
                 className={`px-3 py-2 text-sm font-semibold rounded-lg ${exportList.length === 0
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                  ? 'bg-white/5 text-slate-500 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                   }`}
               >
-                Report PNG
+                Report image
               </button>
               <button
                 onClick={() => {
@@ -6239,7 +6476,7 @@ export default function SecurityPlanner() {
                 className="px-3 py-2 text-sm font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
                 title={exportList.length === 0 ? "Builds a full report: site plan, camera schedule and every camera's view" : "Report with your selected views and the camera schedule"}
               >
-                Report PDF
+                PDF report
               </button>
             </div>
           </div>
@@ -6472,6 +6709,34 @@ export default function SecurityPlanner() {
                             )}
                           </div>
                           <p className="text-[11px] text-slate-400">Click a building on the map to remove it (or add it back).</p>
+                          <div className="rounded-lg bg-black/20 px-2 py-1.5 space-y-1.5" data-testid="building-align">
+                            <div className="text-[11px] text-slate-300">
+                              {buildingAlign.state === "working" ? (
+                                <span className="flex items-center gap-1.5"><LoaderCircle className="w-3 h-3 animate-spin" /> Lining buildings up with the photo…</span>
+                              ) : buildingAlign.nudged ? (
+                                "Moved by hand."
+                              ) : buildingAlign.state === "done" ? (
+                                `Lined up with the photo (moved ~${buildingAlign.movedM < 1 ? "<1" : Math.round(buildingAlign.movedM)} m).`
+                              ) : (
+                                "Outlines off the roofs? Nudge them:"
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {([
+                                { label: "←", title: "Move all outlines west (0.5 m)", e: -0.5, n: 0 },
+                                { label: "→", title: "Move all outlines east (0.5 m)", e: 0.5, n: 0 },
+                                { label: "↑", title: "Move all outlines north (0.5 m)", e: 0, n: 0.5 },
+                                { label: "↓", title: "Move all outlines south (0.5 m)", e: 0, n: -0.5 }
+                              ]).map(b => (
+                                <button key={b.label} type="button" title={b.title} aria-label={b.title} onClick={() => nudgeBuildingCandidates(b.e, b.n)} className="w-7 h-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 text-sm">
+                                  {b.label}
+                                </button>
+                              ))}
+                              <button type="button" onClick={resetBuildingCandidatePositions} className="ml-auto px-2 h-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] text-slate-300" title="Put the outlines back where the map data had them">
+                                Original
+                              </button>
+                            </div>
+                          </div>
                           <div className="flex gap-1.5">
                             <button type="button" onClick={() => setAllBuildingCandidates(true)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Keep all</button>
                             <button type="button" onClick={() => setAllBuildingCandidates(false)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Remove all</button>
@@ -7127,6 +7392,7 @@ export default function SecurityPlanner() {
         onOpen={() => projectInputRef.current?.click()}
         onSave={handleSaveProject}
         stepsDone={workflowStepsDone}
+        activeStep={activeStep}
         onStep={handleWorkflowStep}
         viewMode={viewMode}
         onViewMode={setViewMode}
@@ -7134,8 +7400,9 @@ export default function SecurityPlanner() {
         onUploadBaseMap={() => fileInputRef.current?.click()}
         onAddOverlay={() => elementImageInputRef.current?.click()}
         onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
-        onOpenReport={() => setShowExportPanel(true)}
+        onShortcuts={() => setShowShortcuts(true)}
       />
+      {showShortcuts && <ShortcutsDialog onClose={() => setShowShortcuts(false)} />}
 
       {demAlignMode && viewMode !== "plan" && demPreview && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
@@ -7209,6 +7476,7 @@ export default function SecurityPlanner() {
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
           <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr") ? "w-full h-full" : ""}`}>
             {viewMode === "plan" ? (
+              <>
               <svg
                 ref={svgRef}
                 data-testid="plan"
@@ -7220,7 +7488,19 @@ export default function SecurityPlanner() {
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
-                onMouseDownCapture={e => { planPressRef.current = { x: e.clientX, y: e.clientY }; handlePlanTerrainMouseDown(e); }}
+                onMouseDownCapture={e => {
+                  planPressRef.current = { x: e.clientX, y: e.clientY };
+                  if (aimingCameraId) {
+                    // Aim mode: the next click on the plan (anything on it) is where the camera should look.
+                    e.stopPropagation();
+                    e.preventDefault();
+                    aimCameraAt(aimingCameraId, getSvgMousePos(e));
+                    setAimingCameraId(null);
+                    consumedClickRef.current = true;
+                    return;
+                  }
+                  handlePlanTerrainMouseDown(e);
+                }}
                 onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
@@ -7357,6 +7637,18 @@ export default function SecurityPlanner() {
                     </g>
                   )}
 
+                  {blindSpots && (
+                    <rect x={blindSpots.area.x} y={blindSpots.area.y} width={blindSpots.area.width} height={blindSpots.area.height} fill="none" stroke="rgba(239,68,68,0.7)" strokeWidth={1.5 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
+                  )}
+                  {blindSpots && blindSpots.runs.length > 0 && (
+                    <path
+                      data-testid="blind-spots"
+                      d={blindSpots.runs.map(r => `M${r.x} ${r.y}h${r.width}v${r.height}h${-r.width}z`).join("")}
+                      fill="rgba(239, 68, 68, 0.22)"
+                      stroke="none"
+                      pointerEvents="none"
+                    />
+                  )}
                   {items.map(item => {
                     const isSelected = selectedId === item.id;
                     if (item.type === "building" || item.type === "parking") {
@@ -7910,6 +8202,37 @@ export default function SecurityPlanner() {
                   })}
                   {/* --- LABELS OVERLAY (Rendered last to appear on top) --- */}
                   {items.map(item => {
+                    if (item.type === "target") {
+                      const t = item as TargetItem;
+                      const result = targetResults.get(t.id);
+                      const status = targetStatus(result);
+                      const color = STATUS_COLOR[status];
+                      const r = 9 * planUi;
+                      const isSelected = selectedId === t.id;
+                      const coveringCam = result?.best ? coverageModel.cameras.find(c => c.id === result.best!.cameraId) : null;
+                      return (
+                        <g key={t.id} data-testid="target-pin" data-status={status}>
+                          {isSelected && coveringCam && (
+                            <line x1={coveringCam.x} y1={coveringCam.y} x2={t.x} y2={t.y} stroke={color} strokeWidth={2 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
+                          )}
+                          <g
+                            transform={`translate(${t.x}, ${t.y})`}
+                            onMouseDown={e => handleMouseDown(e, t.id, "move")}
+                            onClick={e => e.stopPropagation()}
+                            className="cursor-move"
+                          >
+                            <circle r={r * 1.6} fill={color} fillOpacity={0.18} stroke={isSelected ? "#fff" : "none"} strokeWidth={2 * planUi} />
+                            <circle r={r} fill={color} stroke="#fff" strokeWidth={2 * planUi} />
+                            <text y={r * 0.38} textAnchor="middle" fontSize={r * 1.15} fontWeight="bold" fill="#fff" pointerEvents="none">
+                              {status === "met" ? "✓" : status === "partial" ? "!" : "✕"}
+                            </text>
+                            <text y={r * 2.9} textAnchor="middle" fontSize={11 * planUi} fontWeight={700} fill="#fff" stroke="rgba(0,0,0,0.75)" strokeWidth={3 * planUi} paintOrder="stroke" pointerEvents="none">
+                              {t.label}
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    }
                     if (item.type === "camera") {
                       const c = item as CameraItem;
                       const cameraPos = getCameraPlanPosition(c);
@@ -7975,6 +8298,8 @@ export default function SecurityPlanner() {
                   )}
                 </g>
               </svg>
+              {renderPlanOverlays()}
+              </>
             ) : viewMode === "iso3d" ? (
               <div className="relative w-full h-full">
                 <div ref={threeContainerRef} className="absolute inset-0" />
@@ -8062,36 +8387,34 @@ export default function SecurityPlanner() {
                   </div>
                   <div className="flex items-center gap-2 pointer-events-auto">
                     <button
-                      onClick={() => bg3dInputRef.current?.click()}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors flex items-center gap-1"
-                    >
-                      <ImageIcon className="w-3 h-3" />
-                      Set 3D BG
-                    </button>
-                    <button
-                      onClick={handleCaptureSnapshot}
-                      className="px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/20 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/30 shadow-sm transition-colors"
-                    >
-                      Take Snapshot
-                    </button>
-                    <button
-                      onClick={handleExportCurrent3d}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
-                    >
-                      Download Snapshot
-                    </button>
-                    <button
-                      onClick={add3dToExportList}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
-                    >
-                      + Add to Report
-                    </button>
-                    <button
                       onClick={handleReset3dView}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
+                      className="px-3 py-1.5 rounded-full border border-white/10 bg-zinc-800/90 text-xs font-semibold text-slate-200 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
                     >
-                      Reset View
+                      Reset view
                     </button>
+                    <div className="relative">
+                      <button
+                        onClick={() => setShow3dMenu(v => !v)}
+                        aria-expanded={show3dMenu}
+                        className="px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/20 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/30 shadow-sm transition-colors flex items-center gap-1"
+                      >
+                        <Camera className="w-3.5 h-3.5" /> Snapshot <ChevronDown className="w-3 h-3" />
+                      </button>
+                      {show3dMenu && (
+                        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setShow3dMenu(false)}>
+                          {[
+                            { label: "Download as image", action: handleExportCurrent3d },
+                            { label: "Add to the report", action: add3dToExportList },
+                            { label: "Keep in snapshots", action: handleCaptureSnapshot },
+                            { label: "Set 3D background image…", action: () => bg3dInputRef.current?.click() }
+                          ].map(m => (
+                            <button key={m.label} onClick={() => { setShow3dMenu(false); m.action(); }} className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-white/10 rounded-lg">
+                              {m.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -8377,8 +8700,8 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && (
-                <div className={panelSection}>
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && selectedItem.type !== "target" && (
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
                     <span>{Math.round(selectedItem.rotation)}deg</span>
@@ -8397,8 +8720,9 @@ export default function SecurityPlanner() {
               {(selectedItem.type === "camera" ||
                 selectedItem.type === "building" ||
                 selectedItem.type === "image" ||
+                selectedItem.type === "target" ||
                 selectedItem.type === "label") && (
-                  <div className={panelSection}>
+                  <div className={`${panelSection} ${inspectorOrder("name")}`}>
                     <label className="text-xs font-semibold text-slate-400 uppercase">
                       {selectedItem.type === "label" ? "Text Content" : "Label"}
                     </label>
@@ -8426,17 +8750,19 @@ export default function SecurityPlanner() {
               )}
 
               {(selectedItem.type === "building" || selectedItem.type === "parking") && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("size")}`}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase">Width (ft)</label>
                       <input
                         type="number"
+                      step="0.1"
+                      min="1"
                       value={Math.round((selectedItem as any).width * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
-                          ? updateBuildingSize(selectedItem.id, parseInt(e.target.value), (selectedItem as BuildingItem).height)
-                          : updateItem(selectedItem.id, { width: parseInt(e.target.value) })
+                          ? updateBuildingSize(selectedItem.id, (parseFloat(e.target.value) || 1), (selectedItem as BuildingItem).height)
+                          : updateItem(selectedItem.id, { width: (parseFloat(e.target.value) || 1) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
@@ -8447,11 +8773,13 @@ export default function SecurityPlanner() {
                       </label>
                       <input
                         type="number"
+                      step="0.1"
+                      min="1"
                       value={Math.round((selectedItem as any).height * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
-                          ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, parseInt(e.target.value))
-                          : updateItem(selectedItem.id, { height: parseInt(e.target.value) })
+                          ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, (parseFloat(e.target.value) || 1))
+                          : updateItem(selectedItem.id, { height: (parseFloat(e.target.value) || 1) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
@@ -8466,16 +8794,18 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Vehicle Type</label>
                     <div className="grid grid-cols-3 gap-1">
-                      {(['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'] as const).map(type => (
+                      {(Object.keys(VEHICLE_SIZES) as VehicleType[]).map(type => (
                         <button
                           key={type}
-                          onClick={() => updateItem(selectedItem.id, { vehicleType: type })}
+                          title={`${VEHICLE_SIZES[type].label}: ${VEHICLE_SIZES[type].width} × ${VEHICLE_SIZES[type].length} ft`}
+                          // Picking a type also sets its real-world size.
+                          onClick={() => updateItem(selectedItem.id, { vehicleType: type, ...vehicleDimensions(type, planGeoRef?.unitsPerFoot ?? 1) })}
                           className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${resolveVehicleType(selectedItem as ParkingItem) === type
                             ? 'bg-blue-600 text-white'
                             : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                             }`}
                         >
-                          {type === 'sedan' ? '🚗' : type === 'suv' ? '🚙' : type === 'truck' ? '🛻' : type === 'sports' ? '🏎️' : type === 'van' ? '🚐' : '🏍️'} {type}
+                          {VEHICLE_SIZES[type].label}
                         </button>
                       ))}
                     </div>
@@ -8538,23 +8868,25 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Height (Z)</span>
-                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} ft</span>
+                    <span>{Math.round(((selectedItem as ParkingItem).vehicleHeight ?? 5) * 10) / 10} ft</span>
                   </label>
                   <div className="flex gap-2">
                     <input
                       type="range"
-                      min="6"
-                      max="60"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      min="3"
+                      max="14"
+                      step="0.1"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
                     />
                     <input
                       type="number"
-                      min="6"
-                      max="60"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      min="3"
+                      max="14"
+                      step="0.1"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>
@@ -8563,7 +8895,7 @@ export default function SecurityPlanner() {
             )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("main")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
                     <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>
@@ -8584,11 +8916,31 @@ export default function SecurityPlanner() {
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>
+                  <div className="space-y-1.5 pt-1">
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Roof</label>
+                    <div className="grid grid-cols-4 gap-1" role="group" aria-label="Roof shape">
+                      {(["auto", "gable", "hip", "flat"] as const).map(kind => {
+                        const current = (selectedItem as BuildingItem).roofType ?? "auto";
+                        return (
+                          <button
+                            key={kind}
+                            type="button"
+                            aria-pressed={current === kind}
+                            title={kind === "auto" ? "Pick from the footprint: pitched for houses, flat for large buildings" : `${kind[0].toUpperCase()}${kind.slice(1)} roof`}
+                            onClick={() => updateItem(selectedItem.id, { roofType: kind })}
+                            className={`py-1.5 rounded-lg text-[11px] font-semibold border capitalize ${current === kind ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                          >
+                            {kind}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Label Font</label>
                     <button
@@ -8644,7 +8996,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase">Building Shape</label>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -8814,6 +9166,10 @@ export default function SecurityPlanner() {
                     mountHeight={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? DEFAULT_CAMERA_HEIGHT_FT}
                     onChange={updates => updateItem(selectedItem.id, updates)}
                     onMountHeightChange={height => setCameraMountHeight(selectedItem as CameraItem, height)}
+                    aiming={aimingCameraId === selectedItem.id}
+                    onAimAtPoint={() => { setViewMode("plan"); setAimingCameraId(aimingCameraId === selectedItem.id ? null : selectedItem.id); }}
+                    targets={targetItems.map(t => ({ id: t.id, label: t.label }))}
+                    onAimAtTarget={id => { const t = targetItems.find(x => x.id === id); if (t) aimCameraAt(selectedItem.id, { x: t.x, y: t.y }); }}
                   />
                 </div>
                 <details className={`${panelSectionLoose} group`}>
@@ -9090,7 +9446,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("color")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Color Code</label>
                   <div className="flex flex-wrap gap-2">
                     {COLORS[selectedItem.type as keyof typeof COLORS].map(color => (
@@ -9105,7 +9461,68 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
-              <div className={panelSection}>
+              {selectedItem.type === "target" && (() => {
+                const t = selectedItem as TargetItem;
+                const result = targetResults.get(t.id);
+                const status = targetStatus(result);
+                const cams = items.filter(i => i.type === "camera") as CameraItem[];
+                const chipCls = (on: boolean) => `px-2 py-1.5 rounded-lg text-[11px] font-semibold border ${on ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`;
+                return (
+                  <div className={panelSection}>
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="w-3 h-3 rounded-full" style={{ background: STATUS_COLOR[status] }} />
+                      <span className="text-slate-200 font-semibold">
+                        {status === "met" ? "Covered" : status === "partial" ? "Seen, but not enough detail" : "Not covered yet"}
+                      </span>
+                    </div>
+                    <label className="text-xs font-semibold text-slate-400 uppercase">What is it?</label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(Object.keys(TARGET_KINDS) as TargetItem["kind"][]).map(k => (
+                        <button key={k} className={chipCls(t.kind === k)} onClick={() => updateItem(t.id, { kind: k, goal: TARGET_KINDS[k].goal, ...(t.label.startsWith(TARGET_KINDS[t.kind].label) ? { label: t.label.replace(TARGET_KINDS[t.kind].label, TARGET_KINDS[k].label) } : {}) })}>
+                          {TARGET_KINDS[k].label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Detail needed</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {([
+                        ["identify", "See faces"],
+                        ["recognize", "Recognize people"],
+                        ["observe", "See what's happening"],
+                        ["detect", "Notice someone"]
+                      ] as [TargetItem["goal"], string][]).map(([g, label]) => (
+                        <button key={g} className={chipCls(t.goal === g)} onClick={() => updateItem(t.id, { goal: g })}>{label}</button>
+                      ))}
+                    </div>
+                    {cams.length > 0 && (
+                      <>
+                        <label className="text-xs font-semibold text-slate-400 uppercase">Point a camera here</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {cams.map((c, i) => (
+                            <button key={c.id} className={chipCls(false)} onClick={() => aimCameraAt(c.id, { x: t.x, y: t.y })} title={`Turn and tilt ${c.label} toward ${t.label}`}>
+                              {c.label || `Camera ${i + 1}`}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {selectedItem.type === "building" && (
+                <button
+                  type="button"
+                  onClick={() => setShowMoreOptions(v => !v)}
+                  aria-expanded={showMoreOptions}
+                  className={`${inspectorOrder("toggle")} flex items-center justify-between w-full px-1 text-xs font-semibold text-slate-400 hover:text-slate-200`}
+                >
+                  <span>{showMoreOptions ? "Fewer options" : "More options: rotation, label font, corners"}</span>
+                  <ChevronDown className={`w-4 h-4 transition-transform ${showMoreOptions ? "rotate-180" : ""}`} />
+                </button>
+              )}
+
+              <div className={`${panelSection} order-last`}>
                 <button
                   onClick={() => deleteItem(selectedItem.id)}
                   className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-red-500/30 text-red-400 hover:text-red-200 hover:bg-red-500/10 transition-colors text-sm font-semibold"
@@ -9500,9 +9917,8 @@ export default function SecurityPlanner() {
               </div>
             </div>
           ) : (
-            <div className="p-6 flex flex-col gap-6">
-              <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200">Overview</h2>
+            <div className="p-6 flex flex-col gap-5">
+              <div className="flex justify-end -mb-4">
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -9511,28 +9927,48 @@ export default function SecurityPlanner() {
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <ProjectOverview
+              <StepPanel
+                step={activeStep}
                 items={items}
-                hasSite={workflowStepsDone.site}
-                onSelect={id => { setSelectedId(id); setMode("select"); }}
-                onImportSite={openElevationDialog}
-                onAddCamera={() => { setViewMode("plan"); setMode("add-camera"); }}
-                onAddBuilding={() => { setViewMode("plan"); setMode("add-building"); }}
+                site={workflowStepsDone.site ? { label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
+                reportViews={exportList.length}
                 showAllCones={frustumSettings.showAll !== false}
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
+                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onStep={handleWorkflowStep}
+                onImportSite={openElevationDialog}
+                onUploadBaseMap={() => fileInputRef.current?.click()}
+                onTool={tool => { if (viewMode === "nvr") setViewMode("plan"); setMode(tool); }}
+                onView={setViewMode}
+                onReportPdf={handleExportReportPdf}
+                onPlanPng={handleExportPng}
+                onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+                onMoreReportOptions={() => setShowExportPanel(true)}
+                onCamerasCsv={handleDownloadCamerasCsv}
+                coverage={
+                  <CoveragePanel
+                    targets={targetItems}
+                    results={targetResults}
+                    cameras={items.filter(i => i.type === "camera") as CameraItem[]}
+                    onAdd={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-target"); }}
+                    onSelect={id => { setSelectedId(id); setMode("select"); }}
+                    onUpdate={(id, patch) => { updateItem(id, patch); setTimeout(() => saveHistory(), 50); }}
+                    onDelete={id => { deleteItem(id); setTimeout(() => saveHistory(), 50); }}
+                    showBlindSpots={showBlindSpots}
+                    onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
+                    coveredFraction={blindSpots?.coveredFraction ?? null}
+                  />
+                }
               />
-              <div className={panelSectionLoose}>
-                <p className="text-sm text-slate-400">Click any item on the plan to edit it.</p>
-                <button
-                  onClick={() => {
-                    setRightPanelMode("project");
-                    setIsRightPanelOpen(true);
-                  }}
-                  className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium text-slate-200 transition-colors"
-                >
-                  Open Plan Settings
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  setRightPanelMode("project");
+                  setIsRightPanelOpen(true);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-300 text-left"
+              >
+                Plan settings (name, size, grid, labels)…
+              </button>
             </div>
           )}
         </div>

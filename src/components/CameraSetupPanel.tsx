@@ -20,7 +20,24 @@ type Props = {
   mountHeight: number;
   onChange: (updates: Partial<CameraItem>) => void;
   onMountHeightChange: (height: number) => void;
+  /** Aim mode: the next click on the plan is where the camera looks. */
+  aiming?: boolean;
+  onAimAtPoint?: () => void;
+  /** Protected spots this camera can be pointed at. */
+  targets?: { id: string; label: string }[];
+  onAimAtTarget?: (id: string) => void;
 };
+
+/**
+ * Outcome presets: what the camera is for, mapped to a lens, a resolution, a tilt distance and a
+ * range. Worked out from the DORI pixel densities (IEC 62676-4) for a 4 MP sensor.
+ */
+export const OUTCOME_PRESETS = [
+  { id: "faces", label: "Faces at a door", lens: "4mm", width: 2688, aimFt: 12, range: 40, hint: "Identify visitors up to ~18 ft" },
+  { id: "driveway", label: "Driveway", lens: "6mm", width: 2688, aimFt: 40, range: 90, hint: "Recognize people up to ~70 ft" },
+  { id: "plates", label: "License plates", lens: "12mm", width: 3840, aimFt: 35, range: 90, hint: "Faces and plates up to ~100 ft" },
+  { id: "yard", label: "Whole yard", lens: "2.8mm", width: 2688, aimFt: 30, range: 100, hint: "Wide view: notice anyone in the yard" }
+] as const;
 
 const chip = (active: boolean) =>
   `px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors text-center ${active
@@ -31,7 +48,7 @@ const chip = (active: boolean) =>
 const fmtFt = (ft: number) => (Number.isFinite(ft) ? `${Math.round(ft)} ft` : "∞");
 
 /** Plain-language camera setup: presets, what the camera can see at each distance, and a side view. */
-export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightChange }: Props) {
+export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightChange, aiming, onAimAtPoint, targets, onAimAtTarget }: Props) {
   const hFov = getCameraHFov(camera);
   const aspect = getCameraAspectValue(camera);
   const vFov = camera.vFov ?? vFovFromH(hFov, aspect);
@@ -50,6 +67,20 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
   };
 
   const aimAt = (distanceFt: number) => onChange({ pitch: suggestPitchForDistance(mountHeight, distanceFt) });
+
+  const applyOutcome = (o: (typeof OUTCOME_PRESETS)[number]) => {
+    const lens = LENS_PRESETS.find(l => l.id === o.lens)!;
+    onChange({
+      lensPreset: lens.id,
+      hFov: lens.hFov,
+      fov: lens.hFov,
+      vFov: vFovFromH(lens.hFov, aspect),
+      resolutionWidth: o.width,
+      pitch: suggestPitchForDistance(mountHeight, o.aimFt),
+      range: o.range
+    });
+  };
+  const activeOutcome = OUTCOME_PRESETS.find(o => camera.lensPreset === o.lens && resolution === o.width);
 
   // --- Side view diagram geometry (camera on the left, looking right) ---
   const viewW = 280;
@@ -77,6 +108,38 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
 
   return (
     <div className="space-y-4">
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">What should it see?</div>
+        <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="What should it see">
+          {OUTCOME_PRESETS.map(o => (
+            <button key={o.id} title={o.hint} onClick={() => applyOutcome(o)} className={chip(activeOutcome?.id === o.id)}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {onAimAtPoint && (
+        <div className="space-y-1.5">
+          <button
+            onClick={onAimAtPoint}
+            aria-pressed={!!aiming}
+            className={`w-full py-2 rounded-lg text-xs font-semibold border ${aiming ? "border-sky-400/60 bg-sky-500/20 text-sky-100" : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"}`}
+          >
+            {aiming ? "Click on the map where it should look… (Esc to cancel)" : "Aim at a spot on the map"}
+          </button>
+          {targets && targets.length > 0 && onAimAtTarget && (
+            <div className="flex flex-wrap gap-1.5" aria-label="Aim at a protected spot">
+              {targets.map(t => (
+                <button key={t.id} onClick={() => onAimAtTarget(t.id)} className={chip(false)} title={`Turn and tilt toward ${t.label}`}>
+                  → {t.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="space-y-1.5">
         <div className="text-[10px] uppercase font-bold text-slate-400">Mount</div>
         <div className="grid grid-cols-4 gap-1.5">

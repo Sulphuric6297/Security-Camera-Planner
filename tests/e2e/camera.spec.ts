@@ -69,6 +69,8 @@ test.describe("cameras", () => {
     const [cam] = await itemsOfType(page, "camera");
     // select the building and turn it 90° with the rotation slider
     await page.mouse.click(poly.x + poly.width / 2, poly.y + poly.height / 2);
+    // Rotation is an advanced building setting (the action bar rotates in 15° steps)
+    await page.getByRole("button", { name: /More options/ }).click();
     const slider = page.locator('label:has-text("Rotation") + input[type=range]').first();
     await slider.fill("90");
     const [after] = await itemsOfType(page, "camera");

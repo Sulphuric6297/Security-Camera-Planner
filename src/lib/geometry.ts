@@ -122,3 +122,50 @@ export const adjustColor = (hex: string, amount: number) => {
   const b = clamp((num & 255) + amount, 0, 255);
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 };
+
+/** Clips a polygon to an axis-aligned rectangle (Sutherland–Hodgman). Returns [] when nothing is left. */
+export const clipPolygonToRect = (
+  points: { x: number; y: number }[],
+  rect: { x: number; y: number; width: number; height: number }
+) => {
+  type P = { x: number; y: number };
+  const clipEdge = (pts: P[], inside: (p: P) => boolean, cross: (a: P, b: P) => P) => {
+    const out: P[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i];
+      const prev = pts[(i + pts.length - 1) % pts.length];
+      const curIn = inside(cur);
+      const prevIn = inside(prev);
+      if (curIn) {
+        if (!prevIn) out.push(cross(prev, cur));
+        out.push(cur);
+      } else if (prevIn) {
+        out.push(cross(prev, cur));
+      }
+    }
+    return out;
+  };
+  const atX = (a: P, b: P, x: number) => ({ x, y: a.y + ((b.y - a.y) * (x - a.x)) / (b.x - a.x) });
+  const atY = (a: P, b: P, y: number) => ({ x: a.x + ((b.x - a.x) * (y - a.y)) / (b.y - a.y), y });
+  const x0 = rect.x;
+  const x1 = rect.x + rect.width;
+  const y0 = rect.y;
+  const y1 = rect.y + rect.height;
+  let pts: P[] = points.slice();
+  pts = clipEdge(pts, p => p.x >= x0, (a, b) => atX(a, b, x0));
+  if (pts.length) pts = clipEdge(pts, p => p.x <= x1, (a, b) => atX(a, b, x1));
+  if (pts.length) pts = clipEdge(pts, p => p.y >= y0, (a, b) => atY(a, b, y0));
+  if (pts.length) pts = clipEdge(pts, p => p.y <= y1, (a, b) => atY(a, b, y1));
+  return pts.length >= 3 ? pts : [];
+};
+
+/** Shoelace area (absolute). */
+export const polygonArea = (points: { x: number; y: number }[]) => {
+  let a = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const q = points[(i + 1) % points.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return Math.abs(a) / 2;
+};

@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
@@ -97,7 +97,8 @@ export interface BuildingItem extends BaseItem {
   importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
   width: number;
   height: number;
-  wallHeight?: number; // Vertical height in 3D
+  wallHeight?: number; // Vertical height in 3D (to the eaves)
+  roofType?: "auto" | "flat" | "gable" | "hip"; // 3D roof shape; "auto" picks from the footprint
   label: string;
   color: string;
   points?: { x: number; y: number }[];
@@ -143,4 +144,13 @@ export interface ImageItem extends BaseItem {
 
 
 
-export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem;
+/** A spot the user wants covered (a door, gate, driveway...) and how much detail they need there. */
+export type TargetKind = "door" | "gate" | "driveway" | "window" | "yard" | "other";
+export interface TargetItem extends BaseItem {
+  type: "target";
+  kind: TargetKind;
+  goal: "identify" | "recognize" | "observe" | "detect";
+  label: string;
+}
+
+export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | TargetItem;

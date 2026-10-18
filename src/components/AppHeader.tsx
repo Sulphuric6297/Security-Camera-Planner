@@ -3,7 +3,6 @@ import {
   Camera,
   Check,
   ChevronDown,
-  Download,
   FolderOpen,
   Image as ImageIcon,
   LayoutGrid,
@@ -16,7 +15,8 @@ import {
   Square,
   Upload,
   Eye,
-  FileText
+  FileText,
+  Keyboard
 } from "lucide-react";
 import type { ViewMode } from "../types";
 
@@ -29,6 +29,8 @@ type Props = {
   onOpen: () => void;
   onSave: () => void;
   stepsDone: Record<WorkflowStepId, boolean>;
+  /** The step whose panel is showing. */
+  activeStep: WorkflowStepId;
   onStep: (step: WorkflowStepId) => void;
   viewMode: ViewMode;
   onViewMode: (mode: ViewMode) => void;
@@ -36,7 +38,7 @@ type Props = {
   onUploadBaseMap: () => void;
   onAddOverlay: () => void;
   onAddViewToReport: () => void;
-  onOpenReport: () => void;
+  onShortcuts: () => void;
   className?: string;
 };
 
@@ -55,7 +57,7 @@ export function AppHeader(props: Props) {
   const [nameDraft, setNameDraft] = useState(projectName);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const currentStep = STEPS.find(s => !stepsDone[s.id])?.id ?? "report";
+  const currentStep = props.activeStep;
 
   useEffect(() => setNameDraft(projectName), [projectName]);
   useEffect(() => {
@@ -175,7 +177,8 @@ export function AppHeader(props: Props) {
                 { icon: Settings, label: "Plan settings", action: props.onSettings },
                 { icon: Upload, label: "Use my own map image…", action: props.onUploadBaseMap },
                 { icon: ImageIcon, label: "Add image overlay…", action: props.onAddOverlay },
-                { icon: MapIcon, label: "Add this view to report", action: props.onAddViewToReport }
+                { icon: MapIcon, label: "Add this view to report", action: props.onAddViewToReport },
+                { icon: Keyboard, label: "Keyboard shortcuts (?)", action: props.onShortcuts }
               ].map(item => (
                 <button key={item.label} className={menuItem} onClick={() => { setMenuOpen(false); item.action(); }}>
                   <item.icon className="w-4 h-4 text-slate-400" />
@@ -185,14 +188,6 @@ export function AppHeader(props: Props) {
             </div>
           )}
         </div>
-
-        <button
-          onClick={props.onOpenReport}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-lg shadow-indigo-500/20 transition-all"
-        >
-          <Download className="w-4 h-4" />
-          <span className="hidden md:inline">Report</span>
-        </button>
       </div>
     </div>
   );

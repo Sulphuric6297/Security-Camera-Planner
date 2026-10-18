@@ -7,8 +7,9 @@ export const generateId = () => Math.random().toString(36).substr(2, 9);
 
 export const COLORS = {
   camera: ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"],
-  building: ["#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155", "#1e293b"],
-  tree: ["#22c55e", "#16a34a", "#15803d", "#14532d", "#84cc16", "#bef264"],
+  building: ["#d6d0c4", "#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155"],
+  // Natural foliage greens first (the default), then brighter accents.
+  tree: ["#4a7a3a", "#3d6b2f", "#5c8a3c", "#2f5d34", "#7a9a3a", "#16a34a"],
   parking: ["#e2e8f0", "#cbd5e1", "#94a3b8", "#f8fafc", "#ffffff", "#f1f5f9"],
   label: ["#1e293b", "#334155", "#475569", "#64748b", "#ef4444", "#3b82f6"]
 };

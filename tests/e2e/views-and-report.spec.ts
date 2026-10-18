@@ -1,4 +1,4 @@
-import { test, expect, placeWithKey } from "./fixtures";
+import { test, expect, importSite, placeWithKey } from "./fixtures";
 
 test.describe("3D, camera views and report", () => {
   test("3D view and the camera preview render", async ({ page }) => {
@@ -21,6 +21,51 @@ test.describe("3D, camera views and report", () => {
     await page.waitForTimeout(800);
   });
 
+  test("3D overview of a large site: no fog, sun shadows cover the whole site", async ({ page }) => {
+    await importSite(page);
+    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
+    const info = await page.evaluate(() => {
+      const t = (window as any).__scpThree();
+      const p = (window as any).__scpProject();
+      let sun: any = null;
+      t.scene.traverse((o: any) => { if (o.isDirectionalLight && o.castShadow) sun = o; });
+      const cam = sun.shadow.camera;
+      return { fog: t.scene.fog, span: Math.max(p.canvasSize.width, p.canvasSize.height), halfW: (cam.right - cam.left) / 2, halfH: (cam.top - cam.bottom) / 2 };
+    });
+    // Fog used to darken the far side of big sites.
+    expect(info.fog).toBeNull();
+    // The shadow camera must reach every corner of the site (the default covered ~10 ft).
+    expect(info.halfW).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
+    expect(info.halfH).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
+  });
+
+  test("3D buildings get real roofs textured with the photo; the roof can be changed", async ({ page }) => {
+    await importSite(page);
+    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
+    const roofs = () =>
+      page.evaluate(() => {
+        const out: { id: string; kind: string; photo: boolean }[] = [];
+        (window as any).__scpThree().scene.traverse((o: any) => {
+          if (o.name === "building-roof") out.push({ id: o.userData.itemId, kind: o.userData.roofKind, photo: !!o.material.map });
+        });
+        return out;
+      });
+    await expect.poll(async () => (await roofs()).length).toBe(2);
+    const before = await roofs();
+    expect(before.every(r => r.photo)).toBe(true);
+    expect(before.some(r => r.kind === "hip" || r.kind === "gable")).toBe(true);
+
+    // Change one building's roof to flat in the inspector
+    const target = before.find(r => r.kind !== "flat")!;
+    await page.keyboard.press("2");
+    await page.evaluate(id => (window as any).__scpSelect?.(id), target.id);
+    await page.getByRole("group", { name: "Roof shape" }).getByRole("button", { name: "flat" }).click();
+    await page.keyboard.press("3");
+    await expect.poll(async () => (await roofs()).find(r => r.id === target.id)?.kind).toBe("flat");
+  });
+
   test("Camera wall shows one tile per camera", async ({ page }) => {
     await placeWithKey(page, "c", 0.3, 0.5);
     await placeWithKey(page, "c", 0.7, 0.5);
@@ -35,12 +80,38 @@ test.describe("3D, camera views and report", () => {
     await placeWithKey(page, "c", 0.5, 0.6);
     await page.getByRole("button", { name: /^Eave/ }).click();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Report", exact: true }).click();
-    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Report PDF" }).click()]);
+    // The Report step's panel has the one-click PDF
+    await page.locator('nav[aria-label="Steps"] button').nth(4).click();
+    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Download PDF report" }).click()]);
     await popup.waitForLoadState();
     await expect(popup.getByText("Camera schedule")).toBeVisible({ timeout: 15_000 });
-    await expect(popup.locator("tbody tr")).toHaveCount(1);
-    await expect(popup.locator("tbody tr")).toContainText("11 ft");
+    await expect(popup.locator("#camera-schedule tbody tr")).toHaveCount(1);
+    await expect(popup.locator("#camera-schedule tbody tr")).toContainText("11 ft");
+    await expect(popup.locator("#parts-list tbody tr")).toHaveCount(1);
     await expect(popup.locator("img")).toHaveCount(2); // site plan + camera view
+  });
+
+  test("PDF report includes the coverage checklist; camera list downloads as CSV", async ({ page, context }) => {
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    const box = (await page.getByTestId("plan").boundingBox())!;
+    await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.45);
+    await page.keyboard.press("Escape");
+    await placeWithKey(page, "c", 0.5, 0.5);
+    await page.getByRole("button", { name: /→ Door 1/ }).click();
+    await page.keyboard.press("Escape");
+    await page.locator('nav[aria-label="Steps"] button').nth(4).click();
+    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Download PDF report" }).click()]);
+    await popup.waitForLoadState();
+    await expect(popup.locator("#coverage-checklist tbody tr")).toHaveCount(1, { timeout: 15_000 });
+    await expect(popup.locator("#coverage-checklist")).toContainText("Door 1");
+    await popup.close();
+
+    const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: /camera list \(CSV\)/ }).click()]);
+    expect(download.suggestedFilename()).toMatch(/\.csv$/);
+    const text = await (await download.createReadStream()).toArray().then(chunks => Buffer.concat(chunks).toString("utf8"));
+    expect(text.split("\n")[0]).toContain("Faces to (ft)");
+    expect(text).toContain("Camera 1");
+    expect(text).toContain("Door 1");
   });
 });
