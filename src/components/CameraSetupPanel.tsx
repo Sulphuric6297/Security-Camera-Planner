@@ -1,0 +1,187 @@
+import React from "react";
+import type { CameraItem } from "../types";
+import {
+  DORI_LEVELS,
+  LENS_PRESETS,
+  MOUNT_PRESETS,
+  RESOLUTION_PRESETS,
+  getCameraHFov,
+  getCameraResolution,
+  getDoriDistances,
+  getGroundCoverage,
+  suggestPitchForDistance,
+  vFovFromH,
+  getCameraAspectValue
+} from "../lib/camera";
+import { DEFAULT_CAMERA_PITCH } from "../constants";
+
+type Props = {
+  camera: CameraItem;
+  mountHeight: number;
+  onChange: (updates: Partial<CameraItem>) => void;
+  onMountHeightChange: (height: number) => void;
+};
+
+const chip = (active: boolean) =>
+  `px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors text-center ${active
+    ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100"
+    : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+  }`;
+
+const fmtFt = (ft: number) => (Number.isFinite(ft) ? `${Math.round(ft)} ft` : "∞");
+
+/** Plain-language camera setup: presets, what the camera can see at each distance, and a side view. */
+export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightChange }: Props) {
+  const hFov = getCameraHFov(camera);
+  const aspect = getCameraAspectValue(camera);
+  const vFov = camera.vFov ?? vFovFromH(hFov, aspect);
+  const pitch = camera.pitch ?? DEFAULT_CAMERA_PITCH;
+  const resolution = getCameraResolution(camera);
+  const dori = getDoriDistances(camera);
+  const ground = getGroundCoverage(mountHeight, pitch, vFov);
+  const detectFt = dori[dori.length - 1].distance;
+
+  const setLens = (lens: (typeof LENS_PRESETS)[number]) =>
+    onChange({ lensPreset: lens.id, hFov: lens.hFov, fov: lens.hFov, vFov: vFovFromH(lens.hFov, aspect) });
+
+  const setMount = (mount: (typeof MOUNT_PRESETS)[number]) => {
+    onMountHeightChange(mount.height);
+    onChange({ mountPreset: mount.id, pitch: mount.pitch });
+  };
+
+  const aimAt = (distanceFt: number) => onChange({ pitch: suggestPitchForDistance(mountHeight, distanceFt) });
+
+  // --- Side view diagram geometry (camera on the left, looking right) ---
+  const viewW = 280;
+  const viewH = 120;
+  const groundY = viewH - 18;
+  const maxDist = Math.max(40, Math.min(camera.range, Number.isFinite(ground.far) ? ground.far * 1.1 : camera.range));
+  const sx = (ft: number) => 18 + (Math.min(ft, maxDist) / maxDist) * (viewW - 30);
+  const maxH = Math.max(mountHeight * 1.6, 12);
+  const sy = (ft: number) => groundY - (ft / maxH) * (groundY - 10);
+  const camX = sx(0);
+  const camY = sy(mountHeight);
+  const rayEnd = (angleDeg: number) => {
+    const rad = (angleDeg * Math.PI) / 180;
+    const len = maxDist * 1.5;
+    const gx = len * Math.cos(rad);
+    const gy = mountHeight + len * Math.sin(rad);
+    if (gy < 0) {
+      const t = mountHeight / (mountHeight - gy);
+      return { x: sx(gx * t), y: groundY };
+    }
+    return { x: sx(gx), y: sy(gy) };
+  };
+  const top = rayEnd(pitch + vFov / 2);
+  const bottom = rayEnd(pitch - vFov / 2);
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">Mount</div>
+        <div className="grid grid-cols-4 gap-1.5">
+          {MOUNT_PRESETS.map(m => (
+            <button key={m.id} title={`${m.hint} · ${m.height} ft`} onClick={() => setMount(m)} className={chip(camera.mountPreset === m.id)}>
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">Lens</div>
+        <div className="grid grid-cols-4 gap-1.5">
+          {LENS_PRESETS.map(l => (
+            <button key={l.id} title={`${l.hint} · ${l.hFov}° wide`} onClick={() => setLens(l)} className={chip(camera.lensPreset === l.id || (!camera.lensPreset && Math.abs(hFov - l.hFov) < 2))}>
+              <span className="whitespace-nowrap">{l.label.replace(" ", "")}</span>
+              <span className="block text-[9px] font-medium opacity-70">{l.hFov}°</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">Resolution</div>
+        <div className="grid grid-cols-4 gap-1.5">
+          {RESOLUTION_PRESETS.map(r => (
+            <button key={r.id} onClick={() => onChange({ resolutionWidth: r.width })} className={chip(resolution === r.width)}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] uppercase font-bold text-slate-400">What it can see</div>
+          <button
+            onClick={() => onChange({ range: Math.round(detectFt) })}
+            className="text-[10px] font-semibold text-emerald-300 hover:text-emerald-200"
+            title="Set the coverage range to the Detect distance"
+          >
+            Range = detect
+          </button>
+        </div>
+        {dori.map(level => (
+          <div key={level.id} className="flex items-center gap-2 text-xs" title={level.hint}>
+            <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: level.color }} />
+            <span className="text-slate-200 font-semibold flex-1">{level.label}</span>
+            <span className="text-slate-100 font-semibold tabular-nums">up to {fmtFt(level.distance)}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] uppercase font-bold text-slate-400">Side view</div>
+          <div className="text-[10px] text-slate-400">{mountHeight} ft high · tilt {Math.abs(Math.round(pitch))}° {pitch <= 0 ? "down" : "up"}</div>
+        </div>
+        <svg viewBox={`0 0 ${viewW} ${viewH}`} className="w-full" role="img" aria-label="Side view of the camera's coverage">
+          <rect x={0} y={groundY} width={viewW} height={viewH - groundY} fill="#3f4a35" />
+          {/* DORI ticks on the ground */}
+          {DORI_LEVELS.map((level, i) => {
+            const d = dori[i].distance;
+            if (d > maxDist) return null;
+            return <line key={level.id} x1={sx(d)} x2={sx(d)} y1={groundY} y2={groundY + 6} stroke={level.color} strokeWidth={2} />;
+          })}
+          {/* blind spot */}
+          {Number.isFinite(ground.near) && ground.near > 0 && (
+            <rect x={camX} y={groundY - 3} width={Math.max(0, sx(ground.near) - camX)} height={3} fill="#ef4444" opacity={0.8} />
+          )}
+          <polygon points={`${camX},${camY} ${top.x},${top.y} ${bottom.x},${bottom.y}`} fill="#3b82f6" opacity={0.25} />
+          <line x1={camX} y1={camY} x2={top.x} y2={top.y} stroke="#93c5fd" strokeWidth={1} />
+          <line x1={camX} y1={camY} x2={bottom.x} y2={bottom.y} stroke="#93c5fd" strokeWidth={1} />
+          <line x1={camX} y1={groundY} x2={camX} y2={camY} stroke="#94a3b8" strokeWidth={2} />
+          <circle cx={camX} cy={camY} r={4} fill="#e2e8f0" />
+          {/* person for scale at the identify distance */}
+          {dori[0].distance < maxDist && (
+            <g transform={`translate(${sx(dori[0].distance)}, ${groundY})`} opacity={0.8}>
+              <line x1={0} y1={0} x2={0} y2={sy(5.2) - groundY} stroke="#fde68a" strokeWidth={2} />
+              <circle cx={0} cy={sy(5.8) - groundY} r={3} fill="#fde68a" />
+            </g>
+          )}
+        </svg>
+        <div className="flex justify-between text-[11px] text-slate-400">
+          <span>Blind spot: <span className="text-slate-200 font-semibold">{fmtFt(ground.near)}</span></span>
+          <span>Sees ground to: <span className="text-slate-200 font-semibold">{Number.isFinite(ground.far) ? fmtFt(ground.far) : "horizon"}</span></span>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">Aim at</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {[
+            { label: "Door", ft: 12 },
+            { label: "Yard", ft: 30 },
+            { label: "Driveway", ft: 50 }
+          ].map(t => (
+            <button key={t.label} onClick={() => aimAt(t.ft)} className={chip(false)} title={`Tilt so the center of the view is ~${t.ft} ft away`}>
+              {t.label}
+              <span className="block text-[9px] font-medium opacity-70">{t.ft} ft</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

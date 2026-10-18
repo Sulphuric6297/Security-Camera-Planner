@@ -3,11 +3,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import JSZip from "jszip";
 
-import L from "leaflet";
 import proj4 from "proj4";
-import "leaflet/dist/leaflet.css";
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
-import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry';
+
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   Camera,
   Square,
@@ -34,1694 +32,45 @@ import {
   Maximize,
   Minimize,
   Mountain,
+  WandSparkles,
   LoaderCircle,
   MapPin,
   Hand,
   SquareDashed
 } from "lucide-react";
-import GridLayout from "react-grid-layout";
+import GridLayoutBase from "react-grid-layout";
+// react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
+const GridLayout = GridLayoutBase as unknown as React.ComponentType<any>;
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-
-// --- Types ---
-
-type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
-type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
-type BuildingLabelDefaults = {
-  fontFamily: string;
-  fontSize: number;
-  fontWeight: number;
-};
-type ViewMode = "plan" | "iso3d" | "nvr";
-type TerrainTool = "sculpt" | "smooth" | "flatten";
-type DemAlignTool = "move" | "scale" | "rotate" | "pan";
-type DemData = {
-  name: string;
-  width: number;
-  height: number;
-  values: Float32Array;
-  min: number;
-  max: number;
-  noData?: number | null;
-};
-type HistoryState = {
-  items: CanvasItem[];
-  terrainHeights: Record<string, number>;
-  buildingLabelDefaults: BuildingLabelDefaults;
-  backgroundImg: string | null;
-  bgSettings: {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    opacity: number;
-  };
-  canvasSize: { width: number; height: number };
-  gridSize: number;
-  showGrid: boolean;
-  snapToGrid: boolean;
-  frustumSettings: {
-    visible: boolean;
-    opacity: number;
-    edgeOpacity: number;
-    useCameraColor: boolean;
-    color: string;
-    showAll: boolean;
-    mode: 'volume' | 'floor';
-  };
-  sceneBackgroundImg: string | null;
-  backgroundMode: 'flat' | 'panorama';
-  nvrLayout: any[];
-  demSettings: {
-    demScale: number;
-    demOffset: number;
-    demNormalize: boolean;
-    demTransform: { x: number; y: number; scale: number; rotation: number };
-    demOverlayOpacity: number;
-    demAlignMode: boolean;
-    demAlignTool: DemAlignTool;
-  };
-};
-
-interface BaseItem {
-  id: string;
-  x: number;
-  y: number;
-  rotation: number; // in degrees
-  selected?: boolean;
-}
-
-interface CameraItem extends BaseItem {
-  type: "camera";
-  label: string;
-  description: string;
-  fov: number;
-  hFov?: number;
-  vFov?: number;
-  pitch?: number;
-  height?: number;
-  aspect?: number;
-  mount?: {
-    type: "free" | "building";
-    buildingId?: string;
-    edgeIndex?: number;
-    edgeT?: number;
-    height?: number;
-  };
-  range: number;
-  color: string;
-  labelOffset?: { x: number; y: number };
-  connectorDashSize?: number;
-}
-
-interface BuildingItem extends BaseItem {
-  type: "building";
-  importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
-  width: number;
-  height: number;
-  wallHeight?: number; // Vertical height in 3D
-  label: string;
-  color: string;
-  points?: { x: number; y: number }[];
-  labelOffset?: { x: number; y: number };
-  labelFontFamily?: string;
-  labelFontSize?: number;
-  labelFontWeight?: number;
-}
-
-interface TreeItem extends BaseItem {
-  type: "tree";
-  radius: number;
-  height?: number;  // Tree height (default 30)
-  width?: number;   // Canopy width multiplier (default 1)
-  treeType?: 'deciduous' | 'conifer' | 'palm' | 'bush';  // Tree type
-  color: string;
-}
-
-interface ParkingItem extends BaseItem {
-  type: "parking";
-  width: number;
-  height: number;
-  color: string;
-  vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'hatchback';
-  vehicleHeight?: number;
-}
-
-interface LabelItem extends BaseItem {
-  type: "label";
-  text: string;
-  fontSize: number;
-  color: string;
-}
-
-interface ImageItem extends BaseItem {
-  type: "image";
-  src: string;
-  width: number;
-  height: number;
-  label: string;
-  aspectRatioLocked?: boolean;
-}
-
-
-
-type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem;
-
-// --- Helper Functions ---
-
-const generateId = () => Math.random().toString(36).substr(2, 9);
-
-const COLORS = {
-  camera: ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"],
-  building: ["#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155", "#1e293b"],
-  tree: ["#22c55e", "#16a34a", "#15803d", "#14532d", "#84cc16", "#bef264"],
-  parking: ["#e2e8f0", "#cbd5e1", "#94a3b8", "#f8fafc", "#ffffff", "#f1f5f9"],
-  label: ["#1e293b", "#334155", "#475569", "#64748b", "#ef4444", "#3b82f6"]
-};
-
-const DEFAULT_CANVAS = { width: 1000, height: 700 };
-const TERRAIN_BRUSH_MIN = 1;
-const TERRAIN_BRUSH_MAX = 12;
-const TERRAIN_FALLOFF_MIN = 0.5;
-const TERRAIN_FALLOFF_MAX = 4;
-const MAP_OVERLAY_OFFSET = 0.02;
-const OBJECT_ELEVATION_OFFSET = 0.08;
-const NVR_COLS = 12;
-const NVR_MARGIN = 16;
-const NVR_DEFAULT_W = 4;
-const NVR_DEFAULT_H = 2;
-const NVR_ASPECT = 16 / 9;
-const NVR_HEADER_FOOTER = 64;
-const NVR_MIN_ROW_HEIGHT = 80;
-const DEFAULT_BUILDING_LABEL: BuildingLabelDefaults = {
-  fontFamily: "Space Grotesk",
-  fontSize: 12,
-  fontWeight: 700
-};
-const FONT_FAMILIES = [
-  "Space Grotesk",
-  "Sora",
-  "Poppins",
-  "Montserrat",
-  "Roboto Slab",
-  "Inter"
-];
-const FONT_WEIGHTS = [400, 500, 600, 700, 800];
-
-const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-
-// --- Elevation Helpers ---
-
-// Plan units are feet throughout the app (camera heights, wall heights, etc.).
-const FEET_PER_METER = 3.28084;
-const METERS_PER_DEG_LAT = 111320;
-const ELEVATION_TILE_SIZE = 256;
-const ELEVATION_MAX_ZOOM = 15;
-const ELEVATION_MAX_TILES = 36;
-// Free, CORS-enabled global elevation tiles (AWS Open Data "Terrain Tiles", Terrarium encoding).
-const elevationTileUrl = (z: number, x: number, y: number) =>
-  `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
-
-type SiteLocation = { lat: number; lon: number; label: string };
-type ElevationOverlayMode = "off" | "contours" | "shaded";
-
-const lonToPixel = (lon: number, z: number) => ((lon + 180) / 360) * ELEVATION_TILE_SIZE * Math.pow(2, z);
-const latToPixel = (lat: number, z: number) => {
-  const rad = (clamp(lat, -85, 85) * Math.PI) / 180;
-  return ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * ELEVATION_TILE_SIZE * Math.pow(2, z);
-};
-
-// Accepts "lat, lon", a Google Maps / Apple Maps / OSM link, or a plain address (geocoded via OpenStreetMap).
-const resolveSiteLocation = async (input: string): Promise<SiteLocation> => {
-  const text = input.trim();
-  if (!text) throw new Error("Enter an address, coordinates, or a map link.");
-  const isValid = (lat: number, lon: number) =>
-    Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
-  const patterns = [
-    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/, // Google Maps pin
-    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/, // Google Maps view center
-    /[?&](?:q|ll|query|center)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i, // ?q=lat,lon
-    /[#&]map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/, // openstreetmap.org/#map=z/lat/lon
-    /^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/ // "lat, lon"
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      const lat = parseFloat(match[1]);
-      const lon = parseFloat(match[2]);
-      if (isValid(lat, lon)) return { lat, lon, label: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
-    }
-  }
-  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(text)}`, {
-    headers: { Accept: "application/json" }
-  });
-  if (!res.ok) throw new Error("Address lookup failed. Try entering coordinates instead (e.g. 39.7392, -104.9903).");
-  const results = await res.json();
-  if (!Array.isArray(results) || results.length === 0) {
-    throw new Error("Couldn't find that address. Try a more specific address or paste coordinates.");
-  }
-  const lat = parseFloat(results[0].lat);
-  const lon = parseFloat(results[0].lon);
-  if (!isValid(lat, lon)) throw new Error("Address lookup returned an invalid location.");
-  return { lat, lon, label: results[0].display_name || text };
-};
-
-const loadTileImage = (url: string) =>
-  new Promise<HTMLImageElement | null>((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
-
-type GeoBounds = { north: number; south: number; west: number; east: number };
-
-// Real-world bounds of a widthFt x heightFt area centered on the location.
-const getGeoBounds = (location: SiteLocation, widthFt: number, heightFt: number): GeoBounds => {
-  const cosLat = Math.cos((location.lat * Math.PI) / 180) || 1e-6;
-  const dLat = heightFt / FEET_PER_METER / 2 / METERS_PER_DEG_LAT;
-  const dLon = widthFt / FEET_PER_METER / 2 / (METERS_PER_DEG_LAT * cosLat);
-  return { north: location.lat + dLat, south: location.lat - dLat, west: location.lon - dLon, east: location.lon + dLon };
-};
-
-const getTileRange = (bounds: GeoBounds, z: number) => ({
-  x0: Math.floor(lonToPixel(bounds.west, z) / ELEVATION_TILE_SIZE),
-  x1: Math.floor(lonToPixel(bounds.east, z) / ELEVATION_TILE_SIZE),
-  y0: Math.floor(latToPixel(bounds.north, z) / ELEVATION_TILE_SIZE),
-  y1: Math.floor(latToPixel(bounds.south, z) / ELEVATION_TILE_SIZE)
-});
-
-// Downloads and stitches the web-mercator tiles covering the bounds. Lowers the zoom if it would need too many tiles.
-const loadTileMosaic = async (
-  bounds: GeoBounds,
-  maxZoom: number,
-  maxTiles: number,
-  tileUrl: (z: number, x: number, y: number) => string
-) => {
-  let z = maxZoom;
-  let range = getTileRange(bounds, z);
-  while (z > 1 && (range.x1 - range.x0 + 1) * (range.y1 - range.y0 + 1) > maxTiles) {
-    z -= 1;
-    range = getTileRange(bounds, z);
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = (range.x1 - range.x0 + 1) * ELEVATION_TILE_SIZE;
-  canvas.height = (range.y1 - range.y0 + 1) * ELEVATION_TILE_SIZE;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("Your browser couldn't create a canvas for map data.");
-  const jobs: Promise<boolean>[] = [];
-  for (let ty = range.y0; ty <= range.y1; ty++) {
-    for (let tx = range.x0; tx <= range.x1; tx++) {
-      jobs.push(loadTileImage(tileUrl(z, tx, ty)).then(img => {
-        if (!img) return false;
-        ctx.drawImage(img, (tx - range.x0) * ELEVATION_TILE_SIZE, (ty - range.y0) * ELEVATION_TILE_SIZE, ELEVATION_TILE_SIZE, ELEVATION_TILE_SIZE);
-        return true;
-      }));
-    }
-  }
-  const loaded = await Promise.all(jobs);
-  // Converts a lat/lon to a pixel position inside the mosaic.
-  const toMosaic = (lat: number, lon: number) => ({
-    x: lonToPixel(lon, z) - range.x0 * ELEVATION_TILE_SIZE,
-    y: latToPixel(lat, z) - range.y0 * ELEVATION_TILE_SIZE
-  });
-  return { canvas, ctx, z, toMosaic, loadedAny: loaded.some(Boolean), loadedAll: loaded.every(Boolean) };
-};
-
-// Samples real-world elevation (meters) on a samplesX x samplesY grid covering widthFt x heightFt centered on the location.
-// Row 0 is the north edge, column 0 is the west edge (matches a north-up map).
-const fetchElevationGrid = async (
-  location: SiteLocation,
-  widthFt: number,
-  heightFt: number,
-  samplesX: number,
-  samplesY: number
-) => {
-  const bounds = getGeoBounds(location, widthFt, heightFt);
-  const mosaic = await loadTileMosaic(bounds, ELEVATION_MAX_ZOOM, ELEVATION_MAX_TILES, elevationTileUrl);
-  if (!mosaic.loadedAny) {
-    throw new Error("Couldn't download elevation data. Check your internet connection and try again.");
-  }
-
-  const mosaicW = mosaic.canvas.width;
-  const mosaicH = mosaic.canvas.height;
-  const pixels = mosaic.ctx.getImageData(0, 0, mosaicW, mosaicH).data;
-  const decode = (px: number, py: number) => {
-    const ix = clamp(px, 0, mosaicW - 1);
-    const iy = clamp(py, 0, mosaicH - 1);
-    const i = (iy * mosaicW + ix) * 4;
-    if (pixels[i + 3] === 0) return NaN;
-    return pixels[i] * 256 + pixels[i + 1] + pixels[i + 2] / 256 - 32768;
-  };
-  const sample = (lat: number, lon: number) => {
-    const p = mosaic.toMosaic(lat, lon);
-    const gx = p.x - 0.5;
-    const gy = p.y - 0.5;
-    const x0 = Math.floor(gx);
-    const y0 = Math.floor(gy);
-    const tx = gx - x0;
-    const ty = gy - y0;
-    const a = decode(x0, y0);
-    const b = decode(x0 + 1, y0);
-    const c = decode(x0, y0 + 1);
-    const d = decode(x0 + 1, y0 + 1);
-    return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
-  };
-
-  const values = new Float32Array(samplesX * samplesY);
-  let min = Infinity;
-  let max = -Infinity;
-  for (let sy = 0; sy < samplesY; sy++) {
-    const lat = bounds.north - (sy / Math.max(samplesY - 1, 1)) * (bounds.north - bounds.south);
-    for (let sx = 0; sx < samplesX; sx++) {
-      const lon = bounds.west + (sx / Math.max(samplesX - 1, 1)) * (bounds.east - bounds.west);
-      const v = sample(lat, lon);
-      values[sy * samplesX + sx] = v;
-      if (Number.isFinite(v)) {
-        min = Math.min(min, v);
-        max = Math.max(max, v);
-      }
-    }
-  }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) {
-    throw new Error("No elevation data is available for that location.");
-  }
-  return { values, min, max, zoom: mosaic.z };
-};
-
-// High-resolution US elevation (USGS 3DEP, lidar-based where available, ~1-10 m). Free, no key.
-const USGS_3DEP_EXPORT = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage";
-
-const fetchUsgsElevationGrid = async (bounds: GeoBounds, samplesX: number, samplesY: number) => {
-  const params = new URLSearchParams({
-    bbox: `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
-    bboxSR: "4326",
-    imageSR: "4326",
-    size: `${samplesX},${samplesY}`,
-    format: "tiff",
-    pixelType: "F32",
-    interpolation: "RSP_BilinearInterpolation",
-    f: "image"
-  });
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 20000);
-  try {
-    const res = await fetch(`${USGS_3DEP_EXPORT}?${params.toString()}`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`USGS ${res.status}`);
-    const buffer = await res.arrayBuffer();
-    const { fromArrayBuffer } = await import("geotiff");
-    const tiff = await fromArrayBuffer(buffer);
-    const image = await tiff.getImage();
-    if (image.getWidth() !== samplesX || image.getHeight() !== samplesY) throw new Error("USGS size mismatch");
-    const raster = (await image.readRasters({ samples: [0], interleave: true })) as unknown as ArrayLike<number>;
-    const noData = image.getGDALNoData();
-    const values = new Float32Array(samplesX * samplesY);
-    let min = Infinity;
-    let max = -Infinity;
-    let valid = 0;
-    for (let i = 0; i < values.length; i++) {
-      const v = raster[i];
-      // 3DEP marks missing data with a huge negative number.
-      if (!Number.isFinite(v) || v < -1000 || v > 9000 || (noData !== null && v === noData)) {
-        values[i] = NaN;
-        continue;
-      }
-      values[i] = v;
-      valid++;
-      min = Math.min(min, v);
-      max = Math.max(max, v);
-    }
-    if (valid < values.length * 0.95) throw new Error("USGS coverage incomplete");
-    // Fill any small gaps from the nearest valid neighbor in the row.
-    for (let i = 0; i < values.length; i++) {
-      if (Number.isNaN(values[i])) values[i] = Number.isNaN(values[i - 1]) ? min : values[i - 1];
-    }
-    return { values, min, max };
-  } finally {
-    window.clearTimeout(timeout);
-  }
-};
-
-// Best available elevation: USGS 3DEP (US, high detail), else global terrain tiles.
-const fetchBestElevationGrid = async (
-  location: SiteLocation,
-  widthFt: number,
-  heightFt: number,
-  samplesX: number,
-  samplesY: number
-) => {
-  try {
-    const usgs = await fetchUsgsElevationGrid(getGeoBounds(location, widthFt, heightFt), samplesX, samplesY);
-    return { ...usgs, source: "USGS 3DEP (high detail)" };
-  } catch (err) {
-    console.info("USGS 3DEP elevation unavailable, using global terrain tiles", err);
-    const tiles = await fetchElevationGrid(location, widthFt, heightFt, samplesX, samplesY);
-    return { values: tiles.values, min: tiles.min, max: tiles.max, source: "global terrain tiles" };
-  }
-};
-
-// --- Georeferenced GeoTIFF support (snap uploaded elevation files into place) ---
-
-// Projection definitions for the CRSs US elevation downloads commonly use.
-const getProj4Definition = (epsg: number): { def: string; feet: boolean } | null => {
-  const ncLcc = "+proj=lcc +lat_1=36.16666666666666 +lat_2=34.33333333333334 +lat_0=33.75 +lon_0=-79 +x_0=609601.22 +y_0=0 +ellps=GRS80 +no_defs";
-  if (epsg === 4326 || epsg === 4269 || epsg === 4759 || epsg === 6318) return { def: "+proj=longlat +datum=WGS84 +no_defs", feet: false };
-  if (epsg === 3857 || epsg === 900913) return { def: "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +no_defs", feet: false };
-  if (epsg >= 26901 && epsg <= 26923) return { def: `+proj=utm +zone=${epsg - 26900} +datum=NAD83 +units=m +no_defs`, feet: false };
-  if (epsg >= 32601 && epsg <= 32660) return { def: `+proj=utm +zone=${epsg - 32600} +datum=WGS84 +units=m +no_defs`, feet: false };
-  if (epsg >= 6330 && epsg <= 6348) return { def: `+proj=utm +zone=${epsg - 6329} +ellps=GRS80 +units=m +no_defs`, feet: false };
-  // North Carolina State Plane (meters / US survey feet), NAD83 / HARN / 2011
-  if (epsg === 32119 || epsg === 3358 || epsg === 6542) return { def: `${ncLcc} +units=m`, feet: false };
-  if (epsg === 2264 || epsg === 3359 || epsg === 6543) return { def: `${ncLcc} +units=us-ft`, feet: true };
-  return null;
-};
-
-// Returns the lat/lon of the GeoTIFF's four corners (NW, NE, SE, SW) and whether its elevations are in feet.
-const getGeoTiffCorners = (image: any) => {
-  const keys = image.getGeoKeys?.() ?? {};
-  const epsg = keys.ProjectedCSTypeGeoKey && keys.ProjectedCSTypeGeoKey !== 32767
-    ? keys.ProjectedCSTypeGeoKey
-    : keys.GeographicTypeGeoKey;
-  const proj = epsg ? getProj4Definition(epsg) : null;
-  if (!proj) return null;
-  const [minX, minY, maxX, maxY] = image.getBoundingBox();
-  const toLatLon = (x: number, y: number) => {
-    const [lon, lat] = proj4(proj.def, "+proj=longlat +datum=WGS84 +no_defs", [x, y]);
-    return { lat, lon };
-  };
-  const verticalUnits = keys.VerticalUnitsGeoKey;
-  const elevationInFeet = verticalUnits === 9002 || verticalUnits === 9003 || (verticalUnits === undefined && proj.feet);
-  return {
-    corners: [toLatLon(minX, maxY), toLatLon(maxX, maxY), toLatLon(maxX, minY), toLatLon(minX, minY)],
-    elevationInFeet,
-    epsg,
-    projDef: proj.def,
-    bbox: [minX, minY, maxX, maxY] as [number, number, number, number]
-  };
-};
-
-// How the plan maps to the real world (set when a site is imported).
-type PlanGeoRef = { bounds: GeoBounds; area: { x: number; y: number; width: number; height: number }; unitsPerFoot: number };
-
-type MapImagerySource = "satellite" | "streets";
-const MAP_IMAGERY_SOURCES: Record<MapImagerySource, {
-  label: string;
-  maxZoom: number;
-  attribution: string;
-  url: (z: number, x: number, y: number) => string;
-  // Coverage lookup for zoom levels that only exist in some areas (high-res aerials).
-  tilemap?: (z: number, x: number, y: number) => string;
-}> = {
-  satellite: {
-    label: "Satellite",
-    maxZoom: 21,
-    attribution: "Imagery © Esri, Maxar, Vexcel, Earthstar Geographics",
-    url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`,
-    tilemap: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tilemap/${z}/${y}/${x}/1/1?f=json`
-  },
-  streets: {
-    label: "Street Map",
-    maxZoom: 19,
-    attribution: "© OpenStreetMap contributors",
-    url: (z, x, y) => `https://tile.openstreetmap.org/${z}/${x}/${y}.png`
-  }
-};
-// Statewide high-resolution orthoimagery (public ArcGIS ImageServers, no key).
-// Tried first when the site falls inside the region; falls back to Esri if unavailable.
-const STATE_ORTHO_SOURCES: {
-  label: string;
-  attribution: string;
-  region: GeoBounds;
-  feetPerPixel: number;
-  services: string[];
-}[] = [
-  {
-    label: "NC OneMap 6-inch orthoimagery",
-    attribution: "Imagery © NC OneMap / NC Orthoimagery Program",
-    region: { south: 33.75, north: 36.6, west: -84.33, east: -75.4 },
-    feetPerPixel: 0.5,
-    services: [
-      "https://services.nconemap.gov/secure/rest/services/Imagery/Orthoimagery_Latest/ImageServer",
-      "https://services.gis.nc.gov/secure/rest/services/Imagery/Orthoimagery_Latest/ImageServer"
-    ]
-  }
-];
-
-const findStateOrtho = (lat: number, lon: number) =>
-  STATE_ORTHO_SOURCES.find(src => lat >= src.region.south && lat <= src.region.north && lon >= src.region.west && lon <= src.region.east);
-
-const loadBlobImage = (blob: Blob) =>
-  new Promise<HTMLImageElement>((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Invalid image")); };
-    img.src = url;
-  });
-
-// Draws the provider credit in the corner of an exported map image.
-const drawAttribution = (ctx: CanvasRenderingContext2D, width: number, height: number, text: string) => {
-  const fontSize = Math.max(12, Math.round(width / 120));
-  ctx.font = `${fontSize}px sans-serif`;
-  const textW = ctx.measureText(text).width;
-  ctx.fillStyle = "rgba(0,0,0,0.5)";
-  ctx.fillRect(width - textW - fontSize, height - fontSize * 1.6, textW + fontSize, fontSize * 1.6);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText(text, width - textW - fontSize / 2, height - fontSize * 0.45);
-};
-
-// Exports a north-up image of the bounds from an ArcGIS ImageServer, in 2048px chunks so any server limit is respected.
-const fetchArcgisExportImage = async (
-  serviceUrl: string,
-  bounds: GeoBounds,
-  widthPx: number,
-  heightPx: number,
-  attribution: string
-) => {
-  const out = document.createElement("canvas");
-  out.width = widthPx;
-  out.height = heightPx;
-  const ctx = out.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("Canvas unavailable");
-  const chunk = 2048;
-  const lonPerPx = (bounds.east - bounds.west) / widthPx;
-  const latPerPx = (bounds.north - bounds.south) / heightPx;
-  const jobs: Promise<void>[] = [];
-  for (let py = 0; py < heightPx; py += chunk) {
-    for (let px = 0; px < widthPx; px += chunk) {
-      const w = Math.min(chunk, widthPx - px);
-      const h = Math.min(chunk, heightPx - py);
-      const west = bounds.west + px * lonPerPx;
-      const east = west + w * lonPerPx;
-      const north = bounds.north - py * latPerPx;
-      const south = north - h * latPerPx;
-      const params = new URLSearchParams({
-        bbox: `${west},${south},${east},${north}`,
-        bboxSR: "4326",
-        imageSR: "4326",
-        size: `${w},${h}`,
-        format: "jpg",
-        interpolation: "RSP_BilinearInterpolation",
-        f: "image"
-      });
-      jobs.push((async () => {
-        const res = await fetch(`${serviceUrl}/exportImage?${params.toString()}`);
-        if (!res.ok) throw new Error(`Imagery service ${res.status}`);
-        const blob = await res.blob();
-        if (!blob.type.startsWith("image/")) throw new Error("Imagery service returned no image");
-        const img = await loadBlobImage(blob);
-        ctx.drawImage(img, px, py, w, h);
-      })());
-    }
-  }
-  await Promise.all(jobs);
-  // Outside the program's coverage the service returns blank (black/white) pixels.
-  const sample = ctx.getImageData(0, 0, widthPx, heightPx).data;
-  let blank = 0;
-  let total = 0;
-  const step = Math.max(4, Math.floor(sample.length / 4 / 5000)) * 4;
-  for (let i = 0; i < sample.length; i += step) {
-    const r = sample[i], g = sample[i + 1], b = sample[i + 2];
-    if ((r < 4 && g < 4 && b < 4) || (r > 251 && g > 251 && b > 251)) blank++;
-    total++;
-  }
-  if (blank / Math.max(total, 1) > 0.3) throw new Error("Imagery service has no coverage here");
-  drawAttribution(ctx, widthPx, heightPx, attribution);
-  return out.toDataURL("image/jpeg", 0.92);
-};
-
-const MAP_IMAGERY_MAX_TILES = 196;
-// ~4K image: sharp in 2D and within every GPU's texture limit for 3D.
-const MAP_IMAGERY_TARGET_PX = 4096;
-
-// Downloads a north-up map image exactly covering widthFt x heightFt centered on the location.
-const fetchMapImagery = async (
-  location: SiteLocation,
-  widthFt: number,
-  heightFt: number,
-  source: MapImagerySource
-): Promise<{ url: string; partial: boolean; sourceLabel: string }> => {
-  const config = MAP_IMAGERY_SOURCES[source];
-  const bounds = getGeoBounds(location, widthFt, heightFt);
-  const stateOrtho = source === "satellite" ? findStateOrtho(location.lat, location.lon) : undefined;
-  if (stateOrtho) {
-    const scale = Math.min(1, MAP_IMAGERY_TARGET_PX / (Math.max(widthFt, heightFt) / stateOrtho.feetPerPixel));
-    const widthPx = Math.max(1, Math.round((widthFt / stateOrtho.feetPerPixel) * scale));
-    const heightPx = Math.max(1, Math.round((heightFt / stateOrtho.feetPerPixel) * scale));
-    for (const service of stateOrtho.services) {
-      try {
-        const url = await fetchArcgisExportImage(service, bounds, widthPx, heightPx, stateOrtho.attribution);
-        return { url, partial: false, sourceLabel: stateOrtho.label };
-      } catch (err) {
-        console.info(`${stateOrtho.label} unavailable from ${service}`, err);
-      }
-    }
-  }
-  // Pick the zoom whose resolution gives roughly MAP_IMAGERY_TARGET_PX across the area.
-  const metersPerPx = widthFt / FEET_PER_METER / MAP_IMAGERY_TARGET_PX;
-  const cosLat = Math.cos((location.lat * Math.PI) / 180);
-  const idealZoom = Math.ceil(Math.log2((156543.03392 * cosLat) / Math.max(metersPerPx, 0.01)));
-  let zoom = clamp(idealZoom, 1, config.maxZoom);
-  // Use the sharpest imagery level that actually exists here (beyond z19 coverage is regional).
-  if (config.tilemap) {
-    while (zoom > 19) {
-      const tx = Math.floor(lonToPixel(location.lon, zoom) / ELEVATION_TILE_SIZE);
-      const ty = Math.floor(latToPixel(location.lat, zoom) / ELEVATION_TILE_SIZE);
-      try {
-        const res = await fetch(config.tilemap(zoom, tx, ty));
-        const json = res.ok ? await res.json() : null;
-        if (json && !json.adjusted && Array.isArray(json.data) && json.data[0] === 1) break;
-      } catch {
-        // fall through to a lower zoom
-      }
-      zoom -= 1;
-    }
-  }
-  const mosaic = await loadTileMosaic(bounds, zoom, MAP_IMAGERY_MAX_TILES, config.url);
-  if (!mosaic.loadedAny) {
-    throw new Error(`Couldn't download ${config.label.toLowerCase()} imagery. Check your internet connection and try again.`);
-  }
-  const nw = mosaic.toMosaic(bounds.north, bounds.west);
-  const se = mosaic.toMosaic(bounds.south, bounds.east);
-  const cropW = Math.max(1, se.x - nw.x);
-  const cropH = Math.max(1, se.y - nw.y);
-  const outScale = Math.min(1, MAP_IMAGERY_TARGET_PX / Math.max(cropW, cropH));
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(cropW * outScale));
-  out.height = Math.max(1, Math.round(cropH * outScale));
-  const outCtx = out.getContext("2d");
-  if (!outCtx) throw new Error("Your browser couldn't create a canvas for map data.");
-  outCtx.imageSmoothingQuality = "high";
-  outCtx.drawImage(mosaic.canvas, nw.x, nw.y, cropW, cropH, 0, 0, out.width, out.height);
-  // Attribution required by the tile providers.
-  drawAttribution(outCtx, out.width, out.height, config.attribution);
-  const metersPerPixel = (156543.03392 * cosLat) / Math.pow(2, mosaic.z);
-  return {
-    url: out.toDataURL("image/jpeg", 0.92),
-    partial: !mosaic.loadedAll,
-    sourceLabel: `${config.label === "Satellite" ? "Esri satellite" : "OpenStreetMap"} (~${Math.round(metersPerPixel * 100)} cm/pixel)`
-  };
-};
-
-// A real-world rectangle picked on the satellite map.
-type SiteSelection = { center: SiteLocation; widthFt: number; heightFt: number };
-
-const selectionFromBounds = (b: GeoBounds, label: string): SiteSelection => {
-  const lat = (b.north + b.south) / 2;
-  const lon = (b.east + b.west) / 2;
-  const cosLat = Math.cos((lat * Math.PI) / 180);
-  return {
-    center: { lat, lon, label },
-    widthFt: Math.abs(b.east - b.west) * METERS_PER_DEG_LAT * cosLat * FEET_PER_METER,
-    heightFt: Math.abs(b.north - b.south) * METERS_PER_DEG_LAT * FEET_PER_METER
-  };
-};
-
-const SITE_MAX_WIDTH_FT = 5000;
-const SITE_MIN_WIDTH_FT = 40;
-
-// Satellite + labels for browsing in the site picker (the imported image itself has no labels).
-const PICKER_LAYERS: Record<MapImagerySource, { url: string; overlays: string[]; maxNativeZoom: number }> = {
-  satellite: {
-    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    overlays: [
-      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
-      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
-    ],
-    maxNativeZoom: 19
-  },
-  streets: {
-    url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    overlays: [],
-    maxNativeZoom: 19
-  }
-};
-
-type OsmBuilding = { points: { lat: number; lon: number }[]; heightFt: number; label: string };
-
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter"
-];
-
-const parseOsmLength = (value?: string) => {
-  if (!value) return null;
-  const num = parseFloat(value.replace(",", "."));
-  if (!Number.isFinite(num) || num <= 0) return null;
-  return /ft|'|feet/i.test(value) ? num : num * FEET_PER_METER;
-};
-
-const estimateBuildingHeightFt = (tags: Record<string, string>) => {
-  const explicit = parseOsmLength(tags.height) ?? parseOsmLength(tags["building:height"]);
-  if (explicit) return Math.round(explicit);
-  const levels = parseFloat(tags["building:levels"] ?? "");
-  if (Number.isFinite(levels) && levels > 0) return Math.round(levels * 10 + 4);
-  switch (tags.building) {
-    case "garage": case "garages": case "shed": case "carport": case "hut": case "roof":
-      return 10;
-    case "apartments": case "hotel": case "office":
-      return 36;
-    case "commercial": case "retail": case "industrial": case "warehouse": case "school": case "church":
-      return 24;
-    default:
-      return 18;
-  }
-};
-
-// Building footprints from OpenStreetMap (free, no key). Coverage varies by area.
-const fetchOsmBuildings = async (bounds: GeoBounds): Promise<OsmBuilding[]> => {
-  const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
-  const query = `[out:json][timeout:25];(way["building"](${bbox});relation["building"]["type"="multipolygon"](${bbox}););out geom;`;
-  let lastError: unknown = null;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: `data=${encodeURIComponent(query)}`
-      });
-      if (!res.ok) throw new Error(`Overpass ${res.status}`);
-      const json = await res.json();
-      const buildings: OsmBuilding[] = [];
-      (json.elements ?? []).forEach((el: any) => {
-        const tags: Record<string, string> = el.tags ?? {};
-        let geometry: { lat: number; lon: number }[] | undefined;
-        if (el.type === "way") geometry = el.geometry;
-        else if (el.type === "relation") geometry = el.members?.find((m: any) => m.role === "outer" && m.geometry)?.geometry;
-        if (!geometry || geometry.length < 4) return;
-        const points = geometry.slice();
-        const first = points[0];
-        const last = points[points.length - 1];
-        if (first.lat === last.lat && first.lon === last.lon) points.pop();
-        if (points.length < 3) return;
-        const label = tags.name || [tags["addr:housenumber"], tags["addr:street"]].filter(Boolean).join(" ") || "";
-        buildings.push({ points, heightFt: estimateBuildingHeightFt(tags), label });
-      });
-      return buildings;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error("Building lookup failed.");
-};
-
-const getTerrainStats = (heights: Record<string, number>) => {
-  let min = 0;
-  let max = 0;
-  let count = 0;
-  for (const key in heights) {
-    const v = heights[key];
-    if (!Number.isFinite(v)) continue;
-    // Missing vertices are ground level (0), so 0 is always within range.
-    min = Math.min(min, v);
-    max = Math.max(max, v);
-    count++;
-  }
-  return { min, max, relief: max - min, count };
-};
-
-// Picks a "nice" contour interval (1, 2, 5, 10... ft) giving roughly 8-15 lines across the relief.
-const getContourInterval = (relief: number) => {
-  if (relief <= 0) return 1;
-  const raw = relief / 10;
-  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
-  const nice = [1, 2, 5, 10].map(m => m * pow).find(v => v >= raw) ?? 10 * pow;
-  return Math.max(0.5, nice);
-};
-
-// Elevation color ramp: low = deep green, mid = tan, high = brown/white.
-const ELEVATION_RAMP: [number, [number, number, number]][] = [
-  [0, [34, 94, 64]],
-  [0.25, [84, 140, 74]],
-  [0.5, [196, 182, 112]],
-  [0.75, [168, 112, 66]],
-  [1, [240, 236, 228]]
-];
-const elevationColor = (t: number): [number, number, number] => {
-  const v = clamp(t, 0, 1);
-  for (let i = 1; i < ELEVATION_RAMP.length; i++) {
-    const [p1, c1] = ELEVATION_RAMP[i];
-    const [p0, c0] = ELEVATION_RAMP[i - 1];
-    if (v <= p1) {
-      const k = (v - p0) / (p1 - p0 || 1);
-      return [c0[0] + (c1[0] - c0[0]) * k, c0[1] + (c1[1] - c0[1]) * k, c0[2] + (c1[2] - c0[2]) * k];
-    }
-  }
-  return ELEVATION_RAMP[ELEVATION_RAMP.length - 1][1];
-};
-
-// Marching-squares contour segments over the terrain vertex grid (world/plan coordinates).
-const computeContourSegments = (
-  heights: Record<string, number>,
-  grid: number,
-  width: number,
-  height: number,
-  interval: number,
-  minH: number,
-  maxH: number
-) => {
-  const segments: { x1: number; y1: number; x2: number; y2: number; level: number }[] = [];
-  if (interval <= 0 || maxH - minH <= 0) return segments;
-  const cols = Math.floor(width / grid);
-  const rows = Math.floor(height / grid);
-  const h = (ix: number, iy: number) => heights[`${ix * grid},${iy * grid}`] ?? 0;
-  const firstLevel = Math.ceil(minH / interval) * interval;
-  for (let iy = 0; iy < rows; iy++) {
-    for (let ix = 0; ix < cols; ix++) {
-      const a = h(ix, iy);
-      const b = h(ix + 1, iy);
-      const c = h(ix + 1, iy + 1);
-      const d = h(ix, iy + 1);
-      const lo = Math.min(a, b, c, d);
-      const hi = Math.max(a, b, c, d);
-      if (hi - lo < 1e-6) continue;
-      const x0 = ix * grid;
-      const y0 = iy * grid;
-      for (let level = Math.max(firstLevel, Math.ceil(lo / interval) * interval); level <= hi; level += interval) {
-        if (level <= lo || level > hi) continue;
-        const pts: { x: number; y: number }[] = [];
-        const edge = (h1: number, h2: number, p1: { x: number; y: number }, p2: { x: number; y: number }) => {
-          if ((h1 < level) === (h2 < level)) return;
-          const t = (level - h1) / (h2 - h1);
-          pts.push({ x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t });
-        };
-        const pa = { x: x0, y: y0 };
-        const pb = { x: x0 + grid, y: y0 };
-        const pc = { x: x0 + grid, y: y0 + grid };
-        const pd = { x: x0, y: y0 + grid };
-        edge(a, b, pa, pb);
-        edge(b, c, pb, pc);
-        edge(c, d, pc, pd);
-        edge(d, a, pd, pa);
-        if (pts.length >= 2) segments.push({ x1: pts[0].x, y1: pts[0].y, x2: pts[1].x, y2: pts[1].y, level });
-        if (pts.length === 4) segments.push({ x1: pts[2].x, y1: pts[2].y, x2: pts[3].x, y2: pts[3].y, level });
-      }
-    }
-  }
-  return segments;
-};
-
-const normalizeAngle = (angle: number) => {
-  let normalized = angle % 360;
-  if (normalized > 180) normalized -= 360;
-  if (normalized < -180) normalized += 360;
-  return normalized;
-};
-
-const rectanglePoints = (width: number, height: number) => [
-  { x: -width / 2, y: -height / 2 },
-  { x: width / 2, y: -height / 2 },
-  { x: width / 2, y: height / 2 },
-  { x: -width / 2, y: height / 2 }
-];
-
-const getPointsBounds = (points: { x: number; y: number }[]) => {
-  const xs = points.map(p => p.x);
-  const ys = points.map(p => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
-};
-
-const resolveVehicleType = (item: ParkingItem): ParkingItem['vehicleType'] => {
-  const rawType = (item as ParkingItem & { vehicleType?: string }).vehicleType;
-  if (rawType) {
-    if (rawType === 'motorcycle') return 'hatchback';
-    if (['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'].includes(rawType)) {
-      return rawType as ParkingItem['vehicleType'];
-    }
-  }
-  const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  return ['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'][hash % 6] as ParkingItem['vehicleType'];
-};
-
-const getCarSignature = (item: ParkingItem) =>
-  `${item.width}|${item.height}|${item.vehicleHeight ?? 12}|${resolveVehicleType(item)}|${item.color}`;
-
-const getTreeSignature = (item: TreeItem) =>
-  `${item.radius}|${item.height ?? 30}|${item.width ?? 1}|${item.treeType ?? 'deciduous'}|${item.color}`;
-
-const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
-  if (type === "parking") return plural ? "Vehicles" : "Vehicle";
-  if (type === "camera") return plural ? "Cameras" : "Camera";
-  if (type === "building") return plural ? "Buildings" : "Building";
-  if (type === "tree") return plural ? "Trees" : "Tree";
-  if (type === "label") return plural ? "Text" : "Text";
-  if (type === "image") return plural ? "Overlays" : "Overlay";
-  return type;
-};
-
-// Create a detailed 3D car model with variations
-const create3dCar = (item: ParkingItem): THREE.Group => {
-  const group = new THREE.Group();
-  const bodyGroup = new THREE.Group();
-  const shellGroup = new THREE.Group();
-  const detailGroup = new THREE.Group();
-  bodyGroup.add(shellGroup);
-  bodyGroup.add(detailGroup);
-  group.add(bodyGroup);
-  const width = Math.max(item.width, 8);
-  const length = Math.max(item.height, 16);
-  const carHeight = Math.max(item.vehicleHeight ?? 12, 6);
-  const wheelRadius = clamp(Math.min(width, length) * 0.15, 2.2, carHeight * 0.38);
-  const wheelWidth = clamp(width * 0.2, 1.8, 5.5);
-  const color = item.color;
-
-  const vehicleType = resolveVehicleType(item);
-
-  const baseColor = new THREE.Color(color);
-  const roofColor = baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.14);
-  const accentColor = baseColor.clone().lerp(new THREE.Color('#000000'), 0.28);
-
-  const chassisMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.32, metalness: 0.3 });
-  const roofMat = new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.28, metalness: 0.25 });
-  const accentMat = new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.6, metalness: 0.15 });
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: '#0f172a',
-    roughness: 0.05,
-    metalness: 0.9,
-    transparent: true,
-    opacity: 0.55,
-    side: THREE.DoubleSide
-  });
-  const wheelMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.75 });
-  const trimMat = new THREE.MeshStandardMaterial({ color: '#374151', roughness: 0.6, metalness: 0.25 });
-  const hubMat = new THREE.MeshStandardMaterial({ color: '#9ca3af', metalness: 0.7, roughness: 0.3 });
-  const bumperMat = new THREE.MeshStandardMaterial({ color: '#1f2937', roughness: 0.8, metalness: 0.15 });
-  const lightMat = new THREE.MeshStandardMaterial({ color: '#fef3c7', emissive: '#fef3c7', emissiveIntensity: 0.6 });
-  const tailMat = new THREE.MeshStandardMaterial({ color: '#ef4444', emissive: '#ef4444', emissiveIntensity: 0.55 });
-
-  const roundedBox = (w: number, h: number, d: number, radius = 0.6, segments = 2) => {
-    const safeRadius = clamp(radius, 0.05, Math.min(w, h, d) * 0.45);
-    return new RoundedBoxGeometry(w, h, d, segments, safeRadius);
-  };
-
-  const addRounded = (
-    w: number,
-    h: number,
-    d: number,
-    x: number,
-    y: number,
-    z: number,
-    mat = chassisMat,
-    r = 0.6,
-    parent: THREE.Object3D = shellGroup
-  ) => {
-    const mesh = new THREE.Mesh(roundedBox(w, h, d, r), mat);
-    mesh.position.set(x, y, z);
-    mesh.castShadow = true;
-    parent.add(mesh);
-    return mesh;
-  };
-
-  const addBox = (
-    w: number,
-    h: number,
-    d: number,
-    x: number,
-    y: number,
-    z: number,
-    mat = trimMat,
-    parent: THREE.Object3D = shellGroup
-  ) => {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    mesh.position.set(x, y, z);
-    mesh.castShadow = true;
-    parent.add(mesh);
-    return mesh;
-  };
-
-  // --- Wheel Setup ---
-  const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 18);
-  wheelGeo.rotateZ(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(wheelRadius * 0.65, wheelRadius * 0.65, wheelWidth * 0.55, 12);
-  rimGeo.rotateZ(Math.PI / 2);
-  const hubGeo = new THREE.CylinderGeometry(wheelRadius * 0.28, wheelRadius * 0.28, wheelWidth * 0.7, 10);
-  hubGeo.rotateZ(Math.PI / 2);
-  const wheelZ = length * 0.34;
-  const wheelX = width * 0.5 - wheelWidth * 0.6;
-
-  const addWheelAt = (x: number, z: number) => {
-    const tire = new THREE.Mesh(wheelGeo, wheelMat);
-    tire.position.set(x, wheelRadius, z);
-    tire.castShadow = true;
-    group.add(tire);
-
-    const rim = new THREE.Mesh(rimGeo, trimMat);
-    rim.position.copy(tire.position);
-    rim.castShadow = true;
-    group.add(rim);
-
-    const hub = new THREE.Mesh(hubGeo, hubMat);
-    hub.position.copy(tire.position);
-    hub.castShadow = true;
-    group.add(hub);
-  };
-
-  const addWheels = (fourWheels = true) => {
-    if (fourWheels) {
-      [-1, 1].forEach(kx => {
-        [-1, 1].forEach(kz => addWheelAt(kx * wheelX, kz * wheelZ));
-      });
-    } else {
-      [-1, 1].forEach(kz => addWheelAt(0, kz * wheelZ));
-    }
-  };
-
-  const yBase = wheelRadius + 0.6;
-  const baseRadius = Math.min(width, carHeight, length) * 0.08;
-
-  const addGlassPlane = (w: number, h: number, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0) => {
-    const pane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), glassMat);
-    pane.position.set(x, y, z);
-    pane.rotation.set(rx, ry, rz);
-    pane.castShadow = true;
-    shellGroup.add(pane);
-    return pane;
-  };
-
-  const addFenders = () => {
-    const fenderW = width * 0.22;
-    const fenderH = carHeight * 0.2;
-    const fenderL = length * 0.14;
-    const y = yBase + carHeight * 0.18;
-    const x = width * 0.37;
-    const z = length * 0.32;
-    [-1, 1].forEach(kx => {
-      [-1, 1].forEach(kz => {
-        addRounded(fenderW, fenderH, fenderL, kx * x, y, kz * z, accentMat, baseRadius * 0.6, detailGroup);
-      });
-    });
-  };
-
-  // --- Body Construction ---
-  // yBase/baseRadius defined above for helper access
-
-  if (vehicleType === 'suv') {
-    addWheels();
-    const bodyH = carHeight * 0.52;
-    const bodyL = length * 0.74;
-    const bodyW = width * 0.96;
-    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius);
-    addRounded(bodyW * 0.6, bodyH * 0.12, bodyL * 0.5, 0, yBase + bodyH * 0.75, 0, roofMat, baseRadius * 0.5);
-
-    const cabinH = carHeight * 0.52;
-    const cabinL = length * 0.5;
-    const cabinW = width * 0.86;
-    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.4, -length * 0.04, roofMat, baseRadius * 0.9);
-
-    addRounded(cabinW * 0.98, cabinH * 0.68, cabinL * 0.86, 0, cabin.position.y + cabinH * 0.02, cabin.position.z, glassMat, baseRadius * 0.6);
-    addRounded(cabinW * 0.7, cabinH * 0.14, cabinL * 0.6, 0, cabin.position.y + cabinH * 0.32, cabin.position.z, roofMat, baseRadius * 0.5);
-    addGlassPlane(cabinW * 0.78, cabinH * 0.55, 0, cabin.position.y + cabinH * 0.1, cabin.position.z - cabinL * 0.48, -0.38);
-    addGlassPlane(cabinW * 0.72, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.12, cabin.position.z + cabinL * 0.48, 0.3);
-    addGlassPlane(cabinL * 0.62, cabinH * 0.45, cabinW * 0.52, cabin.position.y + cabinH * 0.06, cabin.position.z, 0, Math.PI / 2);
-    addGlassPlane(cabinL * 0.62, cabinH * 0.45, -cabinW * 0.52, cabin.position.y + cabinH * 0.06, cabin.position.z, 0, -Math.PI / 2);
-    addBox(bodyW * 0.92, carHeight * 0.12, length * 0.08, 0, yBase + carHeight * 0.2, -length * 0.43, bumperMat, detailGroup);
-    addBox(bodyW * 0.85, carHeight * 0.1, length * 0.05, 0, yBase + carHeight * 0.2, length * 0.44, bumperMat, detailGroup);
-    addFenders();
-
-  } else if (vehicleType === 'truck') {
-    addWheels();
-    const baseH = carHeight * 0.36;
-    const baseL = length * 0.82;
-    const baseW = width * 0.96;
-    addRounded(baseW, baseH, baseL, 0, yBase + baseH / 2, 0, chassisMat, baseRadius);
-
-    const cabL = length * 0.36;
-    const cabH = carHeight * 0.75;
-    const cabW = width * 0.88;
-    const cab = addRounded(cabW, cabH, cabL, 0, yBase + baseH + cabH / 2 - 0.4, -length * 0.26, roofMat, baseRadius * 0.8);
-
-    addRounded(cabW * 0.95, cabH * 0.48, cabL * 0.6, 0, cab.position.y + cabH * 0.05, cab.position.z, glassMat, baseRadius * 0.5);
-    addRounded(cabW * 0.65, cabH * 0.14, cabL * 0.5, 0, cab.position.y + cabH * 0.3, cab.position.z, roofMat, baseRadius * 0.4);
-    addGlassPlane(cabW * 0.75, cabH * 0.5, 0, cab.position.y + cabH * 0.08, cab.position.z - cabL * 0.45, -0.35);
-    addGlassPlane(cabL * 0.5, cabH * 0.42, cabW * 0.52, cab.position.y + cabH * 0.02, cab.position.z - cabL * 0.05, 0, Math.PI / 2);
-    addGlassPlane(cabL * 0.5, cabH * 0.42, -cabW * 0.52, cab.position.y + cabH * 0.02, cab.position.z - cabL * 0.05, 0, -Math.PI / 2);
-
-    const bedL = length * 0.48;
-    const bedH = carHeight * 0.22;
-    addRounded(baseW * 0.92, bedH, bedL, 0, yBase + baseH + bedH / 2 - 0.2, length * 0.2, chassisMat, baseRadius * 0.6);
-    addBox(baseW * 0.9, bedH * 0.6, bedL * 0.05, 0, yBase + baseH + bedH * 0.55, length * 0.44, bumperMat, detailGroup);
-    addFenders();
-
-  } else if (vehicleType === 'sports') {
-    addWheels();
-    const bodyH = carHeight * 0.28;
-    const bodyL = length * 0.78;
-    const bodyW = width * 0.95;
-    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.7);
-
-    const cabinH = carHeight * 0.28;
-    const cabinL = length * 0.36;
-    const cabinW = width * 0.72;
-    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.2, -length * 0.08, roofMat, baseRadius * 0.6);
-    addRounded(cabinW * 0.98, cabinH * 0.75, cabinL * 0.88, 0, cabin.position.y + cabinH * 0.05, cabin.position.z, glassMat, baseRadius * 0.4);
-    addGlassPlane(cabinW * 0.7, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.05, cabin.position.z - cabinL * 0.45, -0.4);
-    addGlassPlane(cabinL * 0.5, cabinH * 0.4, cabinW * 0.48, cabin.position.y + cabinH * 0.02, cabin.position.z, 0, Math.PI / 2);
-    addGlassPlane(cabinL * 0.5, cabinH * 0.4, -cabinW * 0.48, cabin.position.y + cabinH * 0.02, cabin.position.z, 0, -Math.PI / 2);
-
-    addBox(bodyW * 0.6, carHeight * 0.08, length * 0.04, 0, yBase + bodyH + cabinH * 0.9, length * 0.34, trimMat, detailGroup);
-    addFenders();
-
-  } else if (vehicleType === 'van') {
-    addWheels();
-    const bodyH = carHeight * 0.72;
-    const bodyL = length * 0.82;
-    const bodyW = width * 0.96;
-    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius);
-
-    // Front windshield and side windows
-    const glassH = bodyH * 0.48;
-    const glassW = bodyW * 0.86;
-    const glass = new THREE.Mesh(new THREE.PlaneGeometry(glassW, glassH), glassMat);
-    glass.position.set(0, yBase + bodyH * 0.72, -length * 0.4);
-    glass.rotation.x = -Math.PI * 0.2;
-    glass.castShadow = true;
-    shellGroup.add(glass);
-
-    addRounded(bodyW * 0.96, bodyH * 0.38, bodyL * 0.55, 0, yBase + bodyH * 0.62, length * 0.02, glassMat, baseRadius * 0.5);
-    addFenders();
-
-  } else if (vehicleType === 'hatchback') {
-    addWheels();
-    const bodyH = carHeight * 0.34;
-    const bodyL = length * 0.7;
-    const bodyW = width * 0.94;
-    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.8);
-
-    const cabinH = carHeight * 0.5;
-    const cabinL = length * 0.55;
-    const cabinW = width * 0.8;
-    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.25, -length * 0.02, roofMat, baseRadius * 0.65);
-    addRounded(cabinW * 0.98, cabinH * 0.7, cabinL * 0.9, 0, cabin.position.y + cabinH * 0.04, cabin.position.z, glassMat, baseRadius * 0.4);
-    addGlassPlane(cabinW * 0.7, cabinH * 0.55, 0, cabin.position.y + cabinH * 0.08, cabin.position.z - cabinL * 0.48, -0.38);
-    addGlassPlane(cabinW * 0.62, cabinH * 0.5, 0, cabin.position.y + cabinH * 0.1, cabin.position.z + cabinL * 0.46, 0.45);
-    addGlassPlane(cabinL * 0.6, cabinH * 0.45, cabinW * 0.52, cabin.position.y + cabinH * 0.05, cabin.position.z, 0, Math.PI / 2);
-    addGlassPlane(cabinL * 0.6, cabinH * 0.45, -cabinW * 0.52, cabin.position.y + cabinH * 0.05, cabin.position.z, 0, -Math.PI / 2);
-    addRounded(cabinW * 0.6, cabinH * 0.12, cabinL * 0.5, 0, cabin.position.y + cabinH * 0.32, cabin.position.z + cabinL * 0.08, roofMat, baseRadius * 0.4);
-    addBox(bodyW * 0.7, carHeight * 0.08, length * 0.04, 0, yBase + bodyH + cabinH * 0.88, length * 0.34, trimMat, detailGroup);
-    addFenders();
-
-  } else { // Sedan (Default)
-    addWheels();
-    const bodyH = carHeight * 0.34;
-    const bodyL = length * 0.72;
-    const bodyW = width * 0.95;
-    addRounded(bodyW, bodyH, bodyL, 0, yBase + bodyH / 2, 0, chassisMat, baseRadius * 0.9);
-
-    const hoodL = length * 0.24;
-    addRounded(bodyW * 0.9, carHeight * 0.2, hoodL, 0, yBase + carHeight * 0.12, -length * 0.42, chassisMat, baseRadius * 0.6);
-    addRounded(bodyW * 0.9, carHeight * 0.18, length * 0.18, 0, yBase + carHeight * 0.12, length * 0.4, chassisMat, baseRadius * 0.5);
-
-    const cabinH = carHeight * 0.42;
-    const cabinL = length * 0.42;
-    const cabinW = width * 0.78;
-    const cabin = addRounded(cabinW, cabinH, cabinL, 0, yBase + bodyH + cabinH / 2 - 0.35, -length * 0.06, roofMat, baseRadius * 0.7);
-    addRounded(cabinW * 0.98, cabinH * 0.7, cabinL * 0.85, 0, cabin.position.y + cabinH * 0.03, cabin.position.z, glassMat, baseRadius * 0.4);
-    addRounded(cabinW * 0.7, cabinH * 0.12, cabinL * 0.55, 0, cabin.position.y + cabinH * 0.3, cabin.position.z, roofMat, baseRadius * 0.4);
-    addGlassPlane(cabinW * 0.72, cabinH * 0.52, 0, cabin.position.y + cabinH * 0.06, cabin.position.z - cabinL * 0.45, -0.36);
-    addGlassPlane(cabinW * 0.6, cabinH * 0.45, 0, cabin.position.y + cabinH * 0.1, cabin.position.z + cabinL * 0.45, 0.28);
-    addGlassPlane(cabinL * 0.58, cabinH * 0.42, cabinW * 0.52, cabin.position.y + cabinH * 0.03, cabin.position.z, 0, Math.PI / 2);
-    addGlassPlane(cabinL * 0.58, cabinH * 0.42, -cabinW * 0.52, cabin.position.y + cabinH * 0.03, cabin.position.z, 0, -Math.PI / 2);
-    addFenders();
-  }
-
-  // Mirrors + skirts
-  addBox(width * 0.12, carHeight * 0.08, length * 0.05, width * 0.47, yBase + carHeight * 0.45, -length * 0.14, trimMat, detailGroup);
-  addBox(width * 0.12, carHeight * 0.08, length * 0.05, -width * 0.47, yBase + carHeight * 0.45, -length * 0.14, trimMat, detailGroup);
-  addBox(width * 0.9, carHeight * 0.06, length * 0.78, 0, yBase + carHeight * 0.08, 0, accentMat, detailGroup);
-  addBox(width * 0.86, carHeight * 0.08, length * 0.75, 0, yBase + carHeight * 0.03, 0, bumperMat, detailGroup);
-
-  // Headlights / taillights
-  {
-    const lightW = Math.max(2, width * 0.1);
-    const lightH = Math.max(1.4, carHeight * 0.12);
-    const lightD = Math.max(0.6, length * 0.02);
-    const lightGeo = new THREE.BoxGeometry(lightW, lightH, lightD);
-
-    shellGroup.updateMatrixWorld(true);
-    const bodyBounds = new THREE.Box3().setFromObject(shellGroup);
-    const bodyCenter = new THREE.Vector3();
-    bodyBounds.getCenter(bodyCenter);
-    const bodyWidth = Math.max(0.1, bodyBounds.max.x - bodyBounds.min.x);
-    const bodyHeight = Math.max(0.1, bodyBounds.max.y - bodyBounds.min.y);
-
-    const zFront = bodyBounds.min.z - lightD * 0.15;
-    const zBack = bodyBounds.max.z + lightD * 0.15;
-    const yLight = bodyBounds.min.y + bodyHeight * 0.4;
-    const xLight = clamp(bodyWidth * 0.3, lightW * 0.6, bodyWidth * 0.45);
-
-    const fl1 = new THREE.Mesh(lightGeo, lightMat); fl1.position.set(bodyCenter.x - xLight, yLight, zFront); detailGroup.add(fl1);
-    const fl2 = new THREE.Mesh(lightGeo, lightMat); fl2.position.set(bodyCenter.x + xLight, yLight, zFront); detailGroup.add(fl2);
-    const tl1 = new THREE.Mesh(lightGeo, tailMat); tl1.position.set(bodyCenter.x - xLight, yLight, zBack); detailGroup.add(tl1);
-    const tl2 = new THREE.Mesh(lightGeo, tailMat); tl2.position.set(bodyCenter.x + xLight, yLight, zBack); detailGroup.add(tl2);
-
-    addBox(width * 0.26, carHeight * 0.08, length * 0.02, 0, yBase + carHeight * 0.22, -length * 0.48, new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.8 }), detailGroup);
-  }
-
-  group.position.set(item.x, 0, item.y);
-  group.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-
-  return group;
-};
-
-// Create a detailed 3D tree model
-// Create a detailed 3D tree model with multiple styles
-const create3dTree = (item: TreeItem): THREE.Group => {
-  const group = new THREE.Group();
-
-  // Get tree properties with defaults
-  const treeHeight = item.height ?? 30;
-  const widthMultiplier = item.width ?? 1;
-  const treeType = item.treeType ?? 'deciduous';
-
-  const trunkColor = '#4a3728';
-  const trunkMat = new THREE.MeshStandardMaterial({ color: trunkColor, roughness: 1.0, flatShading: true });
-
-  if (treeType === 'conifer') {
-    // Conifer/Pine Tree: Stacked Cones
-    const trunkRadius = item.radius * 0.2;
-    const trunkH = treeHeight * 0.3;
-    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.6, trunkRadius, trunkH, 6);
-    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-    trunk.position.y = trunkH / 2;
-    trunk.castShadow = true;
-    group.add(trunk);
-
-    const foliageMat = new THREE.MeshStandardMaterial({ color: '#1e4620', roughness: 0.8, flatShading: true });
-    const layers = 5;
-    const canopyHeight = treeHeight * 0.8;
-    const layerH = canopyHeight / layers;
-
-    for (let i = 0; i < layers; i++) {
-      const t = i / (layers - 1);
-      const r = item.radius * widthMultiplier * (1 - t * 0.7);
-      const y = trunkH * 0.5 + i * (layerH * 0.85);
-
-      const cone = new THREE.Mesh(
-        new THREE.ConeGeometry(r, layerH * 1.4, 8),
-        foliageMat
-      );
-      cone.position.y = y;
-      cone.castShadow = true;
-      group.add(cone);
-    }
-  } else if (treeType === 'palm') {
-    // Palm Tree: Tall thin trunk with fronds at top
-    const trunkRadius = item.radius * 0.15;
-    const trunkH = treeHeight * 0.85;
-
-    // Curved trunk segments
-    const segments = 8;
-    const segmentH = trunkH / segments;
-    for (let i = 0; i < segments; i++) {
-      const segGeo = new THREE.CylinderGeometry(
-        trunkRadius * (1 - i * 0.04),
-        trunkRadius * (1 - (i + 1) * 0.04),
-        segmentH, 6
-      );
-      const seg = new THREE.Mesh(segGeo, new THREE.MeshStandardMaterial({ color: '#8B7355', roughness: 0.9 }));
-      seg.position.y = segmentH / 2 + i * segmentH;
-      seg.castShadow = true;
-      group.add(seg);
-    }
-
-    // Palm fronds
-    const frondMat = new THREE.MeshStandardMaterial({ color: '#2d5a27', roughness: 0.7, side: THREE.DoubleSide });
-    const frondCount = 8;
-    const frondLength = item.radius * widthMultiplier * 2;
-
-    for (let i = 0; i < frondCount; i++) {
-      const angle = (i / frondCount) * Math.PI * 2;
-      const frondGeo = new THREE.ConeGeometry(frondLength * 0.15, frondLength, 4);
-      const frond = new THREE.Mesh(frondGeo, frondMat);
-      frond.position.set(
-        Math.cos(angle) * frondLength * 0.4,
-        trunkH,
-        Math.sin(angle) * frondLength * 0.4
-      );
-      frond.rotation.z = Math.PI / 2 + (Math.cos(angle) * 0.5);
-      frond.rotation.y = angle;
-      frond.castShadow = true;
-      group.add(frond);
-    }
-  } else if (treeType === 'bush') {
-    // Bush: Low rounded shrub
-    const foliageMat = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.8, flatShading: true });
-    const bushRadius = item.radius * widthMultiplier;
-    const bushHeight = treeHeight * 0.5;
-
-    // Main body - flattened sphere
-    const mainGeo = new THREE.SphereGeometry(bushRadius, 8, 6);
-    mainGeo.scale(1, bushHeight / bushRadius, 1);
-    const main = new THREE.Mesh(mainGeo, foliageMat);
-    main.position.y = bushHeight * 0.5;
-    main.castShadow = true;
-    group.add(main);
-
-    // Extra clumps
-    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-    for (let i = 0; i < 5; i++) {
-      const theta = ((hash + i * 17) % 100) / 100 * Math.PI * 2;
-      const dist = bushRadius * 0.6;
-      const size = bushRadius * 0.5;
-
-      const clump = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(size, 0),
-        foliageMat
-      );
-      clump.position.set(
-        Math.cos(theta) * dist,
-        bushHeight * 0.4,
-        Math.sin(theta) * dist
-      );
-      clump.castShadow = true;
-      group.add(clump);
-    }
-  } else {
-    // Deciduous Tree (default): Fluffy spherical canopy
-    const trunkRadius = item.radius * 0.2;
-    const trunkH = treeHeight * 0.4;
-    const trunkGeo = new THREE.CylinderGeometry(trunkRadius * 0.7, trunkRadius, trunkH, 6);
-    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-    trunk.position.y = trunkH / 2;
-    trunk.castShadow = true;
-    group.add(trunk);
-
-    const foliageMat = new THREE.MeshStandardMaterial({ color: item.color, roughness: 0.8, flatShading: true });
-    const canopyRadius = item.radius * widthMultiplier;
-
-    // Main center sphere
-    const mainGeo = new THREE.IcosahedronGeometry(canopyRadius * 0.9, 1);
-    const main = new THREE.Mesh(mainGeo, foliageMat);
-    main.position.y = trunkH + canopyRadius * 0.5;
-    main.castShadow = true;
-    group.add(main);
-
-    // Random clumps for fullness
-    const hash = item.id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-    const clumps = 8;
-    for (let i = 0; i < clumps; i++) {
-      const theta = ((hash + i * 13) % 100) / 100 * Math.PI * 2;
-      const phi = ((hash + i * 7) % 100) / 100 * Math.PI;
-      const size = canopyRadius * (0.35 + ((hash + i * 3) % 5) / 12);
-      const dist = canopyRadius * 0.65;
-
-      const sub = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), foliageMat);
-      sub.position.set(
-        Math.sin(phi) * Math.cos(theta) * dist,
-        main.position.y + Math.cos(phi) * dist * 0.7,
-        Math.sin(phi) * Math.sin(theta) * dist
-      );
-      sub.castShadow = true;
-      group.add(sub);
-    }
-  }
-
-  group.position.set(item.x, 0, item.y);
-  group.rotation.y = THREE.MathUtils.degToRad(item.rotation);
-  return group;
-};
-
-const scalePointsToSize = (points: { x: number; y: number }[], width: number, height: number) => {
-  const bounds = getPointsBounds(points);
-  if (bounds.width === 0 || bounds.height === 0) return points;
-  const center = { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 };
-  const scaleX = width / bounds.width;
-  const scaleY = height / bounds.height;
-  return points.map(point => ({
-    x: center.x + (point.x - center.x) * scaleX,
-    y: center.y + (point.y - center.y) * scaleY
-  }));
-};
-
-const insertVertexAtLongestEdge = (points: { x: number; y: number }[]) => {
-  if (points.length < 2) return points;
-  let longestIndex = 0;
-  let longest = 0;
-  for (let i = 0; i < points.length; i += 1) {
-    const nextIndex = (i + 1) % points.length;
-    const dx = points[nextIndex].x - points[i].x;
-    const dy = points[nextIndex].y - points[i].y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > longest) {
-      longest = dist;
-      longestIndex = i;
-    }
-  }
-  const nextIndex = (longestIndex + 1) % points.length;
-  const mid = {
-    x: (points[longestIndex].x + points[nextIndex].x) / 2,
-    y: (points[longestIndex].y + points[nextIndex].y) / 2
-  };
-  const next = [...points];
-  next.splice(longestIndex + 1, 0, mid);
-  return next;
-};
-
-const insertVertexAtNearestEdge = (points: { x: number; y: number }[], point: { x: number; y: number }) => {
-  if (points.length < 2) return points;
-  let insertIndex = 0;
-  let closest = Number.POSITIVE_INFINITY;
-  let bestPoint = point;
-
-  for (let i = 0; i < points.length; i += 1) {
-    const nextIndex = (i + 1) % points.length;
-    const a = points[i];
-    const b = points[nextIndex];
-    const ab = { x: b.x - a.x, y: b.y - a.y };
-    const ap = { x: point.x - a.x, y: point.y - a.y };
-    const abLenSq = ab.x * ab.x + ab.y * ab.y || 1;
-    let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
-    t = clamp(t, 0, 1);
-    const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
-    const dist = Math.hypot(point.x - proj.x, point.y - proj.y);
-    if (dist < closest) {
-      closest = dist;
-      insertIndex = i + 1;
-      bestPoint = proj;
-    }
-  }
-
-  const next = [...points];
-  next.splice(insertIndex, 0, bestPoint);
-  return next;
-};
-
-const adjustColor = (hex: string, amount: number) => {
-  const normalized = hex.replace("#", "");
-  const full = normalized.length === 3 ? normalized.split("").map(c => c + c).join("") : normalized;
-  const num = parseInt(full, 16);
-  const r = clamp((num >> 16) + amount, 0, 255);
-  const g = clamp(((num >> 8) & 255) + amount, 0, 255);
-  const b = clamp((num & 255) + amount, 0, 255);
-  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
-};
-
-const fovFromDiagonal = (diag: number, aspect: number) => {
-  const diagRad = (diag * Math.PI) / 180;
-  const vRad = 2 * Math.atan(Math.tan(diagRad / 2) / Math.sqrt(aspect * aspect + 1));
-  const hRad = 2 * Math.atan(Math.tan(vRad / 2) * aspect);
-  return { h: (hRad * 180) / Math.PI, v: (vRad * 180) / Math.PI };
-};
-
-const diagonalFromHv = (h: number, v: number) => {
-  const hRad = (h * Math.PI) / 180;
-  const vRad = (v * Math.PI) / 180;
-  const diag = 2 * Math.atan(Math.sqrt(Math.tan(hRad / 2) ** 2 + Math.tan(vRad / 2) ** 2));
-  return (diag * 180) / Math.PI;
-};
-
-const vFovFromH = (h: number, aspect: number) => {
-  const hRad = (h * Math.PI) / 180;
-  const vRad = 2 * Math.atan(Math.tan(hRad / 2) / aspect);
-  return (vRad * 180) / Math.PI;
-};
-
-const hFovFromV = (v: number, aspect: number) => {
-  const vRad = (v * Math.PI) / 180;
-  const hRad = 2 * Math.atan(Math.tan(vRad / 2) * aspect);
-  return (hRad * 180) / Math.PI;
-};
-
-const getCameraAspectValue = (camera?: CameraItem | null) => {
-  if (!camera) return 16 / 9;
-  if (camera.aspect && camera.aspect > 0) return camera.aspect;
-  const h = camera.hFov ?? camera.fov;
-  const v = camera.vFov;
-  if (v && v > 0) {
-    const hRad = (h * Math.PI) / 180;
-    const vRad = (v * Math.PI) / 180;
-    const aspect = Math.tan(hRad / 2) / Math.tan(vRad / 2);
-    return aspect || 16 / 9;
-  }
-  return 16 / 9;
-};
-
-// Interactive satellite map used to pick the site: pan/zoom, then drag to draw the import rectangle.
-function SitePickerMap({
-  imagery,
-  view,
-  selection,
-  drawing,
-  onDrawingChange,
-  onSelect
-}: {
-  imagery: MapImagerySource;
-  view: { lat: number; lon: number; zoom: number; key: number };
-  selection: GeoBounds | null;
-  drawing: boolean;
-  onDrawingChange: (drawing: boolean) => void;
-  onSelect: (bounds: GeoBounds) => void;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const layersRef = useRef<L.Layer[]>([]);
-  const rectRef = useRef<L.Rectangle | null>(null);
-  const onSelectRef = useRef(onSelect);
-  const onDrawingChangeRef = useRef(onDrawingChange);
-  onSelectRef.current = onSelect;
-  onDrawingChangeRef.current = onDrawingChange;
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: true, maxZoom: 21, attributionControl: true })
-      .setView([view.lat, view.lon], view.zoom);
-    mapRef.current = map;
-    // The dialog animates in; make sure Leaflet measures the final size.
-    const resize = window.setTimeout(() => map.invalidateSize(), 60);
-    return () => {
-      window.clearTimeout(resize);
-      map.remove();
-      mapRef.current = null;
-      rectRef.current = null;
-      layersRef.current = [];
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    mapRef.current?.setView([view.lat, view.lon], view.zoom);
-  }, [view.key]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    layersRef.current.forEach(layer => map.removeLayer(layer));
-    const config = PICKER_LAYERS[imagery];
-    const attribution = MAP_IMAGERY_SOURCES[imagery].attribution;
-    const base = L.tileLayer(config.url, { maxZoom: 21, maxNativeZoom: config.maxNativeZoom, attribution });
-    // Statewide 6-inch orthoimagery drawn over Esri inside its region (ImageServer exportImage per web-mercator tile).
-    const stateLayers = imagery === "satellite"
-      ? STATE_ORTHO_SOURCES.map(src => {
-        const OrthoLayer = L.TileLayer.extend({
-          getTileUrl(this: L.TileLayer, coords: L.Coords) {
-            const size = 256;
-            const nw = L.CRS.EPSG3857.project(map.unproject(L.point(coords.x * size, coords.y * size), coords.z));
-            const se = L.CRS.EPSG3857.project(map.unproject(L.point((coords.x + 1) * size, (coords.y + 1) * size), coords.z));
-            return `${src.services[0]}/exportImage?bbox=${nw.x},${se.y},${se.x},${nw.y}&bboxSR=3857&imageSR=3857&size=${size},${size}&format=png&transparent=true&f=image`;
-          }
-        });
-        return new (OrthoLayer as any)("", {
-          minZoom: 14,
-          maxZoom: 21,
-          maxNativeZoom: 20,
-          bounds: L.latLngBounds([src.region.south, src.region.west], [src.region.north, src.region.east]),
-          attribution: src.attribution
-        }) as L.TileLayer;
-      })
-      : [];
-    const overlays = config.overlays.map(url => L.tileLayer(url, { maxZoom: 21, maxNativeZoom: config.maxNativeZoom }));
-    layersRef.current = [base, ...stateLayers, ...overlays];
-    layersRef.current.forEach(layer => layer.addTo(map));
-  }, [imagery]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    if (!selection) {
-      rectRef.current?.remove();
-      rectRef.current = null;
-      return;
-    }
-    const latLngBounds = L.latLngBounds([selection.south, selection.west], [selection.north, selection.east]);
-    if (!rectRef.current) {
-      rectRef.current = L.rectangle(latLngBounds, {
-        color: "#10b981",
-        weight: 3,
-        fillColor: "#10b981",
-        fillOpacity: 0.12,
-        dashArray: "8 6",
-        interactive: false
-      }).addTo(map);
-    } else {
-      rectRef.current.setBounds(latLngBounds);
-    }
-    const dims = selectionFromBounds(selection, "");
-    rectRef.current.unbindTooltip();
-    rectRef.current.bindTooltip(`${Math.round(dims.widthFt)} × ${Math.round(dims.heightFt)} ft`, {
-      permanent: true,
-      direction: "center",
-      className: "site-picker-tooltip"
-    }).openTooltip();
-  }, [selection]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !drawing) return;
-    const container = map.getContainer();
-    map.dragging.disable();
-    map.boxZoom.disable();
-    container.style.cursor = "crosshair";
-    let start: L.LatLng | null = null;
-    let preview: L.Rectangle | null = null;
-
-    const onDown = (e: L.LeafletMouseEvent) => {
-      start = e.latlng;
-      preview = L.rectangle(L.latLngBounds(start, start), { color: "#f59e0b", weight: 2, fillOpacity: 0.1, interactive: false }).addTo(map);
-    };
-    const onMove = (e: L.LeafletMouseEvent) => {
-      if (start && preview) preview.setBounds(L.latLngBounds(start, e.latlng));
-    };
-    const onUp = (e: L.LeafletMouseEvent) => {
-      if (!start) return;
-      const b = L.latLngBounds(start, e.latlng);
-      preview?.remove();
-      preview = null;
-      start = null;
-      const bounds = { north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() };
-      const dims = selectionFromBounds(bounds, "");
-      if (dims.widthFt >= SITE_MIN_WIDTH_FT && dims.heightFt >= SITE_MIN_WIDTH_FT) {
-        onSelectRef.current(bounds);
-        onDrawingChangeRef.current(false);
-      }
-    };
-    map.on("mousedown", onDown);
-    map.on("mousemove", onMove);
-    map.on("mouseup", onUp);
-    return () => {
-      map.off("mousedown", onDown);
-      map.off("mousemove", onMove);
-      map.off("mouseup", onUp);
-      preview?.remove();
-      map.dragging.enable();
-      map.boxZoom.enable();
-      container.style.cursor = "";
-    };
-  }, [drawing]);
-
-  return <div ref={containerRef} className="absolute inset-0 bg-zinc-800" />;
-}
+import { NVRCard } from "./src/components/NVRCard";
+import { useProjectField, getProject, useProject, createEmptyProject, projectRef } from "./src/state/project";
+import { SitePickerMap } from "./src/components/SitePickerMap";
+import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
+import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
+import { ProjectOverview } from "./src/components/ProjectOverview";
+import { traceRoof } from "./src/lib/roofTrace";
+import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
+import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
+import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
+import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
+import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
+import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
+import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
+import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
+import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize } from "./src/lib/geometry";
+import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
+import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
+import { disposeObjectDeep } from "./src/three/dispose";
+import { create3dCar, create3dTree, getCarSignature, getItemTypeLabel, getTreeSignature, resolveVehicleType } from "./src/three/models";
+import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
-  const [items, setItems] = useState<CanvasItem[]>([]);
+  const [items, setItems] = useProjectField("items");
 
   // Terrain State (Moved up for scope access)
-  const [terrainHeights, setTerrainHeights] = useState<Record<string, number>>({});
+  const [terrainHeights, setTerrainHeights] = useProjectField("terrainHeights");
   const [isTerrainMode, setIsTerrainMode] = useState(false);
   const [terrainTool, setTerrainTool] = useState<TerrainTool>("sculpt");
   const [terrainBrushSize, setTerrainBrushSize] = useState(4); // in tiles
@@ -1729,31 +78,38 @@ export default function SecurityPlanner() {
   const [terrainBrushFalloff, setTerrainBrushFalloff] = useState(2);
   const [terrainFlattenTarget, setTerrainFlattenTarget] = useState(0);
   const [terrainFlattenSample, setTerrainFlattenSample] = useState(true);
-  const [demData, setDemData] = useState<DemData | null>(null);
-  const [demScale, setDemScale] = useState(1);
-  const [demOffset, setDemOffset] = useState(0);
-  const [demNormalize, setDemNormalize] = useState(true);
+  const [demData, setDemData] = useProjectField("demData");
+  const [demScale, setDemScale] = useProjectField("demScale");
+  const [demOffset, setDemOffset] = useProjectField("demOffset");
+  const [demNormalize, setDemNormalize] = useProjectField("demNormalize");
   const [demPreview, setDemPreview] = useState<{ url: string; width: number; height: number } | null>(null);
-  const [demAlignMode, setDemAlignMode] = useState(false);
-  const [demTransform, setDemTransform] = useState({ x: DEFAULT_CANVAS.width / 2, y: DEFAULT_CANVAS.height / 2, scale: 1, rotation: 0 });
-  const [demOverlayOpacity, setDemOverlayOpacity] = useState(0.6);
+  const [demAlignMode, setDemAlignMode] = useProjectField("demAlignMode");
+  const [demTransform, setDemTransform] = useProjectField("demTransform");
+  const [demOverlayOpacity, setDemOverlayOpacity] = useProjectField("demOverlayOpacity");
   const [demAutoApply, setDemAutoApply] = useState(true);
-  const [demAlignTool, setDemAlignTool] = useState<DemAlignTool>("move");
+  const [demAlignTool, setDemAlignTool] = useProjectField("demAlignTool");
   const [showDemGuide, setShowDemGuide] = useState(false);
   // One-click elevation
-  const [siteLocation, setSiteLocation] = useState<SiteLocation | null>(null);
+  const [siteLocation, setSiteLocation] = useProjectField("siteLocation");
   const [showElevationDialog, setShowElevationDialog] = useState(false);
   const [elevationQuery, setElevationQuery] = useState("");
-  const [siteBounds, setSiteBounds] = useState<GeoBounds | null>(null);
+  const [siteBounds, setSiteBounds] = useProjectField("siteBounds");
   const [pickerView, setPickerView] = useState({ lat: 39.5, lon: -98.35, zoom: 4, key: 0 });
   const [pickerDrawing, setPickerDrawing] = useState(false);
   const [importBuildings, setImportBuildings] = useState(true);
-  const [planGeoRef, setPlanGeoRef] = useState<PlanGeoRef | null>(null);
+  const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
+  const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  const [selectViewSignal, setSelectViewSignal] = useState(0);
+  const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
+  const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
+  const [planGeoRef, setPlanGeoRef] = useProjectField("planGeoRef");
   const [elevationExaggeration, setElevationExaggeration] = useState(1);
   const [elevationStatus, setElevationStatus] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
-  const [elevationOverlay, setElevationOverlay] = useState<ElevationOverlayMode>("contours");
+  const [elevationOverlay, setElevationOverlay] = useProjectField("elevationOverlay");
   const [elevationImagery, setElevationImagery] = useState<MapImagerySource | "keep">("satellite");
   const elevationReadoutRef = useRef<HTMLDivElement>(null);
+  const cameraReadoutRef = useRef<HTMLDivElement>(null);
   const planBrushCursorRef = useRef<SVGCircleElement>(null);
   const [demTransformDrag, setDemTransformDrag] = useState<{
     mode: "move" | "scale" | "rotate";
@@ -1763,26 +119,20 @@ export default function SecurityPlanner() {
   const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
   const [bgDragStart, setBgDragStart] = useState({ x: 0, y: 0, bgX: 0, bgY: 0 });
   const [mapMoveMode, setMapMoveMode] = useState(false);
-  const [buildingLabelDefaults, setBuildingLabelDefaults] = useState<BuildingLabelDefaults>(DEFAULT_BUILDING_LABEL);
+  const [buildingLabelDefaults, setBuildingLabelDefaults] = useProjectField("buildingLabelDefaults");
 
   const panelSection = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-3";
   const panelSectionLoose = "rounded-xl border border-white/10 bg-white/5 p-4 space-y-4";
 
   // Canvas + Background State
-  const [canvasSize, setCanvasSize] = useState(DEFAULT_CANVAS);
-  const [backgroundImg, setBackgroundImg] = useState<string | null>(null);
-  const [bgSettings, setBgSettings] = useState({
-    x: 0,
-    y: 0,
-    width: DEFAULT_CANVAS.width,
-    height: DEFAULT_CANVAS.height,
-    opacity: 0.5
-  });
+  const [canvasSize, setCanvasSize] = useProjectField("canvasSize");
+  const [backgroundImg, setBackgroundImg] = useProjectField("backgroundImg");
+  const [bgSettings, setBgSettings] = useProjectField("bgSettings");
 
-  const [gridSize, setGridSize] = useState(20);
-  const [showGrid, setShowGrid] = useState(true);
-  const [snapToGrid, setSnapToGrid] = useState(false);
-  const [projectName, setProjectName] = useState("Security Camera Plan");
+  const [gridSize, setGridSize] = useProjectField("gridSize");
+  const [showGrid, setShowGrid] = useProjectField("showGrid");
+  const [snapToGrid, setSnapToGrid] = useProjectField("snapToGrid");
+  const [projectName, setProjectName] = useProjectField("projectName");
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
   const [rightPanelMode, setRightPanelMode] = useState<"properties" | "project">("properties");
@@ -1813,75 +163,53 @@ export default function SecurityPlanner() {
   }, [selectedId]);
 
   // State Refs for History (Ensures we save latest state in async callbacks)
-  const currentItemsRef = useRef(items);
-  const terrainHeightsRef = useRef(terrainHeights);
-  const buildingLabelDefaultsRef = useRef(buildingLabelDefaults);
-  const backgroundImgRef = useRef(backgroundImg);
-  const bgSettingsRef = useRef(bgSettings);
-  const canvasSizeRef = useRef(canvasSize);
-  const gridSizeRef = useRef(gridSize);
-  const showGridRef = useRef(showGrid);
-  const snapToGridRef = useRef(snapToGrid);
-  const frustumSettingsRef = useRef({
-    visible: true,
-    opacity: 0.15,
-    edgeOpacity: 0.6,
-    useCameraColor: true,
-    color: '#3b82f6',
-    showAll: true,
-    mode: 'volume' as 'volume' | 'floor'
-  });
-  const sceneBackgroundImgRef = useRef<string | null>(null);
-  const backgroundModeRef = useRef<'flat' | 'panorama'>('flat');
-  const nvrLayoutRef = useRef<any[]>([]);
-  const demScaleRef = useRef(demScale);
-  const demOffsetRef = useRef(demOffset);
-  const demNormalizeRef = useRef(demNormalize);
-  const demTransformRef = useRef(demTransform);
-  const demOverlayOpacityRef = useRef(demOverlayOpacity);
-  const demAlignModeRef = useRef(demAlignMode);
-  const demAlignToolRef = useRef(demAlignTool);
+  const currentItemsRef = projectRef("items");
+  const terrainHeightsRef = projectRef("terrainHeights");
+  const buildingLabelDefaultsRef = projectRef("buildingLabelDefaults");
+  const backgroundImgRef = projectRef("backgroundImg");
+  const bgSettingsRef = projectRef("bgSettings");
+  const canvasSizeRef = projectRef("canvasSize");
+  const gridSizeRef = projectRef("gridSize");
+  const showGridRef = projectRef("showGrid");
+  const snapToGridRef = projectRef("snapToGrid");
+  const frustumSettingsRef = projectRef("frustumSettings");
+  const sceneBackgroundImgRef = projectRef("sceneBackgroundImg");
+  const backgroundModeRef = projectRef("backgroundMode");
+  const nvrLayoutRef = projectRef("nvrLayout");
+  const demScaleRef = projectRef("demScale");
+  const demOffsetRef = projectRef("demOffset");
+  const demNormalizeRef = projectRef("demNormalize");
+  const demTransformRef = projectRef("demTransform");
+  const demOverlayOpacityRef = projectRef("demOverlayOpacity");
+  const demAlignModeRef = projectRef("demAlignMode");
+  const demAlignToolRef = projectRef("demAlignTool");
   const isApplyingHistoryRef = useRef(false);
   const historySettingsTimerRef = useRef<number | null>(null);
   const itemsHistoryTimerRef = useRef<number | null>(null);
-  useEffect(() => { currentItemsRef.current = items; }, [items]);
-  useEffect(() => { terrainHeightsRef.current = terrainHeights; }, [terrainHeights]);
-  useEffect(() => { buildingLabelDefaultsRef.current = buildingLabelDefaults; }, [buildingLabelDefaults]);
-  useEffect(() => { backgroundImgRef.current = backgroundImg; }, [backgroundImg]);
-  useEffect(() => { bgSettingsRef.current = bgSettings; }, [bgSettings]);
-  useEffect(() => { canvasSizeRef.current = canvasSize; }, [canvasSize]);
-  useEffect(() => { gridSizeRef.current = gridSize; }, [gridSize]);
-  useEffect(() => { showGridRef.current = showGrid; }, [showGrid]);
-  useEffect(() => { snapToGridRef.current = snapToGrid; }, [snapToGrid]);
-  useEffect(() => { demScaleRef.current = demScale; }, [demScale]);
-  useEffect(() => { demOffsetRef.current = demOffset; }, [demOffset]);
-  useEffect(() => { demNormalizeRef.current = demNormalize; }, [demNormalize]);
-  useEffect(() => { demTransformRef.current = demTransform; }, [demTransform]);
-  useEffect(() => { demOverlayOpacityRef.current = demOverlayOpacity; }, [demOverlayOpacity]);
-  useEffect(() => { demAlignModeRef.current = demAlignMode; }, [demAlignMode]);
-  useEffect(() => { demAlignToolRef.current = demAlignTool; }, [demAlignTool]);
 
   // Clipboard
   const [clipboard, setClipboard] = useState<CanvasItem | null>(null);
   const clipboardRef = useRef<CanvasItem | null>(null);
   useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
 
-  // History State
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const historyRef = useRef<string[]>([]);
+  // History (undo/redo). Kept in refs so every caller — including long-lived 3D event handlers —
+  // sees the live stack. Large images are shared by reference instead of copied into each step.
+  type HistoryEntry = { key: string; state: HistoryState };
+  const HISTORY_LIMIT = 50;
+  const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(-1);
-
-  // Sync refs for event listeners
-  useEffect(() => {
-    historyRef.current = history;
-    historyIndexRef.current = historyIndex;
-  }, [history, historyIndex]);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  if (typeof window !== "undefined") {
+    // Read access for the automated test suite: undo stack position.
+    (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
+  }
+  const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
+  const canRedo = historyVersion >= 0 && historyIndexRef.current < historyRef.current.length - 1;
 
   const saveHistory = (itemsOverride?: CanvasItem[], terrainHeightsOverride?: Record<string, number>) => {
     if (isApplyingHistoryRef.current) return;
-    const currentState = JSON.stringify({
-      items: itemsOverride || currentItemsRef.current,
+    const state: HistoryState = {
+      items: structuredClone(itemsOverride || currentItemsRef.current),
       terrainHeights: terrainHeightsOverride || terrainHeightsRef.current,
       buildingLabelDefaults: buildingLabelDefaultsRef.current,
       backgroundImg: backgroundImgRef.current,
@@ -1903,23 +231,33 @@ export default function SecurityPlanner() {
         demAlignMode: demAlignModeRef.current,
         demAlignTool: demAlignToolRef.current
       }
-    } as HistoryState);
+    };
+    // Compare cheaply: big image data URLs are represented by a short fingerprint.
+    const imageKey = (img: string | null) => (img ? `${img.length}:${img.slice(-48)}` : null);
+    // The Monitor Wall layout follows the camera list automatically; it shouldn't create undo steps of its own.
+    const key = JSON.stringify({ ...state, nvrLayout: undefined, backgroundImg: imageKey(state.backgroundImg), sceneBackgroundImg: imageKey(state.sceneBackgroundImg) });
+    const stack = historyRef.current;
+    const index = historyIndexRef.current;
     // Don't save if same as current top
-    if (historyIndex >= 0 && history[historyIndex] === currentState) return;
+    if (index >= 0 && stack[index]?.key === key) return;
+    const next = stack.slice(0, index + 1);
+    next.push({ key, state });
+    while (next.length > HISTORY_LIMIT) next.shift();
+    historyRef.current = next;
+    historyIndexRef.current = next.length - 1;
+    setHistoryVersion(v => v + 1);
+  };
 
-    setHistory(prev => {
-      const newHistory = prev.slice(0, historyIndex + 1);
-      newHistory.push(currentState);
-      if (newHistory.length > 30) newHistory.shift();
-      return newHistory;
-    });
-    setHistoryIndex(prev => {
-      const next = prev + 1;
-      return next >= 30 ? 29 : next;
-    });
+  // Start a fresh undo stack from whatever is on screen once pending state updates have rendered.
+  const resetHistory = () => {
+    historyRef.current = [];
+    historyIndexRef.current = -1;
+    setHistoryVersion(v => v + 1);
+    window.setTimeout(() => saveHistory(), 120);
   };
 
   const applyHistoryState = (state: any) => {
+    suppressDemAutoApply();
     if (Array.isArray(state)) {
       setItems(state);
       return;
@@ -1960,9 +298,9 @@ export default function SecurityPlanner() {
       const newIndex = curIndex - 1;
       try {
         isApplyingHistoryRef.current = true;
-        const state = JSON.parse(historyRef.current[newIndex]);
-        applyHistoryState(state);
-        setHistoryIndex(newIndex);
+        applyHistoryState(structuredClone(historyRef.current[newIndex].state));
+        historyIndexRef.current = newIndex;
+        setHistoryVersion(v => v + 1);
         window.setTimeout(() => {
           isApplyingHistoryRef.current = false;
         }, 0);
@@ -1979,9 +317,9 @@ export default function SecurityPlanner() {
       const newIndex = curIndex + 1;
       try {
         isApplyingHistoryRef.current = true;
-        const state = JSON.parse(historyRef.current[newIndex]);
-        applyHistoryState(state);
-        setHistoryIndex(newIndex);
+        applyHistoryState(structuredClone(historyRef.current[newIndex].state));
+        historyIndexRef.current = newIndex;
+        setHistoryVersion(v => v + 1);
         window.setTimeout(() => {
           isApplyingHistoryRef.current = false;
         }, 0);
@@ -2013,8 +351,7 @@ export default function SecurityPlanner() {
   useEffect(() => { interactionStateRef.current = interactionState; }, [interactionState]);
 
   // NVR Layout State
-  const [nvrLayout, setNvrLayout] = useState<any[]>([]);
-  useEffect(() => { nvrLayoutRef.current = nvrLayout; }, [nvrLayout]);
+  const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
   const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
   const nvrContainerRef = useRef<HTMLDivElement>(null);
   const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
@@ -2189,6 +526,22 @@ export default function SecurityPlanner() {
 
   const formatElevation = (value: number) => `${value >= 0 ? "" : "-"}${Math.abs(value) < 10 ? Math.abs(value).toFixed(1) : Math.round(Math.abs(value))} ft`;
 
+  // "32 ft from Camera 2 · 52 px/ft · Recognize" under the cursor while a camera is selected.
+  const updateCameraReadout = (x: number, y: number) => {
+    const el = cameraReadoutRef.current;
+    if (!el) return;
+    const cam = items.find(i => i.id === selectedId && i.type === "camera") as CameraItem | undefined;
+    if (!cam) {
+      el.style.opacity = "0";
+      return;
+    }
+    const pos = getCameraPlanPosition(cam);
+    const dist = Math.hypot(x - pos.x, y - pos.y);
+    const level = doriLevelAt(cam, dist);
+    el.style.opacity = "1";
+    el.textContent = `${Math.round(dist)} ft from ${cam.label} · ${Math.round(pixelsPerFootAt(cam, dist))} px/ft · ${level ? level.label : "Too far"}`;
+  };
+
   const updateElevationReadout = (x: number, y: number) => {
     const el = elevationReadoutRef.current;
     if (!el) return;
@@ -2274,6 +627,7 @@ export default function SecurityPlanner() {
 
     setTerrainHeights(next);
     terrainHeightsRef.current = next;
+    if (demAutoApply) setDemAutoApply(false);
   };
 
   const applyDemToTerrain = (
@@ -2382,10 +736,47 @@ export default function SecurityPlanner() {
 
   // The real-world area elevation is fetched for: the base map if there is one, otherwise the whole canvas.
   const getElevationArea = () => {
-    if (backgroundImg) {
-      return { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height };
+    const bg = bgSettingsRef.current;
+    if (backgroundImgRef.current) {
+      return { x: bg.x, y: bg.y, width: bg.width, height: bg.height };
     }
-    return { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
+    const canvas = canvasSizeRef.current;
+    return { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  };
+
+  // Scale the whole plan (canvas, map placement, every item's position and plan size) by k.
+  // Heights (walls, mounts) are already feet and stay as they are.
+  const rescalePlan = (k: number) => {
+    const sp = (p: { x: number; y: number }) => ({ x: p.x * k, y: p.y * k });
+    const canvas = canvasSizeRef.current;
+    const bg = bgSettingsRef.current;
+    const nextCanvas = { width: Math.round(canvas.width * k), height: Math.round(canvas.height * k) };
+    const nextBg = { ...bg, x: bg.x * k, y: bg.y * k, width: bg.width * k, height: bg.height * k };
+    const nextItems = itemsRef.current.map(item => {
+      const base: any = { ...item, x: item.x * k, y: item.y * k };
+      if ((item as any).labelOffset) base.labelOffset = sp((item as any).labelOffset);
+      switch (item.type) {
+        case "building":
+          return { ...base, width: item.width * k, height: item.height * k, points: item.points?.map(sp) };
+        case "parking":
+        case "image":
+          return { ...base, width: item.width * k, height: item.height * k };
+        case "tree":
+          return { ...base, radius: item.radius * k };
+        case "camera":
+          return { ...base, range: item.range * k };
+        case "label":
+          return { ...base, fontSize: item.fontSize * k };
+        default:
+          return base;
+      }
+    }) as CanvasItem[];
+    canvasSizeRef.current = nextCanvas;
+    bgSettingsRef.current = nextBg;
+    setItems(nextItems);
+    setTerrainHeights({});
+    setPanOffset({ x: 0, y: 0 });
+    setZoom(1);
   };
 
   const openElevationDialog = () => {
@@ -2416,16 +807,78 @@ export default function SecurityPlanner() {
     setPickerView(v => ({ lat, lon, zoom: 18, key: v.key + 1 }));
   };
 
-  const searchSiteLocation = async () => {
+  const searchSiteLocation = async (suggestion?: PlaceSuggestion) => {
+    const query = suggestion ? [suggestion.text, suggestion.detail].filter(Boolean).join(", ") : elevationQuery;
+    if (suggestion) setElevationQuery(query);
+    setShowPlaceSuggestions(false);
+    setPlaceSuggestions([]);
     setElevationStatus({ state: "loading", message: "Searching…" });
     try {
-      const location = await resolveSiteLocation(elevationQuery);
+      const location = await resolveSiteLocation(query, { near: { lat: pickerView.lat, lon: pickerView.lon }, suggestion });
       selectAroundPoint(location.lat, location.lon, location.label);
       setElevationStatus({ state: "idle", message: "" });
     } catch (err) {
       setElevationStatus({ state: "error", message: err instanceof Error ? err.message : "Search failed." });
     }
   };
+
+  // Suggestions while typing (debounced), biased toward where the map is looking.
+  useEffect(() => {
+    if (!showElevationDialog || !showPlaceSuggestions) return;
+    const text = elevationQuery.trim();
+    if (text.length < 3) {
+      setPlaceSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      const list = await fetchPlaceSuggestions(text, { lat: pickerView.lat, lon: pickerView.lon });
+      if (!cancelled) {
+        setPlaceSuggestions(list);
+        setActiveSuggestion(-1);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elevationQuery, showPlaceSuggestions, showElevationDialog]);
+
+  // Look for buildings whenever the selected area settles, so they can be reviewed on the map before importing.
+  useEffect(() => {
+    if (!showElevationDialog || !siteBounds || !importBuildings) {
+      if (!siteBounds) setBuildingCandidates([]);
+      return;
+    }
+    const dims = selectionFromBounds(siteBounds, "");
+    if (dims.widthFt > SITE_MAX_WIDTH_FT || dims.heightFt > SITE_MAX_WIDTH_FT) return;
+    let cancelled = false;
+    setBuildingScan({ state: "loading", message: "Looking for buildings…" });
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await findBuildingCandidates(siteBounds);
+        if (cancelled) return;
+        setBuildingCandidates(result.candidates);
+        if (!result.osmOk && !result.detectedOk) {
+          setBuildingScan({ state: "error", message: "Couldn't reach the building services. You can still import and draw buildings yourself." });
+        } else {
+          setBuildingScan({ state: "done", message: "" });
+        }
+      } catch (err) {
+        if (!cancelled) setBuildingScan({ state: "error", message: "Couldn't look up buildings for this area." });
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [siteBounds, showElevationDialog, importBuildings]);
+
+  const toggleBuildingCandidate = (id: string) =>
+    setBuildingCandidates(prev => prev.map(c => (c.id === id ? { ...c, selected: !c.selected } : c)));
+  const setAllBuildingCandidates = (selected: boolean, source?: "osm" | "detected") =>
+    setBuildingCandidates(prev => prev.map(c => (!source || c.source === source ? { ...c, selected } : c)));
 
   const useMyLocation = () => {
     if (!navigator.geolocation) {
@@ -2495,12 +948,30 @@ export default function SecurityPlanner() {
       return;
     }
     const location = selection.center;
+    // A new map replaces the plan's extent; ask before stranding the user's own items on it.
+    const ownItems = items.filter(i => !(i.type === "building" && (i as BuildingItem).importSource === "osm"));
+    if (imagery !== "keep" && ownItems.length > 0 && !planGeoRef) {
+      const clearThem = window.confirm(
+        `Your plan already has ${ownItems.length} item${ownItems.length === 1 ? "" : "s"}. The new site map will replace the current map and scale.\n\nOK = start fresh on the new site (remove them)\nCancel = keep them (you may need to move them)`
+      );
+      if (clearThem) {
+        setItems(prev => prev.filter(i => i.type === "building" && (i as BuildingItem).importSource === "osm"));
+        setSelectedId(null);
+      }
+    }
     setSiteLocation(location);
     try {
+      if (imagery === "keep") {
+        // Your own map: rescale the whole plan so 1 unit = 1 ft, like an imported site, so camera
+        // ranges, coverage zones and every distance readout are true feet.
+        const current = getElevationArea();
+        const feetPerUnit = selection.widthFt / Math.max(current.width, 1);
+        if (Math.abs(feetPerUnit - 1) > 0.02) rescalePlan(feetPerUnit);
+      }
       let area = getElevationArea();
       let canvas = canvasSizeRef.current;
-      let realWidthFt = selection.widthFt;
-      let realHeightFt = area.height * (selection.widthFt / Math.max(area.width, 1));
+      let realWidthFt = imagery === "keep" ? area.width : selection.widthFt;
+      let realHeightFt = area.height * (realWidthFt / Math.max(area.width, 1));
       let partialImagery = false;
       let imagerySource = "";
 
@@ -2536,13 +1007,12 @@ export default function SecurityPlanner() {
       const unitsPerFoot = area.width / realWidthFt;
       const geoBounds = getGeoBounds(location, realWidthFt, realHeightFt);
       setPlanGeoRef({ bounds: geoBounds, area, unitsPerFoot });
-      // Buildings download alongside the elevation; a failure there doesn't stop the import.
-      const buildingsJob = importBuildings
-        ? fetchOsmBuildings(geoBounds).catch(err => {
-          console.warn("Building import failed", err);
-          return null;
-        })
-        : Promise.resolve([] as OsmBuilding[]);
+      // Buildings the user reviewed on the picker map (if the lookup is still running, wait for it).
+      const buildingsJob: Promise<OsmBuilding[] | null> = !importBuildings
+        ? Promise.resolve([])
+        : buildingScan.state === "loading" || (buildingScan.state === "idle" && buildingCandidates.length === 0)
+          ? findBuildingCandidates(siteBounds).then(r => r.candidates.filter(c => c.selected), () => null)
+          : Promise.resolve(buildingScan.state === "error" && buildingCandidates.length === 0 ? null : buildingCandidates.filter(c => c.selected));
 
       setElevationStatus({ state: "loading", message: "Downloading high-detail elevation…" });
       const grid = nextGrid;
@@ -2591,16 +1061,38 @@ export default function SecurityPlanner() {
       let buildingText = "";
       if (importBuildings) {
         if (osm === null) {
-          buildingText = " Couldn't reach OpenStreetMap for buildings. Draw them over the satellite image instead.";
+          buildingText = " Couldn't reach the building services. Draw buildings over the satellite image with the Building tool.";
         } else {
           const newBuildings = buildingsFromOsm(osm, geoBounds, area, unitsPerFoot);
-          setItems(prev => [
-            ...prev.filter(item => !(item.type === "building" && (item as BuildingItem).importSource === "osm")),
-            ...newBuildings
-          ]);
+          setItems(prev => {
+            // Re-import: keep identity and user edits (height, name, color) of buildings that are still
+            // there, so cameras mounted on them stay attached.
+            const oldImported = prev.filter(item => item.type === "building" && (item as BuildingItem).importSource === "osm") as BuildingItem[];
+            const used = new Set<string>();
+            const merged = newBuildings.map(nb => {
+              const worldPoly = (nb.points ?? []).map(p => ({ x: nb.x + p.x, y: nb.y + p.y }));
+              const match = oldImported.find(ob => !used.has(ob.id) && pointInPolygonXY({ x: ob.x, y: ob.y }, worldPoly));
+              if (!match) return nb;
+              used.add(match.id);
+              return { ...nb, id: match.id, wallHeight: match.wallHeight ?? nb.wallHeight, label: match.label || nb.label, color: match.color };
+            });
+            const keptIds = new Set(merged.map(b => b.id));
+            const rest = prev
+              .filter(item => !(item.type === "building" && (item as BuildingItem).importSource === "osm"))
+              .map(item => {
+                const cam = item as CameraItem;
+                if (item.type !== "camera" || cam.mount?.type !== "building" || !cam.mount.buildingId) return item;
+                const stillImported = oldImported.some(b => b.id === cam.mount!.buildingId);
+                if (!stillImported || keptIds.has(cam.mount.buildingId)) return item;
+                // Its building is gone: leave the camera free-standing where it was.
+                const pos = getCameraPlanPosition(cam);
+                return { ...cam, x: pos.x, y: pos.y, mount: { type: "free" as const, edgeT: 0.5, height: cam.mount.height } };
+              });
+            return [...rest, ...merged];
+          });
           buildingText = newBuildings.length > 0
-            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"} from OpenStreetMap — adjust heights in the right panel.`
-            : " No building outlines are mapped here yet. Draw them over the satellite image with the Building tool.";
+            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
+            : " No buildings were added. Draw them over the satellite image with the Building tool.";
         }
       }
 
@@ -2612,7 +1104,6 @@ export default function SecurityPlanner() {
         state: "done",
         message: `Site imported. ${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${buildingText}${partialImagery ? " Some map tiles were unavailable." : ""}`
       });
-      if (elevationOverlay === "off") setElevationOverlay("contours");
       window.setTimeout(() => saveHistory(undefined, terrainHeightsRef.current), 400);
     } catch (err) {
       console.error("Failed to import site", err);
@@ -2623,7 +1114,7 @@ export default function SecurityPlanner() {
   // Terrain is stored per grid vertex, so changing the grid must resample it (or re-apply the DEM).
   const changeGridSize = (next: number) => {
     if (!Number.isFinite(next) || next <= 0 || next === gridSize) return;
-    if (!(demData && demAutoApply) && Object.keys(terrainHeights).length > 0) {
+    if (Object.keys(terrainHeights).length > 0) {
       const resampled: Record<string, number> = {};
       for (let x = 0; x <= canvasSize.width; x += next) {
         for (let z = 0; z <= canvasSize.height; z += next) {
@@ -2647,8 +1138,13 @@ export default function SecurityPlanner() {
   };
 
   const demAutoApplyTimerRef = useRef<number | null>(null);
+  // Loading a project / undo / import set DEM state but already carry the right terrain (possibly
+  // hand-sculpted). Suppress the auto re-apply briefly so it doesn't overwrite that terrain.
+  const suppressDemApplyUntilRef = useRef(0);
+  const suppressDemAutoApply = () => { suppressDemApplyUntilRef.current = Date.now() + 2000; };
   useEffect(() => {
     if (!demData || !demAutoApply) return;
+    if (Date.now() < suppressDemApplyUntilRef.current) return;
     if (demAutoApplyTimerRef.current) {
       window.clearTimeout(demAutoApplyTimerRef.current);
     }
@@ -2661,7 +1157,9 @@ export default function SecurityPlanner() {
         demAutoApplyTimerRef.current = null;
       }
     };
-  }, [demData, demScale, demOffset, demNormalize, demTransform, canvasSize.width, canvasSize.height, gridSize, demAutoApply]);
+    // Re-apply only when the DEM settings themselves change (not on canvas/grid changes, which resample).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demData, demScale, demOffset, demNormalize, demTransform, demAutoApply]);
 
   // Refs
   const isTerrainModeRef = useRef(isTerrainMode);
@@ -2672,7 +1170,7 @@ export default function SecurityPlanner() {
   const terrainBrushFalloffRef = useRef(terrainBrushFalloff);
   const terrainFlattenTargetRef = useRef(terrainFlattenTarget);
   const terrainFlattenSampleRef = useRef(terrainFlattenSample);
-  const demDataRef = useRef<DemData | null>(demData);
+  const demDataRef = projectRef("demData");
   const demPreviewRef = useRef(demPreview);
   const prevCanvasSizeRef = useRef(canvasSize);
   const prevGridSizeRef = useRef(gridSize);
@@ -2684,7 +1182,6 @@ export default function SecurityPlanner() {
   useEffect(() => { terrainBrushFalloffRef.current = terrainBrushFalloff; }, [terrainBrushFalloff]);
   useEffect(() => { terrainFlattenTargetRef.current = terrainFlattenTarget; }, [terrainFlattenTarget]);
   useEffect(() => { terrainFlattenSampleRef.current = terrainFlattenSample; }, [terrainFlattenSample]);
-  useEffect(() => { demDataRef.current = demData; }, [demData]);
   useEffect(() => { demPreviewRef.current = demPreview; }, [demPreview]);
   const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
   const terrainStrokeRef = useRef<{
@@ -2737,37 +1234,32 @@ export default function SecurityPlanner() {
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
+  const [reviewVisited, setReviewVisited] = useState(false);
+  useEffect(() => {
+    if (viewMode !== "plan") setReviewVisited(true);
+  }, [viewMode]);
+  // View preference: DORI coverage bands in the 2D cones (remembered per browser).
+  const [showDoriZones, setShowDoriZones] = useState(() => {
+    try { return localStorage.getItem("scp.showDori") !== "0"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.showDori", showDoriZones ? "1" : "0"); } catch { /* ignore */ }
+  }, [showDoriZones]);
 
   // Export list - curated snapshots for client report
-  const [exportList, setExportList] = useState<{
-    id: string;
-    type: 'plan' | '3d' | 'camera';
-    label: string;
-    dataUrl: string;
-    cameraId?: string;
-  }[]>([]);
+  const [exportList, setExportList] = useProjectField("exportList");
   const [exportNotice, setExportNotice] = useState<{
     id: number;
     message: string;
     tone: 'success' | 'error' | 'info';
+    action?: { label: string; run: () => void };
   } | null>(null);
   const exportNoticeTimerRef = useRef<number | null>(null);
 
   // 3D Visualization Settings
-  const [frustumSettings, setFrustumSettings] = useState({
-    visible: true,
-    opacity: 0.15,
-    edgeOpacity: 0.6,
-    useCameraColor: true,
-    color: '#3b82f6',
-    showAll: true,
-    mode: 'volume' // 'volume' | 'floor'
-  });
-  const [sceneBackgroundImg, setSceneBackgroundImg] = useState<string | null>(null);
-  const [backgroundMode, setBackgroundMode] = useState<'flat' | 'panorama'>('flat'); // 'flat' = image, 'panorama' = 360° equirectangular
-  useEffect(() => { frustumSettingsRef.current = frustumSettings; }, [frustumSettings]);
-  useEffect(() => { sceneBackgroundImgRef.current = sceneBackgroundImg; }, [sceneBackgroundImg]);
-  useEffect(() => { backgroundModeRef.current = backgroundMode; }, [backgroundMode]);
+  const [frustumSettings, setFrustumSettings] = useProjectField("frustumSettings");
+  const [sceneBackgroundImg, setSceneBackgroundImg] = useProjectField("sceneBackgroundImg");
+  const [backgroundMode, setBackgroundMode] = useProjectField("backgroundMode"); // 'flat' = image, 'panorama' = 360° equirectangular
 
   useEffect(() => {
     if (isApplyingHistoryRef.current) return;
@@ -2793,7 +1285,6 @@ export default function SecurityPlanner() {
     frustumSettings,
     sceneBackgroundImg,
     backgroundMode,
-    nvrLayout,
     buildingLabelDefaults,
     demScale,
     demOffset,
@@ -2837,87 +1328,68 @@ export default function SecurityPlanner() {
     rotation: number; // Auto-calculated to face outward
   } | null>(null);
 
-  // Persistence - Save state to local storage
+  // Persistence - autosave to IndexedDB (no 5 MB localStorage limit, so satellite maps and report
+  // pages survive a reload). Older localStorage saves are migrated on first load.
+  const autosaveLoadedRef = useRef(false);
   useEffect(() => {
-    const saved = localStorage.getItem('securityCameraPlannerData');
-    if (saved) {
+    let cancelled = false;
+    (async () => {
+      let data: any = null;
       try {
-        const data = JSON.parse(saved);
-        if (data.items) setItems(data.items);
-        if (data.backgroundImg) setBackgroundImg(data.backgroundImg);
-        if (data.bgSettings) setBgSettings(data.bgSettings);
-        if (data.canvasSize) setCanvasSize(data.canvasSize);
-        if (data.exportList) setExportList(data.exportList);
-        if (data.projectName) setProjectName(data.projectName);
-        if (data.frustumSettings) setFrustumSettings(data.frustumSettings);
-        if (data.sceneBackgroundImg) setSceneBackgroundImg(data.sceneBackgroundImg);
-        if (data.backgroundMode) setBackgroundMode(data.backgroundMode);
-        if (data.nvrLayout) setNvrLayout(data.nvrLayout);
-        if (data.terrainHeights) setTerrainHeights(data.terrainHeights);
-        if (typeof data.gridSize === "number") setGridSize(data.gridSize);
-        if (data.siteLocation && typeof data.siteLocation.lat === "number") setSiteLocation(data.siteLocation);
-        if (data.siteBounds && typeof data.siteBounds.north === "number") setSiteBounds(data.siteBounds);
-        if (data.planGeoRef && data.planGeoRef.bounds) setPlanGeoRef(data.planGeoRef);
-        if (typeof data.showGrid === "boolean") setShowGrid(data.showGrid);
+        data = await idbGet(AUTOSAVE_KEY);
       } catch (e) {
-        console.error("Failed to load saved state", e);
+        console.warn("IndexedDB unavailable, falling back to localStorage", e);
       }
-    }
+      if (!data) {
+        try {
+          const saved = localStorage.getItem('securityCameraPlannerData');
+          if (saved) data = JSON.parse(saved);
+        } catch (e) {
+          console.error("Failed to load saved state", e);
+        }
+      }
+      if (cancelled) return;
+      if (data) {
+        try {
+          applyProjectData(data);
+          if (data.demData && data.demData.values) {
+            setDemData(data.demData);
+            setDemPreview(buildDemPreview(data.demData));
+          }
+          resetHistory();
+        } catch (e) {
+          console.error("Failed to restore saved state", e);
+        }
+      }
+      autosaveLoadedRef.current = true;
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    if (!autosaveLoadedRef.current) return;
     const timer = setTimeout(() => {
-      try {
-        const data = {
-          items,
-          backgroundImg,
-          bgSettings,
-          canvasSize,
-          exportList,
-          projectName,
-          frustumSettings,
-          sceneBackgroundImg,
-          backgroundMode,
-          nvrLayout,
-          terrainHeights,
-          gridSize,
-          showGrid,
-          siteLocation,
-          siteBounds,
-          planGeoRef
-        };
-        localStorage.setItem('securityCameraPlannerData', JSON.stringify(data));
-      } catch (err: any) {
-        // Handle quota exceeded by trying to save without the heavy background image
-        if (err.name === 'QuotaExceededError' || err.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-          console.error("Storage full, trying to save without background image");
+      const data = { ...buildProjectData(true), exportList, demData };
+      idbSet(AUTOSAVE_KEY, data)
+        .then(() => {
+          // The old localStorage copy is now redundant (and could be stale).
+          try { localStorage.removeItem('securityCameraPlannerData'); } catch { /* ignore */ }
+        })
+        .catch(err => {
+          console.error("Autosave to IndexedDB failed; saving a smaller copy to localStorage", err);
           try {
-            const partialData = {
-              items,
-              bgSettings,
-              canvasSize,
-              exportList,
-              projectName,
-              terrainHeights,
-              gridSize,
-              showGrid,
-              siteLocation,
-              siteBounds,
-              planGeoRef
-              // omit backgroundImg
-            };
-            localStorage.setItem('securityCameraPlannerData', JSON.stringify(partialData));
+            const { backgroundImg: _bg, sceneBackgroundImg: _scene, ...rest } = buildProjectData(true);
+            localStorage.setItem('securityCameraPlannerData', JSON.stringify(rest));
           } catch (e2) {
             console.error("Still failed to save", e2);
           }
-        } else {
-          console.error("Failed to save state", err);
-        }
-      }
-    }, 1000);
+        });
+    }, 800);
 
     return () => clearTimeout(timer);
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, siteLocation, siteBounds, planGeoRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, snapToGrid, siteLocation, siteBounds, planGeoRef, elevationOverlay, buildingLabelDefaults, demData, demScale, demOffset, demTransform]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -3034,21 +1506,10 @@ export default function SecurityPlanner() {
 
       const pos = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 
-      // Offset camera slightly away from the building center to prevent clipping
-      const center = worldPoints.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-      if (worldPoints.length > 0) {
-        center.x /= worldPoints.length;
-        center.y /= worldPoints.length;
-      }
-
-      const vecToPos = { x: pos.x - center.x, y: pos.y - center.y };
-      const len = Math.hypot(vecToPos.x, vecToPos.y) || 1;
-      const offset = 3.0; // Push out by 3 units (pixels)
-
-      return {
-        x: pos.x + (vecToPos.x / len) * offset,
-        y: pos.y + (vecToPos.y / len) * offset
-      };
+      // Sit just outside the wall (along its outward normal) so the camera doesn't clip into it.
+      const normal = getEdgeOutwardNormal(worldPoints, edgeIndex);
+      const offset = 1.0;
+      return { x: pos.x + normal.x * offset, y: pos.y + normal.y * offset };
     }
     return { x: camera.x, y: camera.y };
   };
@@ -3089,19 +1550,13 @@ export default function SecurityPlanner() {
   };
 
   // Find nearest building edge from a point and calculate outward-facing rotation
-  const findNearestBuildingEdge = (point: { x: number; y: number }): BuildingEdgeInfo | null => {
+  const findNearestBuildingEdge = (point: { x: number; y: number }, list: CanvasItem[] = items): BuildingEdgeInfo | null => {
     let best: BuildingEdgeInfo | null = null;
 
-    items.forEach(item => {
+    list.forEach(item => {
       if (item.type !== "building") return;
       const building = item as BuildingItem;
       const worldPoints = getBuildingEdgePointsWorld(building);
-
-      // Calculate building center for determining "outward" direction
-      const center = {
-        x: worldPoints.reduce((sum, p) => sum + p.x, 0) / worldPoints.length,
-        y: worldPoints.reduce((sum, p) => sum + p.y, 0) / worldPoints.length
-      };
 
       for (let i = 0; i < worldPoints.length; i += 1) {
         const nextIndex = (i + 1) % worldPoints.length;
@@ -3115,11 +1570,9 @@ export default function SecurityPlanner() {
         const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
         const dist = Math.hypot(point.x - proj.x, point.y - proj.y);
 
-        // Calculate outward-facing rotation
-        // The edge normal pointing outward from building center
-        const edgeMidpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const toOutside = { x: edgeMidpoint.x - center.x, y: edgeMidpoint.y - center.y };
-        const outwardAngle = Math.atan2(toOutside.y, toOutside.x) * (180 / Math.PI);
+        // Face straight out from the wall
+        const normal = getEdgeOutwardNormal(worldPoints, i);
+        const outwardAngle = Math.atan2(normal.y, normal.x) * (180 / Math.PI);
 
         if (!best || dist < best.distance) {
           best = {
@@ -3168,18 +1621,17 @@ export default function SecurityPlanner() {
           ...common,
           type: "camera",
           rotation: 45,
-          label: "Camera",
+          label: `Camera ${items.filter(i => i.type === "camera").length + 1}`,
           description: "",
-          fov: 109,
-          hFov: 109,
-          vFov: vFovFromH(109, 16 / 9),
-          pitch: -15, // Slightly steeper downward angle for better coverage
-          height: 60, // Default to building roof height
+          fov: DEFAULT_CAMERA_HFOV,
+          hFov: DEFAULT_CAMERA_HFOV,
+          vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
+          pitch: DEFAULT_CAMERA_PITCH,
+          height: DEFAULT_CAMERA_HEIGHT_FT,
           aspect: 16 / 9,
-          mount: { type: "free", edgeT: 0.5, height: 60 },
-          range: 150,
-          color: COLORS.camera[0],
-          labelOffset: { x: 0, y: 30 },
+          mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
+          range: DEFAULT_CAMERA_RANGE_FT,
+          color: COLORS.camera[items.filter(i => i.type === "camera").length % COLORS.camera.length],
           connectorDashSize: 3
         };
         break;
@@ -3187,18 +1639,19 @@ export default function SecurityPlanner() {
         newItem = {
           ...common,
           type: "building",
-          width: 100,
-          height: 80,
+          width: DEFAULT_BUILDING.width,
+          height: DEFAULT_BUILDING.depth,
+          wallHeight: DEFAULT_BUILDING.wallHeight,
           label: "Building",
           color: COLORS.building[0],
-          points: rectanglePoints(100, 80)
+          points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
         };
         break;
       case "add-tree":
         newItem = {
           ...common,
           type: "tree",
-          radius: 25,
+          radius: 12,
           color: COLORS.tree[0]
         };
         break;
@@ -3227,15 +1680,15 @@ export default function SecurityPlanner() {
 
     if (newItem.type === "camera") {
       const edge = findNearestBuildingEdge({ x, y });
-      // Very generous snap distance (100px) for easy camera placement on buildings
-      if (edge && edge.distance < 100) {
+      // Snap onto a wall only when placed right next to it, so cameras land where the user clicked.
+      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
         const cam = newItem as CameraItem;
         cam.x = edge.point.x;
         cam.y = edge.point.y;
         // Auto-rotate to face outward from building
         cam.rotation = edge.rotation;
-        // Default height to building roof height (60) when attaching to building
-        const buildingHeight = 60;
+        // Mount just under the eave of the building it's attached to
+        const buildingHeight = mountHeightForBuilding(getBuildingById(edge.buildingId));
         cam.mount = {
           type: "building",
           buildingId: edge.buildingId,
@@ -3271,7 +1724,32 @@ export default function SecurityPlanner() {
   };
 
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
-    setItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)));
+    setItems(prev => {
+      const current = prev.find(i => i.id === id);
+      if (!current) return prev;
+      let patch: any = updates;
+      // Keep a camera's vertical FOV in step with its horizontal FOV; a manual FOV change clears the lens preset.
+      if (current.type === "camera" && ("hFov" in patch || "fov" in patch) && !("vFov" in patch)) {
+        const cam = current as CameraItem;
+        const h = patch.hFov ?? patch.fov;
+        patch = { ...patch, vFov: vFovFromH(h, getCameraAspectValue(cam)), ...("lensPreset" in patch ? {} : { lensPreset: undefined }) };
+      }
+      // Rotating a building swings the cameras mounted on it by the same amount.
+      const rotationDelta =
+        current.type === "building" && typeof patch.rotation === "number" ? patch.rotation - current.rotation : 0;
+      return prev.map(item => {
+        if (item.id === id) return { ...item, ...patch } as CanvasItem;
+        if (rotationDelta && item.type === "camera" && (item as CameraItem).mount?.type === "building" && (item as CameraItem).mount?.buildingId === id) {
+          return { ...item, rotation: (((item.rotation + rotationDelta) % 360) + 360) % 360 };
+        }
+        return item;
+      });
+    });
+  };
+
+  // Mount height is stored on the mount (building or free); keep `height` in sync for older readers.
+  const setCameraMountHeight = (camera: CameraItem, height: number) => {
+    updateItem(camera.id, { height, mount: { ...(camera.mount ?? { type: "free" as const }), height } });
   };
 
   const updateCameraMount = (cameraId: string, updates: Partial<NonNullable<CameraItem["mount"]>>) => {
@@ -3283,7 +1761,7 @@ export default function SecurityPlanner() {
   const attachCameraToNearestBuilding = (cameraId: string) => {
     const camera = items.find(item => item.id === cameraId) as CameraItem | undefined;
     if (!camera || camera.type !== "camera") return;
-    const snap = snapCameraToNearestBuilding(camera);
+    const snap = snapCameraToNearestBuilding(camera) as { buildingId: string; edgeIndex: number; edgeT: number; distance: number; point: { x: number; y: number } } | null;
     if (!snap) return;
     updateItem(cameraId, {
       x: snap.point.x,
@@ -3360,8 +1838,15 @@ export default function SecurityPlanner() {
   };
 
   const deleteItem = (id: string) => {
-    setItems(prev => prev.filter(i => i.id !== id));
+    const removed = items.find(i => i.id === id);
+    const nextItems = items.filter(i => i.id !== id);
+    setItems(nextItems);
     setSelectedId(prev => (prev === id ? null : prev));
+    saveHistory(nextItems);
+    if (removed) {
+      const name = (removed as any).label || (removed as any).text || getItemTypeLabel(removed.type);
+      showExportNotice(`Deleted ${name}`, "info", { label: "Undo", run: handleUndo });
+    }
   };
 
   const handleClearCanvas = () => {
@@ -3443,8 +1928,7 @@ export default function SecurityPlanner() {
     setElevationQuery("");
     setElevationStatus({ state: "idle", message: "" });
     setCameraPlacementPreview(null);
-    setHistory([]);
-    setHistoryIndex(-1);
+    resetHistory();
     setRightPanelMode("project");
     setIsRightPanelOpen(true);
   };
@@ -3459,12 +1943,81 @@ export default function SecurityPlanner() {
     });
   };
 
-  const showExportNotice = (message: string, tone: 'success' | 'error' | 'info' = 'success') => {
-    setExportNotice({ id: Date.now(), message, tone });
+  // --- Auto-trace a roof from the satellite map ---
+  const roofImageCacheRef = useRef<{ src: string; data: ImageData } | null>(null);
+  const getMapImageData = () => {
+    const img = bgImageRef.current;
+    if (!backgroundImg || !img || !img.naturalWidth) return null;
+    if (roofImageCacheRef.current?.src === backgroundImg) return roofImageCacheRef.current.data;
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    roofImageCacheRef.current = { src: backgroundImg, data };
+    return data;
+  };
+
+  const traceRoofAt = (pos: { x: number; y: number }) => {
+    const data = getMapImageData();
+    if (!data) {
+      showExportNotice("Import your site (satellite map) first, then click a roof.", "info");
+      return;
+    }
+    const pxPerUnitX = data.width / bgSettings.width;
+    const pxPerUnitY = data.height / bgSettings.height;
+    const ix = (pos.x - bgSettings.x) * pxPerUnitX;
+    const iy = (pos.y - bgSettings.y) * pxPerUnitY;
+    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
+    const result = traceRoof(data, ix, iy, {
+      maxRadius: 90 * unitsPerFoot * pxPerUnitX, // roofs up to ~180 ft across
+      minPixels: 120 * unitsPerFoot * unitsPerFoot * pxPerUnitX * pxPerUnitY // at least ~120 sq ft
+    });
+    if (!result) {
+      showExportNotice("Couldn't find a roof edge there. Try clicking the middle of a roof, or draw it with the Building tool.", "error");
+      return;
+    }
+    const corners = result.corners.map(c => ({ x: bgSettings.x + c.x / pxPerUnitX, y: bgSettings.y + c.y / pxPerUnitY }));
+    const cx = corners.reduce((sum, c) => sum + c.x, 0) / corners.length;
+    const cy = corners.reduce((sum, c) => sum + c.y, 0) / corners.length;
+    const points = corners.map(c => ({ x: c.x - cx, y: c.y - cy }));
+    const bounds = getPointsBounds(points);
+    const building: BuildingItem = {
+      id: generateId(),
+      type: "building",
+      x: cx,
+      y: cy,
+      rotation: 0,
+      width: bounds.width,
+      height: bounds.height,
+      wallHeight: Math.round(DEFAULT_BUILDING.wallHeight * unitsPerFoot),
+      label: "Building",
+      color: COLORS.building[0],
+      points
+    };
+    const nextItems = [...items, building];
+    setItems(nextItems);
+    saveHistory(nextItems);
+    showExportNotice(
+      result.fill < 0.7
+        ? "Traced a building — the shape may be rough; drag its corners to match the roof."
+        : "Traced a building. Click more roofs, or press Esc when done.",
+      "success"
+    );
+  };
+
+  const showExportNotice = (
+    message: string,
+    tone: 'success' | 'error' | 'info' = 'success',
+    action?: { label: string; run: () => void }
+  ) => {
+    setExportNotice({ id: Date.now(), message, tone, action });
     if (exportNoticeTimerRef.current) {
       window.clearTimeout(exportNoticeTimerRef.current);
     }
-    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), 2400);
+    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), action ? 6000 : 3000);
   };
 
   const getPlanViewBox = () => {
@@ -3655,21 +2208,21 @@ export default function SecurityPlanner() {
       cameraSnapshotRendererRef.current = { renderer, pmremGenerator, envTexture, canvas };
       cache = cameraSnapshotRendererRef.current;
     }
-    cache.renderer.setSize(width, height, false);
+    cache.renderer!.setSize(width, height, false);
     return cache;
   };
 
   // Render a camera's perspective view to data URL - MATCHES Camera Preview Panel exactly
-  const renderCameraViewToDataUrl = (cam: CameraItem): string => {
+  // Renders what a camera sees (shared offscreen WebGL renderer) onto a new 2D canvas.
+  const renderCameraViewToCanvas = (cam: CameraItem, width = 1280): HTMLCanvasElement => {
     const aspect = getCameraAspectValue(cam);
-    const width = 1280;
-    const height = Math.max(360, Math.round(width / aspect));
+    const height = Math.max(Math.round(width / 3.6), Math.round(width / aspect));
 
     const camPos = getCameraPlanPosition(cam);
     const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
-    const pitch = cam.pitch ?? -15;
+    const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
     const range = cam.range;
     const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
 
@@ -3677,27 +2230,28 @@ export default function SecurityPlanner() {
     const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
     const vFov = THREE.MathUtils.radToDeg(vFovRad);
 
-    // Create mini Three.js scene
+    // Create mini Three.js scene with a daylight sky; haze beyond the camera's rated range.
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#09090b');
-    scene.fog = new THREE.Fog('#09090b', range * 0.3, range * 1.2);
+    const sky = new THREE.Color('#a9c8e6');
+    scene.background = sky;
+    scene.fog = new THREE.Fog(sky, Math.max(range * 1.2, 60), Math.max(range * 3, 200));
 
     // Perspective camera at security camera position (Terrain Adjusted)
-    const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 1, range * 2);
+    const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 0.5, Math.max(range * 4, 400));
     perspCam.position.set(camPos.x, camTerrainH + camHeight, camPos.y);
 
     const pitchRad = THREE.MathUtils.degToRad(pitch);
     const lookAt = new THREE.Vector3(
-      camPos.x + Math.cos(rotAngle) * 100,
-      camTerrainH + camHeight + Math.tan(pitchRad) * 100,
-      camPos.y + Math.sin(rotAngle) * 100
+      camPos.x + Math.cos(rotAngle) * Math.cos(pitchRad) * 100,
+      camTerrainH + camHeight + Math.sin(pitchRad) * 100,
+      camPos.y + Math.sin(rotAngle) * Math.cos(pitchRad) * 100
     );
     perspCam.lookAt(lookAt);
 
     // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
-    dirLight.position.set(100, 200, 50);
+    scene.add(new THREE.HemisphereLight(0xdbeafe, 0x4b5563, 0.8));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    dirLight.position.set(camPos.x + 100, 300, camPos.y + 50);
     scene.add(dirLight);
 
     // Ground with Terrain Height (match 3D terrain resolution)
@@ -3724,7 +2278,7 @@ export default function SecurityPlanner() {
 
     const ground = new THREE.Mesh(
       groundGeo,
-      new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.9, metalness: 0.1, flatShading: true })
+      new THREE.MeshStandardMaterial({ color: 0x6b7f5a, roughness: 1, metalness: 0 })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(centerX, 0, centerY);
@@ -3808,7 +2362,10 @@ export default function SecurityPlanner() {
       }
     }
 
-    renderer.render(scene, perspCam);
+    renderer!.render(scene, perspCam);
+    // This scene is rebuilt for every snapshot; free its GPU resources (but keep the shared env map).
+    disposeObjectDeep(scene, new Set(snapshot.envTexture ? [snapshot.envTexture] : []));
+    if (scene.background instanceof THREE.Texture) scene.background.dispose();
 
     // Copy WebGL canvas to a 2D canvas for overlay (WebGL and 2D contexts can't coexist on same canvas)
     const outputCanvas = document.createElement('canvas');
@@ -3820,21 +2377,23 @@ export default function SecurityPlanner() {
       ctx.drawImage(canvas, 0, 0);
 
       // Top bar with camera name only
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(0, 0, width, 40);
+      const k = width / 1280;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, width, 40 * k);
 
       // Camera icon and label
       ctx.fillStyle = '#10b981';
-      ctx.font = 'bold 24px system-ui, sans-serif';
-      ctx.fillText('📷', 16, 28);
+      ctx.font = `bold ${Math.round(24 * k)}px system-ui, sans-serif`;
+      ctx.fillText('📷', 16 * k, 28 * k);
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 22px system-ui, sans-serif';
-      ctx.fillText(cam.label, 56, 28);
+      ctx.font = `bold ${Math.round(22 * k)}px system-ui, sans-serif`;
+      ctx.fillText(cam.label, 56 * k, 28 * k);
     }
 
-    const dataUrl = outputCanvas.toDataURL('image/png');
-    return dataUrl;
+    return outputCanvas;
   };
+
+  const renderCameraViewToDataUrl = (cam: CameraItem): string => renderCameraViewToCanvas(cam).toDataURL('image/png');
 
   // Add current 2D plan to export list
   const addPlanToExportList = async () => {
@@ -4007,28 +2566,86 @@ export default function SecurityPlanner() {
     link.click();
     document.body.removeChild(link);
   };
-  const handleExportReportPdf = () => {
-    if (exportList.length === 0) {
-      showExportNotice("Your report is empty. Add views first.", "info");
-      return;
-    }
+  const escapeHtml = (text: string) =>
+    String(text ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
 
+  // Camera schedule for the report: mounting, lens and what each camera can make out at what distance.
+  const buildCameraScheduleHtml = () => {
+    const cameras = items.filter(i => i.type === "camera") as CameraItem[];
+    if (cameras.length === 0) return "";
+    const rows = cameras.map((cam, i) => {
+      const dori = getDoriDistances(cam);
+      const height = Math.round(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT);
+      const mountedOn = cam.mount?.type === "building" && cam.mount.buildingId
+        ? `on ${escapeHtml((getBuildingById(cam.mount.buildingId) as BuildingItem | undefined)?.label || "building")}`
+        : "free-standing";
+      const res = RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`;
+      return `<tr>
+        <td><span class="dot" style="background:${escapeHtml(cam.color)}"></span>${i + 1}. ${escapeHtml(cam.label)}</td>
+        <td>${height} ft ${mountedOn}</td>
+        <td>${Math.round(cam.hFov ?? cam.fov)}° · ${res}</td>
+        <td>${Math.abs(Math.round(cam.pitch ?? DEFAULT_CAMERA_PITCH))}° down</td>
+        <td>${Math.round(dori[0].distance)} ft</td>
+        <td>${Math.round(dori[1].distance)} ft</td>
+        <td>${Math.round(dori[3].distance)} ft</td>
+        <td>${escapeHtml(cam.description || "")}</td>
+      </tr>`;
+    }).join("");
+    return `<h2>Camera schedule</h2>
+      <table>
+        <thead><tr><th>Camera</th><th>Mount</th><th>Lens</th><th>Tilt</th><th>Identify to</th><th>Recognize to</th><th>Detect to</th><th>Notes</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="note">Identify ≈ recognize a stranger's face or read a plate (250 px/m); Recognize ≈ tell if it's someone you know (125 px/m); Detect ≈ notice someone is there (25 px/m), per IEC 62676-4. Distances assume good lighting.</p>`;
+  };
+
+  const handleExportReportPdf = async () => {
+    // Open the window synchronously (inside the click) so popup blockers allow it.
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       showExportNotice("Popups blocked. Allow popups to export PDF.", "error");
       return;
     }
+    printWindow.document.write("<p style='font-family:system-ui;padding:40px;color:#334155'>Preparing your report…</p>");
+
+    // No views added yet? Build the full report automatically: plan + every camera's view.
+    let views = exportList;
+    if (views.length === 0) {
+      const auto: typeof exportList = [];
+      try {
+        auto.push({ id: "plan", type: "plan", label: "Site plan", dataUrl: await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" }) });
+      } catch (err) {
+        console.error("Plan capture failed", err);
+      }
+      (items.filter(i => i.type === "camera") as CameraItem[]).forEach(cam => {
+        try {
+          auto.push({ id: cam.id, type: "camera", label: `${cam.label} view`, dataUrl: renderCameraViewToDataUrl(cam), cameraId: cam.id });
+        } catch (err) {
+          console.error("Camera view failed", err);
+        }
+      });
+      views = auto;
+    }
+
+    const site = siteLocation ? `<div><b>Site:</b> ${escapeHtml(siteLocation.label)} (${siteLocation.lat.toFixed(5)}, ${siteLocation.lon.toFixed(5)})</div>` : "";
+    const counts = `${items.filter(i => i.type === "camera").length} cameras · ${items.filter(i => i.type === "building").length} buildings`;
 
     const htmlContent = `
       <!DOCTYPE html>
       <html>
       <head>
-        <title>${projectName || 'Security Plan Report'}</title>
+        <title>${escapeHtml(projectName || 'Security Plan Report')}</title>
         <style>
-          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; }
-          h1 { color: #0f172a; margin-bottom: 5px; }
-          .meta { color: #64748b; font-size: 14px; margin-bottom: 40px; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; }
-          .item { margin-bottom: 40px; page-break-inside: avoid; }
+          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; color: #0f172a; }
+          h1 { margin-bottom: 5px; }
+          h2 { margin-top: 32px; font-size: 18px; }
+          .meta { color: #64748b; font-size: 14px; margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; line-height: 1.6; }
+          table { width: 100%; border-collapse: collapse; font-size: 12px; }
+          th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+          th { background: #f8fafc; font-weight: 600; }
+          .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+          .note { color: #64748b; font-size: 11px; }
+          .item { margin-bottom: 32px; page-break-inside: avoid; }
           .item h3 { color: #334155; margin-bottom: 10px; }
           .item img { width: 100%; border: 1px solid #e2e8f0; border-radius: 4px; }
           @media print {
@@ -4038,16 +2655,16 @@ export default function SecurityPlanner() {
         </style>
       </head>
       <body>
-        <h1>${projectName || 'Security Camera Plan'}</h1>
-        <div class="meta">Exported: ${new Date().toLocaleString()} | ${exportList.length} view(s)</div>
-        
-        ${exportList.map(item => `
+        <h1>${escapeHtml(projectName || 'Security Camera Plan')}</h1>
+        <div class="meta">${site}<div>${counts} · Prepared ${new Date().toLocaleString()}</div></div>
+        ${buildCameraScheduleHtml()}
+        ${views.length ? "<h2>Views</h2>" : ""}
+        ${views.map(item => `
           <div class="item">
-            <h3>${item.label}</h3>
+            <h3>${escapeHtml(item.label)}</h3>
             <img src="${item.dataUrl}" />
           </div>
         `).join('')}
-        
         <script>
           window.onload = () => {
              setTimeout(() => {
@@ -4059,23 +2676,32 @@ export default function SecurityPlanner() {
       </html>
     `;
 
+    printWindow.document.open();
     printWindow.document.write(htmlContent);
     printWindow.document.close();
   };
 
+  // Loads a saved project, replacing everything from the current one (anything the file
+  // doesn't contain is reset rather than left over from the previous project).
   const applyProjectData = (projectData: any) => {
-    if (projectData.items) setItems(projectData.items);
-    if (projectData.terrainHeights) setTerrainHeights(projectData.terrainHeights);
-    if (projectData.backgroundImg) setBackgroundImg(projectData.backgroundImg);
+    suppressDemAutoApply();
+    setItems(Array.isArray(projectData.items) ? projectData.items : []);
+    setSelectedId(null);
+    setMode("select");
+    setTerrainHeights(projectData.terrainHeights && typeof projectData.terrainHeights === "object" ? projectData.terrainHeights : {});
+    setBackgroundImg(projectData.backgroundImg || null);
+    setDemData(null);
+    setDemPreview(null);
+    setDemAlignMode(false);
     if (projectData.bgSettings) setBgSettings(projectData.bgSettings);
     if (projectData.canvasSize) setCanvasSize(projectData.canvasSize);
     if (typeof projectData.gridSize === "number") setGridSize(projectData.gridSize);
     if (typeof projectData.showGrid === "boolean") setShowGrid(projectData.showGrid);
     if (typeof projectData.snapToGrid === "boolean") setSnapToGrid(projectData.snapToGrid);
     if (projectData.projectName) setProjectName(projectData.projectName);
-    if (projectData.exportList) setExportList(projectData.exportList);
+    setExportList(Array.isArray(projectData.exportList) ? projectData.exportList : []);
     if (projectData.frustumSettings) setFrustumSettings(projectData.frustumSettings);
-    if (projectData.sceneBackgroundImg) setSceneBackgroundImg(projectData.sceneBackgroundImg);
+    setSceneBackgroundImg(projectData.sceneBackgroundImg || null);
     if (projectData.backgroundMode) setBackgroundMode(projectData.backgroundMode);
     if (projectData.nvrLayout) setNvrLayout(projectData.nvrLayout);
     if (projectData.buildingLabelDefaults) {
@@ -4183,7 +2809,9 @@ export default function SecurityPlanner() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const isZip = file.name.toLowerCase().endsWith(".zip");
+    // Detect zip by content ("PK" signature), not just the extension, so renamed files still open.
+    const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    const isZip = file.name.toLowerCase().endsWith(".zip") || (head[0] === 0x50 && head[1] === 0x4b);
     if (isZip) {
       try {
         const zip = await JSZip.loadAsync(file);
@@ -4226,6 +2854,7 @@ export default function SecurityPlanner() {
           setDemData(null);
           setDemPreview(null);
         }
+        resetHistory();
       } catch (err) {
         console.error("Failed to load zip project", err);
         alert("Invalid or corrupted project archive.");
@@ -4241,6 +2870,7 @@ export default function SecurityPlanner() {
         const json = event.target?.result as string;
         const projectData = JSON.parse(json);
         applyProjectData(projectData);
+        resetHistory();
       } catch (err) {
         console.error("Failed to load project file", err);
         alert("Invalid project file.");
@@ -4322,6 +2952,21 @@ export default function SecurityPlanner() {
           return { lat, lon };
         };
         geo = { ...geo, corners: [toLatLon(wx0, wy0), toLatLon(wx1, wy0), toLatLon(wx1, wy1), toLatLon(wx0, wy1)] };
+        // Make output pixels square on the plan (in lat/lon files they're ~cos(lat) narrower than tall).
+        {
+          const { bounds: gb, area: ga } = planGeoRef;
+          const toPlan = (p: { lat: number; lon: number }) => ({
+            x: ga.x + ((p.lon - gb.west) / (gb.east - gb.west)) * ga.width,
+            y: ga.y + ((gb.north - p.lat) / (gb.north - gb.south)) * ga.height
+          });
+          const [pnw, pne, , psw] = geo.corners.map(toPlan);
+          const planW = Math.hypot(pne.x - pnw.x, pne.y - pnw.y);
+          const planH = Math.hypot(psw.x - pnw.x, psw.y - pnw.y);
+          if (planW > 0 && planH > 0) {
+            height = Math.max(2, Math.round(width * (planH / planW)));
+            readOptions = { ...readOptions, height };
+          }
+        }
       } else if (width * height > 4096 * 4096) {
         alert("This elevation file is very large. Pick your site in Import Site first so only the needed part is loaded.");
         return;
@@ -4385,8 +3030,7 @@ export default function SecurityPlanner() {
         demOffsetRef.current = 0;
         demNormalizeRef.current = true;
         applyDemToTerrain(data, { preview, transform, scale, offset: 0, normalize: true });
-        if (elevationOverlay === "off") setElevationOverlay("contours");
-        return;
+          return;
       }
       if (preview) {
         setDemPreview(preview);
@@ -4425,20 +3069,8 @@ export default function SecurityPlanner() {
 
 
 
-  const disposeGroup = (group: THREE.Group) => {
-    group.traverse(child => {
-      const mesh = child as THREE.Mesh;
-      if (mesh.geometry) {
-        mesh.geometry.dispose();
-      }
-      if (mesh.material) {
-        if (Array.isArray(mesh.material)) {
-          mesh.material.forEach(material => material.dispose());
-        } else {
-          mesh.material.dispose();
-        }
-      }
-    });
+  const disposeGroup = (group: THREE.Object3D) => {
+    disposeObjectDeep(group);
     group.clear();
   };
 
@@ -4616,6 +3248,13 @@ export default function SecurityPlanner() {
         return pts.map((p, i) => [p, pts[(i + 1) % pts.length]]);
       }
       return [];
+    }).filter(([a, b]) => {
+      // Only walls within the camera's range can block it (huge saving with many imported buildings).
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const len2 = abx * abx + aby * aby || 1;
+      const t = Math.max(0, Math.min(1, ((origin.x - a.x) * abx + (origin.y - a.y) * aby) / len2));
+      return Math.hypot(a.x + abx * t - origin.x, a.y + aby * t - origin.y) <= range;
     });
 
     const rayCount = 128;
@@ -4759,7 +3398,7 @@ export default function SecurityPlanner() {
       );
 
       const aspect = cameraItem.aspect ?? 16 / 9;
-      const displayRange = Math.max(1, Math.min(range, 50));
+      const displayRange = Math.max(1, range);
       const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
       const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
       const farWidth = farHeight * aspect;
@@ -4822,7 +3461,73 @@ export default function SecurityPlanner() {
       disposeGroup(frustumGroup);
     }
 
-    // Floor projection removed
+    // Ground footprint: what the camera covers on the (terrain-following) ground, colored by DORI zone.
+    if (shouldShow) {
+      const obstacles = itemsRef.current.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
+      const poly = getVisibilityPolygon(cameraPos, range, hFov, cameraItem.rotation, obstacles);
+      const zones = getDoriDistances(cameraItem);
+      const mountH = cameraItem.mount?.height ?? cameraItem.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+      const vf = cameraItem.vFov ?? vFovFromH(hFov, getCameraAspectValue(cameraItem));
+      const coverage = getGroundCoverage(mountH, THREE.MathUtils.radToDeg(pitchRad), vf);
+      const start = Number.isFinite(coverage.near) ? Math.min(coverage.near, range) : range;
+      const end = Math.min(range, Number.isFinite(coverage.far) ? coverage.far : range);
+      if (poly.length > 1 && end > start) {
+        const stops = new Set<number>([start, end]);
+        zones.forEach(z => { if (z.distance > start && z.distance < end) stops.add(z.distance); });
+        const step = Math.max(2, (end - start) / 14);
+        for (let d = start + step; d < end; d += step) stops.add(d);
+        const radii = Array.from(stops).sort((a, b) => a - b);
+        const bandColor = (d: number) => {
+          if (!showDoriZones) return new THREE.Color(cameraItem.color);
+          const zone = zones.find(z => d <= z.distance);
+          return new THREE.Color(zone ? zone.color : cameraItem.color);
+        };
+        const positions: number[] = [];
+        const colors: number[] = [];
+        const vertex = (dir: { x: number; y: number }, len: number, r: number) => {
+          const t = Math.min(r, len);
+          const wx = cameraPos.x + dir.x * t;
+          const wz = cameraPos.y + dir.y * t;
+          positions.push(wx, getGridHeight(wx, wz) + 0.3, wz);
+        };
+        const rays = poly.map(p => {
+          const len = Math.hypot(p.x, p.y);
+          return { dir: { x: p.x / (len || 1), y: p.y / (len || 1) }, len };
+        });
+        for (let i = 0; i < rays.length - 1; i++) {
+          const a = rays[i];
+          const b = rays[i + 1];
+          for (let j = 0; j < radii.length - 1; j++) {
+            const r0 = radii[j];
+            const r1 = radii[j + 1];
+            if (r0 >= a.len && r0 >= b.len) break;
+            const c = bandColor((r0 + r1) / 2);
+            vertex(a.dir, a.len, r0); vertex(b.dir, b.len, r0); vertex(a.dir, a.len, r1);
+            vertex(b.dir, b.len, r0); vertex(b.dir, b.len, r1); vertex(a.dir, a.len, r1);
+            for (let k = 0; k < 6; k++) colors.push(c.r, c.g, c.b);
+          }
+        }
+        if (positions.length) {
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+          geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+          const floor = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.32,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -4,
+            polygonOffsetUnits: -8
+          }));
+          floor.name = `camera-floor-${cameraItem.id}`;
+          floor.renderOrder = 2;
+          floor.raycast = () => {};
+          state.group.add(floor);
+        }
+      }
+    }
   };
 
   // Fast position-only update for 3D objects (used during dragging)
@@ -4851,6 +3556,7 @@ export default function SecurityPlanner() {
         treeObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
         needsRender = true;
       } else if (item.type === "building") {
+        if (!obj) return;
         const building = item as BuildingItem;
         const baseH = getBuildingBaseHeight(building);
         obj.position.set(building.x, baseH, building.y);
@@ -4868,27 +3574,30 @@ export default function SecurityPlanner() {
         const camH = getCameraBaseHeight(cam, camPos); // Base height at camera pivot (building base if mounted)
         const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
 
+        if (!obj) return;
         obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
+        obj.rotation.order = 'YZX';
         obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
-        obj.rotation.x = THREE.MathUtils.degToRad(cam.pitch ?? 0);
+        obj.rotation.x = 0;
+        obj.rotation.z = THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH);
         updateCameraFrustum(
           obj as THREE.Group,
           cam,
           camPos,
           camH + camMountHeight,
-          THREE.MathUtils.degToRad(cam.pitch ?? 0),
+          THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH),
           -THREE.MathUtils.degToRad(cam.rotation),
           cam.hFov ?? cam.fov,
           cam.range,
           state
         );
         needsRender = true;
-      } else if (item.type === "image") {
+      } else if (item.type === "image" && obj) {
         const img = item as ImageItem;
         obj.position.set(img.x, h + 0.25, img.y);
-        obj.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        obj.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
         needsRender = true;
-      } else if (item.type === "label") {
+      } else if (item.type === "label" && obj) {
         obj.position.set(item.x, h + 8, item.y);
         needsRender = true;
       }
@@ -5124,6 +3833,17 @@ export default function SecurityPlanner() {
         if (prevB.color !== nextB.color) return true;
       }
 
+      if (nextItem.type === "label") {
+        const a = prevItem as LabelItem;
+        const b = nextItem as LabelItem;
+        if (a.text !== b.text || a.fontSize !== b.fontSize || a.color !== b.color) return true;
+      }
+      if (nextItem.type === "image") {
+        const a = prevItem as ImageItem;
+        const b = nextItem as ImageItem;
+        if (a.src !== b.src || a.width !== b.width || a.height !== b.height) return true;
+      }
+
       // For trees, geometry updates are handled via cache refresh (no full rebuild)
       if (nextItem.type === "tree") {
         // no-op
@@ -5139,6 +3859,7 @@ export default function SecurityPlanner() {
         const prevC = prevItem as CameraItem;
         const nextC = nextItem as CameraItem;
         if (prevC.range !== nextC.range || prevC.fov !== nextC.fov || prevC.hFov !== nextC.hFov) return true;
+        if (prevC.label !== nextC.label) return true; // label sprite
         if (prevC.color !== nextC.color) return true;
       }
     }
@@ -5354,7 +4075,7 @@ export default function SecurityPlanner() {
         const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
         const absHeight = camTerrainH + cameraMountHeight;
         const cameraHeight = cameraMountHeight;
-        const pitch = cameraItem.pitch ?? 0;
+        const pitch = cameraItem.pitch ?? DEFAULT_CAMERA_PITCH;
         const hFov = cameraItem.hFov ?? cameraItem.fov;
         const vFov = cameraItem.vFov ?? vFovFromH(hFov, cameraItem.aspect ?? 16 / 9);
         const range = cameraItem.range;
@@ -5454,9 +4175,10 @@ export default function SecurityPlanner() {
         // - Y rotation controls azimuth (horizontal direction)
         // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
         cameraGroup.position.set(cameraPos.x, absHeight, cameraPos.y);
-        cameraGroup.rotation.order = 'YXZ'; // Apply Y (azimuth) first, then X (pitch)
+        // The lens points along local +X, so pitch is a rotation about local Z applied after the yaw.
+        cameraGroup.rotation.order = 'YZX';
         cameraGroup.rotation.y = rotAngle;
-        cameraGroup.rotation.x = pitchRad; // Pitch: positive = look up, negative = look down
+        cameraGroup.rotation.z = pitchRad; // Pitch: positive = look up, negative = look down
         threeObjectCacheRef.current.set(cameraItem.id, cameraGroup); // Cache for position updates
         group.add(cameraGroup);
 
@@ -5505,7 +4227,7 @@ export default function SecurityPlanner() {
         const mesh = new THREE.Mesh(geometry, material);
         mesh.rotation.x = -Math.PI / 2;
         mesh.position.set(img.x, 0.25, img.y);
-        mesh.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        mesh.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
         mesh.userData.itemId = img.id;
         threeObjectCacheRef.current.set(img.id, mesh); // Cache for position updates
         group.add(mesh);
@@ -5585,10 +4307,51 @@ export default function SecurityPlanner() {
     state.renderer.render(state.scene, state.camera);
   };
 
+  // A copy offset from the original. Building-mounted cameras become free-standing so the copy
+  // doesn't sit exactly on top of the original; names get a "copy" suffix.
+  const pastedCopy = (item: CanvasItem): CanvasItem => {
+    const base = item.type === "camera" ? getCameraPlanPosition(item as CameraItem) : { x: item.x, y: item.y };
+    const copy: any = { ...structuredClone(item), id: generateId(), x: base.x + 15, y: base.y + 15 };
+    if (copy.type === "camera") {
+      copy.mount = { ...(copy.mount ?? {}), type: "free", buildingId: undefined };
+      copy.label = `${copy.label} copy`;
+    }
+    if (copy.type === "building") copy.importSource = undefined;
+    return copy as CanvasItem;
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+      const mod = event.ctrlKey || event.metaKey; // Cmd on Mac
+
+      // Single-key tools (shown in the toolbar tooltips)
+      if (!mod && !event.altKey) {
+        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label" };
+        const tool = toolKeys[event.key.toLowerCase()];
+        if (tool) {
+          event.preventDefault();
+          setMode(prev => (prev === tool && tool !== "select" ? "select" : tool));
+          return;
+        }
+        if (event.key === "2") { setViewMode("plan"); return; }
+        if (event.key === "3") { setViewMode("iso3d"); return; }
+        // Nudge the selection with the arrow keys (Shift = 10 ft)
+        if (selectedId && event.key.startsWith("Arrow")) {
+          const item = items.find(i => i.id === selectedId);
+          if (item && !(item.type === "camera" && (item as CameraItem).mount?.type === "building")) {
+            event.preventDefault();
+            const step = event.shiftKey ? 10 : 1;
+            const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
+            const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
+            const nextItems = items.map(i => (i.id === selectedId ? { ...i, x: i.x + dx, y: i.y + dy } : i));
+            setItems(nextItems);
+            saveHistory(nextItems);
+            return;
+          }
+        }
+      }
 
       if (event.key === " ") {
         setIsSpacePressed(true);
@@ -5598,15 +4361,11 @@ export default function SecurityPlanner() {
       if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
         event.preventDefault();
         deleteItem(selectedId);
-        // We really should save history here, but deleteItem might not be synchronous or triggers updateItem?
-        // Actually deleteItem usually calls setItems. We should save history AFTER or BEFORE?
-        // Let's rely on saveHistory being called on key actions or manually here?
-        // For keyboard delete, we should save history.
         setTimeout(() => saveHistory(), 50);
       }
 
       // Undo / Redo
-      if (event.ctrlKey) {
+      if (mod) {
         const key = event.key.toLowerCase();
         if (key === "z") {
           event.preventDefault();
@@ -5629,6 +4388,19 @@ export default function SecurityPlanner() {
           setShowGrid(prev => !prev);
         }
 
+        // Duplicate (Ctrl/Cmd+D)
+        if (key === "d" && selectedId) {
+          const item = items.find(i => i.id === selectedId);
+          if (item) {
+            event.preventDefault();
+            const copy = pastedCopy(item);
+            const nextItems = [...items, copy];
+            setItems(nextItems);
+            setSelectedId(copy.id);
+            saveHistory(nextItems);
+          }
+        }
+
         // Copy (Ctrl+C)
         if (key === "c") {
           if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
@@ -5646,7 +4418,7 @@ export default function SecurityPlanner() {
           if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
           const cb = clipboardRef.current;
           if (cb) {
-            const newItem = { ...cb, id: generateId(), x: cb.x + 20, y: cb.y + 20 };
+            const newItem = pastedCopy(cb);
             setItems(prev => [...prev, newItem]);
             setSelectedId(newItem.id);
             setTimeout(() => saveHistory(), 50);
@@ -5674,7 +4446,7 @@ export default function SecurityPlanner() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [items, selectedId, handleSaveProject]);
+  }, [items, selectedId, handleSaveProject, viewMode]);
 
 
   // Effect to handle environment background updates (HDRI / Panorama)
@@ -5731,11 +4503,10 @@ export default function SecurityPlanner() {
   }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
-  const itemsRef = useRef(items);
+  const itemsRef = projectRef("items");
   const modeRef = useRef(mode);
   const selectedIdRef = useRef(selectedId);
 
-  useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
@@ -6275,18 +5046,17 @@ export default function SecurityPlanner() {
                   ...common,
                   type: "camera",
                   rotation: 45,
-                  label: "Camera",
+                  label: `Camera ${itemsRef.current.filter(i => i.type === "camera").length + 1}`,
                   description: "",
-                  fov: 109,
-                  hFov: 109,
-                  vFov: vFovFromH(109, 16 / 9),
-                  pitch: -15,
-                  height: 60,
+                  fov: DEFAULT_CAMERA_HFOV,
+                  hFov: DEFAULT_CAMERA_HFOV,
+                  vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
+                  pitch: DEFAULT_CAMERA_PITCH,
+                  height: DEFAULT_CAMERA_HEIGHT_FT,
                   aspect: 16 / 9,
-                  mount: { type: "free", edgeT: 0.5, height: 60 },
-                  range: 150,
-                  color: COLORS.camera[0],
-                  labelOffset: { x: 0, y: 30 },
+                  mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
+                  range: DEFAULT_CAMERA_RANGE_FT,
+                  color: COLORS.camera[itemsRef.current.filter(i => i.type === "camera").length % COLORS.camera.length],
                   connectorDashSize: 3
                 } as CameraItem;
                 break;
@@ -6294,19 +5064,19 @@ export default function SecurityPlanner() {
                 newItem = {
                   ...common,
                   type: "building",
-                  width: 100,
-                  height: 80,
-                  wallHeight: 60,
+                  width: DEFAULT_BUILDING.width,
+                  height: DEFAULT_BUILDING.depth,
+                  wallHeight: DEFAULT_BUILDING.wallHeight,
                   label: "Building",
                   color: COLORS.building[0],
-                  points: rectanglePoints(100, 80)
+                  points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
                 } as BuildingItem;
                 break;
               case "add-tree":
                 newItem = {
                   ...common,
                   type: "tree",
-                  radius: 25,
+                  radius: 12,
                   color: COLORS.tree[0]
                 } as TreeItem;
                 break;
@@ -6495,10 +5265,10 @@ export default function SecurityPlanner() {
               // Commit changes
               if (dragState.interactionType === "resize-height" && dragState.currentHeight !== undefined) {
                 updateItem(dragState.itemId, { wallHeight: dragState.currentHeight });
-                saveHistory();
+                setTimeout(() => saveHistory(), 50);
               } else if (dragState.interactionType === "move-label" && dragState.currentLabelOffset) {
                 updateItem(dragState.itemId, { labelOffset: dragState.currentLabelOffset });
-                saveHistory();
+                setTimeout(() => saveHistory(), 50);
               } else if (dragState.interactionType !== "resize-height") {
                 // Commit Position
                 const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
@@ -6507,10 +5277,28 @@ export default function SecurityPlanner() {
                   const finalY = cachedObj.position.z;
                   const dragItemId = dragState.itemId;
                   setItems(prev => prev.map(item => {
-                    if (item.id === dragItemId) {
-                      return { ...item, x: finalX, y: finalY };
+                    if (item.id !== dragItemId) return item;
+                    if (item.type === "camera") {
+                      // Cameras re-attach to a wall if dropped next to one; otherwise they become free-standing.
+                      const cam = item as CameraItem;
+                      const edge = findNearestBuildingEdge({ x: finalX, y: finalY }, prev);
+                      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
+                        const building = prev.find(b => b.id === edge.buildingId) as BuildingItem | undefined;
+                        const wasMounted = cam.mount?.type === "building";
+                        const height = wasMounted ? cam.mount?.height ?? mountHeightForBuilding(building) : mountHeightForBuilding(building);
+                        return {
+                          ...cam,
+                          x: edge.point.x,
+                          y: edge.point.y,
+                          rotation: wasMounted && cam.mount?.buildingId === edge.buildingId ? cam.rotation : edge.rotation,
+                          mount: { type: "building", buildingId: edge.buildingId, edgeIndex: edge.edgeIndex, edgeT: edge.edgeT, height },
+                          height
+                        } as CameraItem;
+                      }
+                      const height = cam.mount?.type === "building" ? DEFAULT_CAMERA_HEIGHT_FT : cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+                      return { ...cam, x: finalX, y: finalY, mount: { type: "free", edgeT: 0.5, height }, height } as CameraItem;
                     }
-                    return item;
+                    return { ...item, x: finalX, y: finalY };
                   }));
                   setTimeout(() => saveHistory(), 50);
                 }
@@ -6598,7 +5386,15 @@ export default function SecurityPlanner() {
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", resize);
+      // Free everything on the GPU and release the WebGL context (browsers cap live contexts at ~16).
+      const sceneToFree = threeStateRef.current?.scene;
+      if (sceneToFree) {
+        disposeObjectDeep(sceneToFree);
+        if (sceneToFree.environment) sceneToFree.environment.dispose();
+        if (sceneToFree.background instanceof THREE.Texture) sceneToFree.background.dispose();
+      }
       renderer.dispose();
+      renderer.forceContextLoss();
       container.removeChild(renderer.domElement);
       threeStateRef.current = null;
       // Clear object cache on cleanup
@@ -6634,7 +5430,7 @@ export default function SecurityPlanner() {
       }
     });
     return () => window.cancelAnimationFrame(id);
-  }, [frustumSettings, selectedId, viewMode]);
+  }, [frustumSettings, selectedId, viewMode, showDoriZones]);
 
   useEffect(() => {
     if (viewMode !== "iso3d") return;
@@ -6688,201 +5484,40 @@ export default function SecurityPlanner() {
     }
   }, [backgroundImg]);
 
-  // Camera view preview - TRUE perspective view from the security camera using Three.js
+  // Camera view preview: what the selected camera sees, rendered with the same shared renderer
+  // as snapshots and the Monitor Wall (so all three match), throttled to one render per frame.
   useEffect(() => {
     if (!showCameraPreview || !cameraPreviewRef.current || !selectedId) return;
-
     const selectedItem = items.find(i => i.id === selectedId);
     const cam = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
     if (!cam) return;
-
-    const canvas = cameraPreviewRef.current;
-    const width = canvas.width;
-    const height = canvas.height;
-
-    const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
-    const camHeight = cam.mount?.height ?? cam.height ?? 10;
-    const hFov = cam.hFov ?? cam.fov;
-    const pitch = cam.pitch ?? -15;
-    const range = cam.range;
-    const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
-
-    // Calculate vertical FOV from horizontal FOV and aspect ratio to match 2D cone
-    const aspect = width / height;
-    const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
-    const vFov = THREE.MathUtils.radToDeg(vFovRad);
-
-    // Create mini Three.js scene
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#09090b');
-    scene.fog = new THREE.Fog('#09090b', range * 0.3, range * 1.2);
-
-    // Perspective camera at security camera position (Terrain Adjusted)
-    const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 1, range * 2);
-    perspCam.position.set(camPos.x, camTerrainH + camHeight, camPos.y);
-
-    const pitchRad = THREE.MathUtils.degToRad(pitch);
-    const lookAt = new THREE.Vector3(
-      camPos.x + Math.cos(rotAngle) * 100,
-      camTerrainH + camHeight + Math.tan(pitchRad) * 100, // Look from correct height
-      camPos.y + Math.sin(rotAngle) * 100
-    );
-    perspCam.lookAt(lookAt);
-
-    // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
-    dirLight.position.set(100, 200, 50);
-    scene.add(dirLight);
-
-    // Ground with Terrain Height (match 3D terrain resolution)
-    const groundW = canvasSize.width;
-    const groundH = canvasSize.height;
-    const segW = Math.max(Math.round(canvasSize.width / gridSize), 1);
-    const segH = Math.max(Math.round(canvasSize.height / gridSize), 1);
-    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, segW, segH);
-
-    // Apply terrain height to ground geometry
-    const pos = groundGeo.attributes.position;
-    const centerX = canvasSize.width / 2;
-    const centerY = canvasSize.height / 2;
-
-    for (let i = 0; i < pos.count; i++) {
-      const lx = pos.getX(i);
-      const ly = pos.getY(i); // This is Z before rotation
-      // World coordinates relative to the ground placement
-      const wx = lx + centerX;
-      const wy = centerY - ly; // Fixed: Match Main Scene logic (Y+ is Up/Top, Z+ is Down)
-
-      const h = getGridHeight(wx, wy);
-      pos.setZ(i, h);
-    }
-    groundGeo.computeVertexNormals();
-
-    const ground = new THREE.Mesh(
-      groundGeo,
-      new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.9, metalness: 0.1, flatShading: true })
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.set(centerX, 0, centerY);
-    scene.add(ground);
-
-    // Background image (terrain deformed)
-    if (bgImageRef.current) {
-      const tex = new THREE.CanvasTexture(bgImageRef.current);
-      tex.colorSpace = THREE.SRGBColorSpace;
-
-      // Create subdivided geometry to deform with terrain
-      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
-      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
-      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
-
-      // Apply terrain heights to map geometry
-      const mapPosAttr = mapGeometry.attributes.position;
-      for (let i = 0; i < mapPosAttr.count; i++) {
-        const localX = mapPosAttr.getX(i);
-        const localY = mapPosAttr.getY(i);
-
-        // Transform to world coords
-        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
-        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
-
-        const h = getGridHeight(worldX, worldZ);
-        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET); // Slight offset above terrain
-      }
-      mapGeometry.computeVertexNormals();
-
-      const mapPlane = new THREE.Mesh(
-        mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 })
-      );
-      mapPlane.renderOrder = -1;
-      mapPlane.rotation.x = -Math.PI / 2;
-      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
-      scene.add(mapPlane);
-    }
-
-    // Add items (Terrain Aware)
-    items.forEach(item => {
-      const itemH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
-
-      if (item.type === "building") {
-        const bld = item as BuildingItem;
-        const baseH = getBuildingBaseHeight(bld);
-        const mesh = createBuildingMesh3d(bld, baseH);
-        scene.add(mesh);
-      }
-      if (item.type === "tree") {
-        const tree = create3dTree(item as TreeItem);
-        tree.position.set(item.x, itemH, item.y); // Ensure tree sits on terrain
-        scene.add(tree);
-      }
-      if (item.type === "parking") {
-        const car = create3dCar(item as ParkingItem);
-        car.position.set(item.x, itemH, item.y); // Car on terrain
-        scene.add(car);
+    const frame = window.requestAnimationFrame(() => {
+      const canvas = cameraPreviewRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      try {
+        const view = renderCameraViewToCanvas(cam, Math.max(320, canvas.width));
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(view, 0, 0, canvas.width, canvas.height);
+      } catch (err) {
+        console.error("Camera preview failed", err);
       }
     });
+    return () => window.cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg, terrainHeights, gridSize, backgroundImg]);
 
-    // Render
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setSize(width, height);
 
-    // Apply PBR Lighting (RoomEnvironment) to fix black models in preview
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
-
-    renderer.render(scene, perspCam);
-
-    // Load background if present
-    if (sceneBackgroundImg) {
-      new THREE.TextureLoader().load(sceneBackgroundImg, (texture) => {
-        scene.background = texture;
-        renderer.render(scene, perspCam);
-      });
-    }
-
-    // 2D overlay - separate div would be better as WebGL + 2D context on same canvas often fails
-    // But keeping logic for now
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(0, 0, width, 26);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 11px sans-serif';
-      ctx.fillText(`📷 ${cam.label}`, 8, 11);
-      ctx.font = '10px sans-serif';
-      ctx.fillStyle = '#94a3b8';
-      ctx.fillText(`FOV: ${hFov.toFixed(0)}°×${vFov.toFixed(0)}° | Pitch: ${pitch}° | Range: ${range}`, 8, 23);
-      ctx.fillStyle = '#ef4444';
-      ctx.beginPath();
-      ctx.arc(width - 12, 13, 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#fff';
-      ctx.font = '9px sans-serif';
-      ctx.fillText('LIVE', width - 42, 16);
-    }
-
-    return () => {
-      pmremGenerator.dispose(); // Cleanup
-      renderer.dispose();
-
-      scene.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
-          if (obj.geometry) obj.geometry.dispose();
-          if (obj.material) {
-            if (Array.isArray(obj.material)) {
-              obj.material.forEach((m: THREE.Material) => m.dispose());
-            } else {
-              (obj.material as THREE.Material).dispose();
-            }
-          }
-        }
-      });
-    };
-  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg]);
-
+  // React attaches wheel listeners as passive, so preventDefault there can't stop the page scrolling
+  // while zooming the plan; block it with a native non-passive listener.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const block = (event: WheelEvent) => event.preventDefault();
+    el.addEventListener("wheel", block, { passive: false });
+    return () => el.removeEventListener("wheel", block);
+  }, [viewMode]);
 
   // --- Event Handlers ---
 
@@ -6921,8 +5556,8 @@ export default function SecurityPlanner() {
     setSelectedId(id);
     const pos = getSvgMousePos(e);
 
-    // Check for Edge Click on Building (Insert Vertex)
-    if (type === "move" && selectedId === id && item.type === "building") {
+    // Shift+click on an edge of the selected building inserts a corner (a plain press always moves it).
+    if (type === "move" && e.shiftKey && selectedId === id && item.type === "building") {
       const building = item as BuildingItem;
       const worldPoints = getBuildingEdgePointsWorld(building);
       for (let i = 0; i < worldPoints.length; i++) {
@@ -6935,7 +5570,7 @@ export default function SecurityPlanner() {
         const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
         const dist = Math.sqrt((pos.x - proj.x) ** 2 + (pos.y - proj.y) ** 2);
 
-        if (dist < 8) {
+        if (dist < 10 * planUi) {
           handleInsertBuildingVertexAtPoint(id, proj);
           setTimeout(() => saveHistory(), 50);
           return;
@@ -6991,6 +5626,7 @@ export default function SecurityPlanner() {
     {
       const hoverPos = getSvgMousePos(e);
       updateElevationReadout(hoverPos.x, hoverPos.y);
+      updateCameraReadout(hoverPos.x, hoverPos.y);
       const brushCursor = planBrushCursorRef.current;
       if (brushCursor) {
         brushCursor.setAttribute("cx", `${hoverPos.x}`);
@@ -7002,7 +5638,7 @@ export default function SecurityPlanner() {
     if (mode === "add-camera" && viewMode === "plan") {
       const pos = getSvgMousePos(e);
       const edge = findNearestBuildingEdge(pos);
-      if (edge && edge.distance < 100) {
+      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
         setCameraPlacementPreview({
           buildingId: edge.buildingId,
           edgeIndex: edge.edgeIndex,
@@ -7027,8 +5663,10 @@ export default function SecurityPlanner() {
       return;
     }
     if (isPanning) {
-      const dx = e.clientX - panStart.x;
-      const dy = e.clientY - panStart.y;
+      // panOffset is in SVG viewBox units; convert the screen-pixel drag so the plan follows the cursor.
+      const k = svgRef.current?.getScreenCTM()?.a || 1;
+      const dx = (e.clientX - panStart.x) / k;
+      const dy = (e.clientY - panStart.y) / k;
       setPanOffset({ x: panStart.panX + dx, y: panStart.panY + dy });
       return;
     }
@@ -7076,7 +5714,8 @@ export default function SecurityPlanner() {
       const dx = pos.x - interactionState.startMouse.x;
       const dy = pos.y - interactionState.startMouse.y;
 
-      const startOffset = interactionState.startVal.labelOffset || { x: 0, y: 30 };
+      const defaultOffset = defaultCameraLabelOffset(interactionState.startVal.rotation ?? 0);
+      const startOffset = interactionState.startVal.labelOffset || { x: defaultOffset.x * planUi, y: defaultOffset.y * planUi };
 
       updateItem(interactionState.itemId, {
         labelOffset: {
@@ -7099,7 +5738,11 @@ export default function SecurityPlanner() {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
       const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-      updateItem(interactionState.itemId, { rotation: angle + 90 });
+      // A camera's aim handle sits in the direction it faces; other items' handles sit above them (-90°).
+      let rotation = item.type === "camera" ? angle : angle + 90;
+      if (e.shiftKey) rotation = Math.round(rotation / 15) * 15;
+      rotation = ((rotation % 360) + 360) % 360;
+      updateItem(interactionState.itemId, { rotation });
     } else if (interactionState.type === "fov" && item.type === "camera") {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
@@ -7117,7 +5760,7 @@ export default function SecurityPlanner() {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
       const dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-      updateItem(interactionState.itemId, { range: Math.max(dist, 50) });
+      updateItem(interactionState.itemId, { range: Math.max(dist, 5) });
     } else if (interactionState.type === "vertex" && item.type === "building") {
       const local = toLocalPoint(pos, item);
       const points = getBuildingPoints(item);
@@ -7163,13 +5806,27 @@ export default function SecurityPlanner() {
   // Initial history save & setup
   useEffect(() => {
     THREE.Cache.enabled = true;
-    saveHistory();
+    // Seed after the autosaved project (loaded in an earlier mount effect) has rendered,
+    // so the first Undo doesn't jump back to an empty canvas.
+    resetHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A press that turned into a drag (pan, move, resize) must not also count as a click on the background.
+  const planPressRef = useRef<{ x: number; y: number } | null>(null);
+  const wasPlanDrag = (e: React.MouseEvent) => {
+    const start = planPressRef.current;
+    return !!start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4;
+  };
+
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
+    if (wasPlanDrag(e)) return;
     if (isTerrainMode) return;
+    if (mode === "trace-building") {
+      traceRoofAt(getSvgMousePos(e));
+      return;
+    }
     if (isPanning) return;
     if (vertexInsertMode && selectedId) {
       const selectedItem = items.find(item => item.id === selectedId);
@@ -7278,8 +5935,73 @@ export default function SecurityPlanner() {
 
   // --- Render Helpers ---
 
+  // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
+  // regardless of how many feet the site spans or how far you zoom.
+  const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
+
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
+
+  // One-line hint for the active tool (status-bar style).
+  const toolHint = (() => {
+    if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
+    if (vertexInsertMode) return "Click on an edge to add a corner";
+    switch (mode) {
+      case "add-camera": return "Click to place a camera · click next to a wall to mount it there · Esc to cancel";
+      case "add-building": return "Click to place a building · then drag its corners to match the roof";
+      case "trace-building": return backgroundImg ? "Click a roof on the map to trace it into a 3D building · Esc when done" : "Import your site first — this tool traces roofs from the satellite map";
+      case "add-tree": return "Click to place a tree";
+      case "add-parking": return "Click to place a vehicle";
+      case "add-label": return "Click to add a text label";
+      default:
+        if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
+        if (selectedItem?.type === "building") return "Drag to move · drag corners to reshape · Shift+click an edge to add a corner · drag the label to move it";
+        return null;
+    }
+  })();
+
+  // Guided workflow (header steps): what's done, and where each step takes you.
+  const workflowStepsDone: Record<WorkflowStepId, boolean> = {
+    site: !!backgroundImg || !!siteLocation,
+    buildings: items.some(i => i.type === "building"),
+    cameras: items.some(i => i.type === "camera"),
+    review: reviewVisited,
+    report: exportList.length > 0
+  };
+  const handleWorkflowStep = (step: WorkflowStepId) => {
+    switch (step) {
+      case "site":
+        openElevationDialog();
+        break;
+      case "buildings":
+        setViewMode("plan");
+        setMode("add-building");
+        break;
+      case "cameras":
+        setViewMode("plan");
+        setMode("add-camera");
+        break;
+      case "review":
+        setReviewVisited(true);
+        setMode("select");
+        setViewMode("iso3d");
+        break;
+      case "report":
+        setShowExportPanel(true);
+        break;
+    }
+  };
+
+  // Changes whenever anything visible in a camera view changes (used to refresh Monitor Wall tiles).
+  const nvrSceneKey = useMemo(
+    () => JSON.stringify([
+      items.filter(i => i.type !== "label").map(i => [i.id, i.x, i.y, i.rotation, (i as any).wallHeight, (i as any).points, (i as any).height, (i as any).radius]),
+      Object.keys(terrainHeights).length, terrainStats.min, terrainStats.max,
+      backgroundImg ? backgroundImg.length : 0, bgSettings, sceneBackgroundImg ? sceneBackgroundImg.length : 0, gridSize
+    ]),
+    [items, terrainHeights, terrainStats.min, terrainStats.max, backgroundImg, bgSettings, sceneBackgroundImg, gridSize]
+  );
+
   const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
   const cameraAspect = getCameraAspectValue(selectedCamera);
   const cameraPreviewWidth = 320;
@@ -7334,8 +6056,16 @@ export default function SecurityPlanner() {
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
       {exportNotice && (
-        <div className={`absolute top-20 right-4 z-50 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-top-2`}>
-          {exportNotice.message}
+        <div role="status" className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
+          <span>{exportNotice.message}</span>
+          {exportNotice.action && (
+            <button
+              onClick={() => { exportNotice.action?.run(); setExportNotice(null); }}
+              className="px-2.5 py-0.5 rounded-full bg-white/15 hover:bg-white/25 text-xs font-bold uppercase tracking-wide"
+            >
+              {exportNotice.action.label}
+            </button>
+          )}
         </div>
       )}
       {showExportPanel && (
@@ -7378,8 +6108,8 @@ export default function SecurityPlanner() {
                 </div>
                 {exportList.length === 0 ? (
                   <div className="bg-slate-50 rounded-lg p-4 text-center text-slate-400 text-sm">
-                    <p>No views added yet</p>
-                    <p className="text-xs mt-1">Use "Add to Report" buttons while working</p>
+                    <p>No views picked yet</p>
+                    <p className="text-xs mt-1">"Report PDF" will include the site plan, the camera schedule and every camera's view automatically.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
@@ -7506,11 +6236,8 @@ export default function SecurityPlanner() {
                   handleExportReportPdf();
                   setShowExportPanel(false);
                 }}
-                disabled={exportList.length === 0}
-                className={`px-3 py-2 text-sm font-semibold rounded-lg ${exportList.length === 0
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-                  }`}
+                className="px-3 py-2 text-sm font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
+                title={exportList.length === 0 ? "Builds a full report: site plan, camera schedule and every camera's view" : "Report with your selected views and the camera schedule"}
               >
                 Report PDF
               </button>
@@ -7538,6 +6265,9 @@ export default function SecurityPlanner() {
                   selection={siteBounds}
                   drawing={pickerDrawing}
                   onDrawingChange={setPickerDrawing}
+                  selectViewSignal={selectViewSignal}
+                  candidates={importBuildings ? buildingCandidates : []}
+                  onToggleCandidate={toggleBuildingCandidate}
                   onSelect={(bounds) => {
                     setSiteBounds(bounds);
                     const c = selectionFromBounds(bounds, "");
@@ -7548,15 +6278,53 @@ export default function SecurityPlanner() {
 
                 <form
                   className="absolute top-3 left-14 right-3 z-[1000] flex gap-2"
-                  onSubmit={(e) => { e.preventDefault(); if (!loading && elevationQuery.trim()) searchSiteLocation(); }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (loading) return;
+                    if (showPlaceSuggestions && activeSuggestion >= 0 && placeSuggestions[activeSuggestion]) {
+                      searchSiteLocation(placeSuggestions[activeSuggestion]);
+                    } else if (elevationQuery.trim()) {
+                      searchSiteLocation();
+                    }
+                  }}
                 >
-                  <input
-                    autoFocus
-                    value={elevationQuery}
-                    onChange={(e) => setElevationQuery(e.target.value)}
-                    placeholder="Search an address, place, or paste coordinates / Google Maps link"
-                    className="flex-1 min-w-0 rounded-xl border border-white/10 bg-zinc-900/95 px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
-                  />
+                  <div className="relative flex-1 min-w-0">
+                    <input
+                      autoFocus
+                      value={elevationQuery}
+                      onChange={(e) => { setElevationQuery(e.target.value); setShowPlaceSuggestions(true); }}
+                      onFocus={() => setShowPlaceSuggestions(true)}
+                      onBlur={() => window.setTimeout(() => setShowPlaceSuggestions(false), 150)}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowDown") { e.preventDefault(); setActiveSuggestion(i => Math.min(i + 1, placeSuggestions.length - 1)); }
+                        else if (e.key === "ArrowUp") { e.preventDefault(); setActiveSuggestion(i => Math.max(i - 1, -1)); }
+                        else if (e.key === "Escape") { setShowPlaceSuggestions(false); }
+                      }}
+                      placeholder="Search your address — e.g. 123 Main St, Springfield IL"
+                      aria-label="Search address"
+                      autoComplete="off"
+                      className="w-full rounded-xl border border-white/10 bg-zinc-900/95 px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
+                    />
+                    {showPlaceSuggestions && placeSuggestions.length > 0 && (
+                      <ul className="absolute left-0 right-0 top-full mt-1 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl overflow-hidden" role="listbox">
+                        {placeSuggestions.map((sug, i) => (
+                          <li key={`${sug.text}-${i}`}>
+                            <button
+                              type="button"
+                              onMouseDown={(e) => { e.preventDefault(); searchSiteLocation(sug); }}
+                              className={`w-full text-left px-4 py-2 flex items-start gap-2.5 ${i === activeSuggestion ? "bg-emerald-500/15" : "hover:bg-white/5"}`}
+                            >
+                              <MapPin className="w-4 h-4 mt-0.5 shrink-0 text-emerald-400" />
+                              <span className="min-w-0">
+                                <span className="block text-sm text-slate-100 truncate">{sug.text}</span>
+                                {sug.detail && <span className="block text-[11px] text-slate-400 truncate">{sug.detail}</span>}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                   <button type="submit" disabled={loading || !elevationQuery.trim()} className="px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-semibold text-white shadow-lg">
                     Search
                   </button>
@@ -7565,28 +6333,32 @@ export default function SecurityPlanner() {
                   </button>
                 </form>
 
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl">
-                  <button
-                    type="button"
-                    onClick={() => setPickerDrawing(false)}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${!pickerDrawing ? "bg-white/10 text-white" : "text-slate-400 hover:text-white"}`}
-                  >
-                    <Hand className="w-4 h-4" /> Move map
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPickerDrawing(true)}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${pickerDrawing ? "bg-emerald-600 text-white" : "text-slate-300 hover:text-white"}`}
-                  >
-                    <SquareDashed className="w-4 h-4" /> {siteBounds ? "Redraw area" : "Draw area"}
-                  </button>
-                </div>
-
-                {pickerDrawing && (
-                  <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1000] rounded-full bg-amber-500 px-4 py-1.5 text-xs font-semibold text-zinc-950 shadow-lg pointer-events-none">
-                    Click and drag over the map to select your site
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex flex-col items-center gap-2">
+                  <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-[11px] text-slate-300 shadow pointer-events-none whitespace-nowrap">
+                    {pickerDrawing
+                      ? "Drag across the map to draw your area"
+                      : siteBounds
+                        ? "Drag the corners to resize · drag ✥ to move · click buildings to keep/remove"
+                        : "Drag to move the map · scroll to zoom · Shift+drag to draw an area"}
                   </div>
-                )}
+                  <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => setPickerDrawing(v => !v)}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${pickerDrawing ? "bg-amber-500 text-zinc-950" : "text-slate-200 hover:bg-white/10"}`}
+                    >
+                      <SquareDashed className="w-4 h-4" /> {pickerDrawing ? "Cancel drawing" : siteBounds ? "Draw new area" : "Draw area"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setPickerDrawing(false); setSelectViewSignal(n => n + 1); }}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-white/10"
+                      title="Select the area you can see on the map"
+                    >
+                      <Maximize className="w-4 h-4" /> Select this view
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Side panel */}
@@ -7610,8 +6382,8 @@ export default function SecurityPlanner() {
                 <div className="flex-1 overflow-y-auto custom-scrollbar px-5 pb-5 space-y-5">
                   <ol className="space-y-2.5 text-xs">
                     <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(1)}>1</span>Find your property (search or zoom)</li>
-                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(2)}>2</span>Drag a rectangle around it</li>
-                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(3)}>3</span>Click Import</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(2)}>2</span>Draw or adjust the area around it</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(3)}>3</span>Check the buildings, then Import</li>
                   </ol>
 
                   <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
@@ -7658,13 +6430,56 @@ export default function SecurityPlanner() {
                     </p>
                   </div>
 
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input type="checkbox" checked={importBuildings} onChange={e => setImportBuildings(e.target.checked)} className="mt-0.5 accent-emerald-500" />
-                    <span className="text-xs text-slate-300">
-                      Create 3D buildings
-                      <span className="block text-[10px] text-slate-500">Footprints and heights from OpenStreetMap where mapped. You can edit or draw more after.</span>
-                    </span>
-                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-[10px] uppercase font-bold text-slate-400">3D buildings</span>
+                      <span className="flex items-center gap-2 text-xs text-slate-300">
+                        Include
+                        <input type="checkbox" checked={importBuildings} onChange={e => setImportBuildings(e.target.checked)} className="accent-emerald-500" />
+                      </span>
+                    </label>
+                    {importBuildings && (() => {
+                      const mapped = buildingCandidates.filter(c => c.source === "osm");
+                      const detected = buildingCandidates.filter(c => c.source === "detected");
+                      const kept = buildingCandidates.filter(c => c.selected).length;
+                      if (!siteBounds) {
+                        return <p className="text-[11px] text-slate-500">Select an area and the buildings in it will appear on the map for you to confirm.</p>;
+                      }
+                      if (buildingScan.state === "loading") {
+                        return <div className="flex items-center gap-2 text-xs text-slate-300"><LoaderCircle className="w-3.5 h-3.5 animate-spin" /> Looking for buildings…</div>;
+                      }
+                      if (buildingScan.state === "error") {
+                        return <p className="text-[11px] text-amber-300/90">{buildingScan.message}</p>;
+                      }
+                      if (buildingCandidates.length === 0) {
+                        return <p className="text-[11px] text-slate-400">No buildings found here. You can draw them over the satellite image after importing.</p>;
+                      }
+                      return (
+                        <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 space-y-2">
+                          <div className="text-sm font-semibold text-slate-100">{kept} of {buildingCandidates.length} buildings will be added</div>
+                          <div className="space-y-1 text-[11px]">
+                            {mapped.length > 0 && (
+                              <div className="flex items-center gap-2 text-slate-300">
+                                <span className="w-3 h-3 rounded-sm bg-green-500/60 border border-green-400" />
+                                {mapped.length} mapped (OpenStreetMap)
+                              </div>
+                            )}
+                            {detected.length > 0 && (
+                              <div className="flex items-center gap-2 text-slate-300">
+                                <span className="w-3 h-3 rounded-sm bg-amber-500/60 border border-amber-400" />
+                                {detected.length} detected from aerial imagery — please check
+                              </div>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-400">Click a building on the map to remove it (or add it back).</p>
+                          <div className="flex gap-1.5">
+                            <button type="button" onClick={() => setAllBuildingCandidates(true)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Keep all</button>
+                            <button type="button" onClick={() => setAllBuildingCandidates(false)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Remove all</button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
 
                   <div className="space-y-1.5">
                     <label className="text-[10px] uppercase font-bold text-slate-400">Terrain height</label>
@@ -7829,21 +6644,24 @@ export default function SecurityPlanner() {
       <div className="absolute left-4 top-4 bottom-4 w-14 flex flex-col items-center py-4 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl z-50 gap-3 ring-1 ring-white/5">
         <div className="flex flex-col gap-2 w-full px-2">
           {[
-            { mode: "select", icon: Move, label: "Select / Move" },
-            { mode: "add-camera", icon: Camera, label: "Place Camera" },
-            { mode: "add-building", icon: Square, label: "Draw Building" },
-            { mode: "add-tree", icon: Trees, label: "Place Tree" },
-            { mode: "add-parking", icon: Car, label: "Vehicles" },
-            { mode: "add-label", icon: Type, label: "Text" }
+            { mode: "select", icon: Move, label: "Select / Move", key: "V" },
+            { mode: "add-camera", icon: Camera, label: "Place Camera", key: "C" },
+            { mode: "add-building", icon: Square, label: "Draw Building", key: "B" },
+            { mode: "trace-building", icon: WandSparkles, label: "Auto-trace a roof from the map", key: "R" },
+            { mode: "add-tree", icon: Trees, label: "Place Tree", key: "T" },
+            { mode: "add-parking", icon: Car, label: "Vehicles", key: "P" },
+            { mode: "add-label", icon: Type, label: "Text", key: "L" }
           ].map(tool => (
             <button
               key={tool.mode}
               onClick={() => mode === tool.mode ? setMode("select") : setMode(tool.mode as any)}
-              title={tool.label}
-              className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${mode === tool.mode ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"
+              title={`${tool.label} (${tool.key})`}
+              aria-label={tool.label}
+              className={`relative w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${mode === tool.mode ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"
                 }`}
             >
               <tool.icon className="w-5 h-5" />
+              <span className="absolute bottom-0.5 right-1 text-[8px] font-bold opacity-50">{tool.key}</span>
             </button>
           ))}
         </div>
@@ -7851,13 +6669,6 @@ export default function SecurityPlanner() {
         <div className="w-8 h-px bg-white/10 my-1"></div>
 
         <div className="flex flex-col gap-2 w-full px-2">
-          <button
-            onClick={() => setViewMode(viewMode === "plan" ? "iso3d" : "plan")}
-            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${viewMode === "iso3d" ? "bg-indigo-600 text-white shadow-lg" : "text-slate-400 hover:text-white hover:bg-white/10"}`}
-            title="Switch 2D / 3D"
-          >
-            <Layers className="w-5 h-5" />
-          </button>
 
 
 
@@ -8291,104 +7102,40 @@ export default function SecurityPlanner() {
         </div>
 
         <div className="mt-auto flex flex-col gap-2 w-full px-2">
-          <button onClick={handleUndo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all" title="Undo">
+          <button onClick={handleUndo} disabled={!canUndo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:hover:bg-transparent" title="Undo (Ctrl/⌘+Z)">
             <Undo className="w-5 h-5" />
           </button>
-          <button onClick={handleRedo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all" title="Redo">
+          <button onClick={handleRedo} disabled={!canRedo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:hover:bg-transparent" title="Redo (Ctrl/⌘+Shift+Z)">
             <Redo className="w-5 h-5" />
           </button>
         </div>
       </div>
 
-      {/* --- Top Header Actions --- */}
-      <div className={`absolute top-4 left-24 right-4 ${rightPanelOffset} h-14 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center px-4 justify-between ring-1 ring-white/5 transition-all duration-300`}>
-        <div className="flex items-center gap-4">
-          <h1 className="text-lg font-bold text-slate-200 tracking-tight flex items-center gap-2 whitespace-nowrap min-w-0 max-w-[16rem] truncate" title={projectName}>
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
-              <Camera className="w-5 h-5" />
-            </div>
-            {projectName}
-          </h1>
-          <div className="h-6 w-px bg-white/10 mx-2"></div>
+      {/* --- Hidden file inputs --- */}
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
+      <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
+      <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
+      <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
+      <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
 
-          <div className="flex items-center gap-1">
-            <button onClick={handleNewProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="New Plan">
-              <Plus className="w-5 h-5" />
-            </button>
-            <button onClick={() => projectInputRef.current?.click()} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Open Plan">
-              <FolderOpen className="w-5 h-5" />
-            </button>
-            <button onClick={handleSaveProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Save Plan">
-              <Save className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Inputs */}
-          <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
-          <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
-          <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
-          <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
-          <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
-
-          <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5" role="tablist" aria-label="View">
-            {([
-              { id: "plan", label: "2D" },
-              { id: "iso3d", label: "3D" }
-            ] as { id: ViewMode; label: string }[]).map(v => (
-              <button
-                key={v.id}
-                role="tab"
-                aria-selected={viewMode === v.id}
-                onClick={() => setViewMode(v.id)}
-                className={`px-3 py-1 rounded-md text-sm font-bold transition-all ${viewMode === v.id ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"}`}
-              >
-                {v.label}
-              </button>
-            ))}
-          </div>
-          <button title="Monitor Wall" onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
-            <LayoutGrid className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Monitor Wall</span>
-          </button>
-          <button
-            onClick={() => {
-              setRightPanelMode("project");
-              setIsRightPanelOpen(true);
-            }}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all"
-          >
-            <MapIcon className="w-4 h-4" />
-            <span>Settings</span>
-          </button>
-          <button
-            onClick={openElevationDialog}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/30 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition-all"
-            title="Download satellite imagery and real elevation for an address"
-          >
-            <Mountain className="w-4 h-4" />
-            <span className="whitespace-nowrap">Import Site</span>
-          </button>
-          <button title="Upload Base Map image" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
-            <Upload className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Base Map</span>
-          </button>
-          <button title="Add image overlay" onClick={() => elementImageInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
-            <ImageIcon className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Overlay</span>
-          </button>
-
-          <button onClick={addPlanToExportList} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all" title="Add Current View to Report">
-            <Plus className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Add to Report</span>
-          </button>
-          <button onClick={() => setShowExportPanel(true)} className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 transition-all">
-            <Download className="w-4 h-4" />
-            <span>Report</span>
-          </button>
-        </div>
-      </div>
+      {/* --- Top Header --- */}
+      <AppHeader
+        className={`absolute top-4 left-24 right-4 ${rightPanelOffset} transition-all duration-300`}
+        projectName={projectName}
+        onRename={setProjectName}
+        onNew={handleNewProject}
+        onOpen={() => projectInputRef.current?.click()}
+        onSave={handleSaveProject}
+        stepsDone={workflowStepsDone}
+        onStep={handleWorkflowStep}
+        viewMode={viewMode}
+        onViewMode={setViewMode}
+        onSettings={() => { setRightPanelMode("project"); setIsRightPanelOpen(true); }}
+        onUploadBaseMap={() => fileInputRef.current?.click()}
+        onAddOverlay={() => elementImageInputRef.current?.click()}
+        onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+        onOpenReport={() => setShowExportPanel(true)}
+      />
 
       {demAlignMode && viewMode !== "plan" && demPreview && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
@@ -8464,6 +7211,7 @@ export default function SecurityPlanner() {
             {viewMode === "plan" ? (
               <svg
                 ref={svgRef}
+                data-testid="plan"
                 width="100%"
                 height="100%"
                 viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
@@ -8472,13 +7220,17 @@ export default function SecurityPlanner() {
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
-                onMouseDownCapture={handlePlanTerrainMouseDown}
-                onMouseLeave={() => updateElevationReadout(-1, -1)}
+                onMouseDownCapture={e => { planPressRef.current = { x: e.clientX, y: e.clientY }; handlePlanTerrainMouseDown(e); }}
+                onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
                 xmlns="http://www.w3.org/2000/svg"
               >
                 <defs>
+                  <pattern id="blind-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="6" height="6" fill="rgba(239,68,68,0.08)" />
+                    <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(239,68,68,0.45)" strokeWidth="2" />
+                  </pattern>
                   <pattern id="smallGrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
                     <path
                       d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
@@ -8630,26 +7382,30 @@ export default function SecurityPlanner() {
                             <polygon
                               points={points.map(point => `${point.x},${point.y}`).join(" ")}
                               fill={building.color}
-                              fillOpacity={building.importSource ? 0.55 : 1}
+                              fillOpacity={backgroundImg ? 0.55 : 1}
                               stroke={isSelected ? "#059669" : building.importSource ? "#f8fafc" : "#334155"}
                               strokeWidth={isSelected ? 3 : building.importSource ? 1.5 : 1}
                             />
                             {!(building.importSource && !building.label?.trim()) && <g
                               transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
-                              onMouseDown={e => {
-                                e.stopPropagation();
-                                handleMouseDown(e, building.id, "move-label");
-                              }}
-                              className="cursor-move"
-                              style={{ pointerEvents: "auto" }}
+                              style={{ pointerEvents: "none" }}
                             >
-                              <rect
-                                x={-labelLayout.maxWidth / 2}
-                                y={labelStartY - lineHeight * 0.6}
-                                width={labelLayout.maxWidth}
-                                height={labelBoxHeight + lineHeight * 0.2}
-                                fill="transparent"
-                              />
+                              {isSelected && (
+                                // Small grip to move the label; the text itself never blocks dragging the building.
+                                <g
+                                  transform={`translate(${-Math.min(labelLayout.maxWidth / 2, Math.max(...labelLayout.lines.map(line => line.length * labelLayout.fontSize * 0.31)) + labelLayout.fontSize * 0.3) - 9 * planUi}, ${labelStartY + ((labelLayout.lines.length - 1) * lineHeight) / 2})`}
+                                  style={{ pointerEvents: "auto" }}
+                                  className="cursor-move"
+                                  onMouseDown={e => {
+                                    e.stopPropagation();
+                                    handleMouseDown(e, building.id, "move-label");
+                                  }}
+                                >
+                                  <title>Drag to move the label</title>
+                                  <circle r={6 * planUi} fill="#0f172a" fillOpacity={0.75} stroke="white" strokeWidth={1.2 * planUi} />
+                                  <path d={`M ${-3 * planUi} 0 H ${3 * planUi} M 0 ${-3 * planUi} V ${3 * planUi}`} stroke="white" strokeWidth={1.2 * planUi} />
+                                </g>
+                              )}
                               {labelLayout.lines.map((line, idx) => {
                                 const estimated = line.length * labelLayout.fontSize * 0.62;
                                 const clampWidth = estimated > labelLayout.maxWidth ? labelLayout.maxWidth : undefined;
@@ -8872,13 +7628,13 @@ export default function SecurityPlanner() {
                       const x2 = r * Math.cos(endAngle);
                       const y2 = r * Math.sin(endAngle);
 
-                      const handleDist = 40;
+                      const handleDist = 40 * planUi;
                       const rotRad = c.rotation * (Math.PI / 180);
                       const hx = handleDist * Math.cos(rotRad);
                       const hy = handleDist * Math.sin(rotRad);
 
-                      const labelX = c.labelOffset?.x ?? 0;
-                      const labelY = c.labelOffset?.y ?? 30;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
                       const dash = c.connectorDashSize || 3;
 
 
@@ -8955,7 +7711,38 @@ export default function SecurityPlanner() {
                               stroke={`url(#grad-blue-stroke-${c.id})`}
                               strokeWidth="1" pointerEvents="none"
                             />
-                            <g transform={`rotate(${c.rotation})`}>
+                            {showDoriZones && (() => {
+                              // What the camera can make out at each distance (DORI), clipped to what it can actually see.
+                              const a0 = ((c.rotation - hFov / 2) * Math.PI) / 180;
+                              const a1 = ((c.rotation + hFov / 2) * Math.PI) / 180;
+                              const large = hFov > 180 ? 1 : 0;
+                              const pt = (radius: number, a: number) => `${radius * Math.cos(a)} ${radius * Math.sin(a)}`;
+                              const ring = (rIn: number, rOut: number) =>
+                                rIn <= 0.01
+                                  ? `M 0 0 L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} Z`
+                                  : `M ${pt(rIn, a0)} L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} L ${pt(rIn, a1)} A ${rIn} ${rIn} 0 ${large} 0 ${pt(rIn, a0)} Z`;
+                              const zones = getDoriDistances(c);
+                              const camMount = c.mount?.height ?? c.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+                              const vf = c.vFov ?? vFovFromH(hFov, getCameraAspectValue(c));
+                              const blind = getGroundCoverage(camMount, c.pitch ?? DEFAULT_CAMERA_PITCH, vf).near;
+                              let inner = 0;
+                              return (
+                                <g clipPath={`url(#clip-${c.id})`} pointerEvents="none">
+                                  <clipPath id={`clip-${c.id}`}><path d={dClear} /></clipPath>
+                                  {zones.map(zone => {
+                                    const outer = Math.min(zone.distance, r);
+                                    if (outer <= inner) return null;
+                                    const d = ring(inner, outer);
+                                    inner = outer;
+                                    return <path key={zone.id} d={d} fill={zone.color} fillOpacity={0.16} stroke={zone.color} strokeOpacity={0.5} strokeWidth={0.75 / zoom} />;
+                                  })}
+                                  {Number.isFinite(blind) && blind > 0.5 && (
+                                    <path d={ring(0, Math.min(blind, r))} fill="url(#blind-hatch)" stroke="#ef4444" strokeOpacity={0.6} strokeWidth={0.75 / zoom} strokeDasharray={`${3 / zoom} ${3 / zoom}`} />
+                                  )}
+                                </g>
+                              );
+                            })()}
+                            <g transform={`rotate(${c.rotation}) scale(${planUi})`}>
                               <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
                               <circle cx="0" cy="0" r="4" fill={c.color} />
                               <rect x="10" y="-4" width="6" height="8" fill="#475569" />
@@ -8964,14 +7751,14 @@ export default function SecurityPlanner() {
 
                           {isSelected && (
                             <>
-                              <line x1="0" y1="0" x2={hx} y2={hy} stroke="white" strokeWidth="2" strokeDasharray="3,3" />
+                              <line x1="0" y1="0" x2={hx} y2={hy} stroke="white" strokeWidth={2 * planUi} strokeDasharray={`${3 * planUi},${3 * planUi}`} />
                               <circle
                                 cx={hx}
                                 cy={hy}
-                                r="7"
+                                r={7 * planUi}
                                 fill="#3b82f6"
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-crosshair"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "rotate")}
@@ -8980,10 +7767,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={x1}
                                 cy={y1}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ew-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "fov", "left")}
@@ -8991,10 +7778,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={x2}
                                 cy={y2}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ew-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "fov", "right")}
@@ -9003,10 +7790,10 @@ export default function SecurityPlanner() {
                               <circle
                                 cx={r * Math.cos(rotRad)}
                                 cy={r * Math.sin(rotRad)}
-                                r="6"
+                                r={6 * planUi}
                                 fill={c.color}
                                 stroke="white"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 className="cursor-ns-resize"
                                 style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
                                 onMouseDown={e => handleMouseDown(e, c.id, "range")}
@@ -9019,29 +7806,31 @@ export default function SecurityPlanner() {
                             onMouseDown={e => handleMouseDown(e, c.id, "move-label")}
                             className="cursor-move hover:opacity-80 transition-opacity"
                           >
-                            {(Math.abs(labelX) > 10 || Math.abs(labelY - 30) > 10) && (
+                            {Math.hypot(labelX, labelY) > 14 * planUi && (
                               <line
                                 x1={-labelX} y1={-labelY} x2="0" y2="0"
                                 stroke="white"
-                                strokeWidth="2"
-                                strokeDasharray="6,4"
+                                strokeWidth={1.5 * planUi}
+                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
                                 style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
                               />
                             )}
 
-                            <rect
-                              x="-50"
-                              y="-10"
-                              width="100"
-                              height="20"
-                              rx="4"
-                              fill="rgba(255,255,255,0.9)"
-                              stroke={isSelected ? "#3b82f6" : "transparent"}
-                              strokeWidth="1"
-                            />
-                            <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                              {c.label}
-                            </text>
+                            <g transform={`scale(${planUi})`}>
+                              <rect
+                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
+                                y="-10"
+                                width={Math.max(36, c.label.length * 6.2 + 16)}
+                                height="20"
+                                rx="6"
+                                fill="rgba(255,255,255,0.92)"
+                                stroke={isSelected ? "#3b82f6" : c.color}
+                                strokeWidth={isSelected ? 1.5 : 1}
+                              />
+                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
+                                {c.label}
+                              </text>
+                            </g>
                           </g>
                         </g>
                       );
@@ -9124,8 +7913,8 @@ export default function SecurityPlanner() {
                     if (item.type === "camera") {
                       const c = item as CameraItem;
                       const cameraPos = getCameraPlanPosition(c);
-                      const labelX = c.labelOffset?.x ?? 0;
-                      const labelY = c.labelOffset?.y ?? 30;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
                       const isSelected = selectedId === c.id;
 
                       return (
@@ -9140,29 +7929,31 @@ export default function SecurityPlanner() {
                             className="cursor-move hover:opacity-80 transition-opacity"
                             style={{ pointerEvents: 'auto' }}
                           >
-                            {(Math.abs(labelX) > 10 || Math.abs(labelY - 30) > 10) && (
+                            {Math.hypot(labelX, labelY) > 14 * planUi && (
                               <line
                                 x1={-labelX} y1={-labelY} x2="0" y2="0"
                                 stroke="white"
-                                strokeWidth="2"
-                                strokeDasharray="6,4"
+                                strokeWidth={1.5 * planUi}
+                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
                                 style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
                               />
                             )}
 
-                            <rect
-                              x="-50"
-                              y="-10"
-                              width="100"
-                              height="20"
-                              rx="4"
-                              fill="rgba(255,255,255,0.9)"
-                              stroke={isSelected ? "#3b82f6" : "transparent"}
-                              strokeWidth="1"
-                            />
-                            <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                              {c.label}
-                            </text>
+                            <g transform={`scale(${planUi})`}>
+                              <rect
+                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
+                                y="-10"
+                                width={Math.max(36, c.label.length * 6.2 + 16)}
+                                height="20"
+                                rx="6"
+                                fill="rgba(255,255,255,0.92)"
+                                stroke={isSelected ? "#3b82f6" : c.color}
+                                strokeWidth={isSelected ? 1.5 : 1}
+                              />
+                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
+                                {c.label}
+                              </text>
+                            </g>
                           </g>
                         </g>
                       );
@@ -9340,6 +8131,7 @@ export default function SecurityPlanner() {
                             <NVRCard
                               camera={cam as CameraItem}
                               renderFn={renderCameraViewToDataUrl}
+                              sceneKey={nvrSceneKey}
                               aspect={getCameraAspectValue(cam as CameraItem)}
                               onMaximize={() => {
                                 setSelectedId(cam.id);
@@ -9358,13 +8150,92 @@ export default function SecurityPlanner() {
               </div>
             )}
 
+            {viewMode === "plan" && toolHint && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+                <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
+                  {toolHint}
+                </div>
+              </div>
+            )}
+
+            {viewMode === "plan" && items.length === 0 && !backgroundImg && !isTerrainMode && mode === "select" && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                <div className="pointer-events-auto w-[26rem] max-w-[90%] rounded-2xl border border-white/10 bg-zinc-900/95 shadow-2xl p-6 space-y-4 text-center">
+                  <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center">
+                    <Mountain className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-100">Start your camera plan</h2>
+                    <p className="text-sm text-slate-400 mt-1">Bring in your property's satellite map, elevation and buildings, then place cameras and see exactly what each one covers.</p>
+                  </div>
+                  <button onClick={openElevationDialog} className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white">
+                    Find my property
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => fileInputRef.current?.click()} className="py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-200">
+                      Upload a map or floor plan
+                    </button>
+                    <button onClick={() => setMode("add-camera")} className="py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-200">
+                      Start on a blank grid
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {(viewMode === "plan" || viewMode === "iso3d") && (
               <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2 pointer-events-none">
+                <div
+                  ref={cameraReadoutRef}
+                  className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
+                  style={{ opacity: 0 }}
+                />
                 <div
                   ref={elevationReadoutRef}
                   className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
                   style={{ opacity: 0 }}
                 />
+                {viewMode === "plan" && items.some(i => i.type === "camera") && (
+                  <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto space-y-1.5">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer font-semibold text-slate-200">
+                      Coverage zones
+                      <input type="checkbox" checked={showDoriZones} onChange={e => setShowDoriZones(e.target.checked)} className="accent-emerald-500" />
+                    </label>
+                    {showDoriZones && (
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        {DORI_LEVELS.map(level => (
+                          <span key={level.id} className="flex items-center gap-1.5" title={level.hint}>
+                            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: level.color }} />
+                            {level.label}
+                          </span>
+                        ))}
+                        <span className="flex items-center gap-1.5 col-span-2" title="Too close/steep for the camera to see">
+                          <span className="w-2.5 h-2.5 rounded-sm border border-red-400" style={{ background: "repeating-linear-gradient(45deg, rgba(239,68,68,.5) 0 2px, transparent 2px 4px)" }} />
+                          Blind spot under camera
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {hasTerrain && (
+                  <div className="flex items-center gap-0.5 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto" role="group" aria-label="Elevation display">
+                    <Mountain className="w-3.5 h-3.5 text-slate-400 mx-1.5" />
+                    {([
+                      { id: "off", label: "Off" },
+                      { id: "contours", label: "Contours" },
+                      { id: "shaded", label: "Shaded" }
+                    ] as { id: ElevationOverlayMode; label: string }[]).map(opt => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setElevationOverlay(opt.id)}
+                        aria-pressed={elevationOverlay === opt.id}
+                        className={`px-2 py-1 rounded-md text-[11px] font-semibold ${elevationOverlay === opt.id ? "bg-emerald-600 text-white" : "text-slate-300 hover:bg-white/10"}`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {hasTerrain && elevationOverlay !== "off" && (
                   <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto">
                     <div className="flex items-center justify-between gap-4 mb-1 font-semibold text-slate-200">
@@ -9429,7 +8300,7 @@ export default function SecurityPlanner() {
             <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between border-t border-white/5">
               <div className="flex gap-3">
                 <span>H-FOV: {(selectedCamera.hFov ?? selectedCamera.fov).toFixed(0)}°</span>
-                <span>V-FOV: {(selectedCamera.vFov ?? 45).toFixed(0)}°</span>
+                <span>V-FOV: {(selectedCamera.vFov ?? vFovFromH(selectedCamera.hFov ?? selectedCamera.fov, getCameraAspectValue(selectedCamera))).toFixed(0)}°</span>
                 <span>Range: {selectedCamera.range}</span>
               </div>
               <button
@@ -9454,7 +8325,7 @@ export default function SecurityPlanner() {
               style={{ right: "1rem" }}
             >
               {(() => {
-                const cam = items.find(i => i.id === maximizedCamId);
+                const cam = items.find(i => i.id === maximizedCamId) as CameraItem | undefined;
                 if (!cam) return null;
                 return (
                   <div className="w-full h-full rounded-2xl overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl flex flex-col">
@@ -9470,7 +8341,7 @@ export default function SecurityPlanner() {
                     </div>
                     <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
                       <div className="w-full h-full relative">
-                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} aspect={getCameraAspectValue(cam as CameraItem)} isMaximized={true} />
+                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} sceneKey={nvrSceneKey} aspect={getCameraAspectValue(cam as CameraItem)} isMaximized={true} />
                       </div>
                     </div>
                   </div>
@@ -9558,10 +8429,10 @@ export default function SecurityPlanner() {
                 <div className={panelSection}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Width (ft)</label>
                       <input
                         type="number"
-                      value={(selectedItem as any).width}
+                      value={Math.round((selectedItem as any).width * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
                           ? updateBuildingSize(selectedItem.id, parseInt(e.target.value), (selectedItem as BuildingItem).height)
@@ -9572,11 +8443,11 @@ export default function SecurityPlanner() {
                     </div>
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase">
-                        {selectedItem.type === "parking" ? "Depth" : "Height"}
+                        {selectedItem.type === "parking" ? "Length (ft)" : "Depth (ft)"}
                       </label>
                       <input
                         type="number"
-                      value={(selectedItem as any).height}
+                      value={Math.round((selectedItem as any).height * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
                           ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, parseInt(e.target.value))
@@ -9667,7 +8538,7 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Height (Z)</span>
-                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} units</span>
+                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} ft</span>
                   </label>
                   <div className="flex gap-2">
                     <input
@@ -9695,14 +8566,14 @@ export default function SecurityPlanner() {
                 <div className={panelSection}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
-                    <span>{(selectedItem as BuildingItem).wallHeight ?? 60} units</span>
+                    <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>
                   </label>
                   <div className="flex gap-2">
                     <input
                       type="range"
-                      min="10"
-                      max="300"
-                      value={(selectedItem as BuildingItem).wallHeight ?? 60}
+                      min="6"
+                      max="150"
+                      value={(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight}
                       onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600 self-center"
                     />
@@ -9921,7 +8792,7 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Canopy Size</span>
-                      <span>{(selectedItem as TreeItem).radius}px</span>
+                      <span>{(selectedItem as TreeItem).radius * 2} ft across</span>
                     </label>
                     <input
                       type="range"
@@ -9936,7 +8807,21 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "camera" && (
-                <div className={panelSectionLoose}>
+                <>
+                <div className={panelSection}>
+                  <CameraSetupPanel
+                    camera={selectedItem as CameraItem}
+                    mountHeight={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? DEFAULT_CAMERA_HEIGHT_FT}
+                    onChange={updates => updateItem(selectedItem.id, updates)}
+                    onMountHeightChange={height => setCameraMountHeight(selectedItem as CameraItem, height)}
+                  />
+                </div>
+                <details className={`${panelSectionLoose} group`}>
+                  <summary className="cursor-pointer list-none flex items-center justify-between gap-3 text-xs font-semibold text-slate-300">
+                    <span className="uppercase whitespace-nowrap">Fine-tune</span>
+                    <span className="text-slate-500 font-normal text-right group-open:hidden">exact angles, lens & mounting</span>
+                  </summary>
+                  <div className="space-y-4 pt-4">
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Horizontal FOV</span>
@@ -10029,11 +8914,11 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Range</span>
-                      <span>{Math.round((selectedItem as CameraItem).range)}px</span>
+                      <span>{Math.round((selectedItem as CameraItem).range)} ft</span>
                     </label>
                     <input
                       type="range"
-                      min="50"
+                      min="5"
                       max="800"
                       value={(selectedItem as CameraItem).range}
                       onChange={e => updateItem(selectedItem.id, { range: parseInt(e.target.value) })}
@@ -10060,13 +8945,13 @@ export default function SecurityPlanner() {
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                         <span>Pitch</span>
-                        <span>{Math.round((selectedItem as CameraItem).pitch ?? 0)}deg</span>
+                        <span>{Math.round((selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH)}deg</span>
                       </label>
                       <input
                         type="range"
                         min="-60"
                         max="30"
-                        value={(selectedItem as CameraItem).pitch ?? 0}
+                        value={(selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH}
                         onChange={e => updateItem(selectedItem.id, { pitch: parseInt(e.target.value) })}
                         className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                       />
@@ -10081,14 +8966,7 @@ export default function SecurityPlanner() {
                         min="4"
                         max="40"
                         value={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10}
-                        onChange={e => {
-                          const value = parseInt(e.target.value);
-                          if ((selectedItem as CameraItem).mount?.type === "building") {
-                            updateCameraMount(selectedItem.id, { height: value });
-                          } else {
-                            updateItem(selectedItem.id, { height: value });
-                          }
-                        }}
+                        onChange={e => setCameraMountHeight(selectedItem as CameraItem, parseInt(e.target.value))}
                         className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                       />
                     </div>
@@ -10206,7 +9084,9 @@ export default function SecurityPlanner() {
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                     />
                   </div>
-                </div>
+                  </div>
+                </details>
+                </>
               )}
 
               {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (
@@ -10354,7 +9234,7 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Grid Size</span>
-                    <span>{gridSize}px</span>
+                    <span>{gridSize} ft</span>
                   </label>
                   <input
                     type="range"
@@ -10622,7 +9502,7 @@ export default function SecurityPlanner() {
           ) : (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200">No Selection</h2>
+                <h2 className="font-bold text-lg text-slate-200">Overview</h2>
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -10631,8 +9511,18 @@ export default function SecurityPlanner() {
                   <X className="w-4 h-4" />
                 </button>
               </div>
+              <ProjectOverview
+                items={items}
+                hasSite={workflowStepsDone.site}
+                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onImportSite={openElevationDialog}
+                onAddCamera={() => { setViewMode("plan"); setMode("add-camera"); }}
+                onAddBuilding={() => { setViewMode("plan"); setMode("add-building"); }}
+                showAllCones={frustumSettings.showAll !== false}
+                onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
+              />
               <div className={panelSectionLoose}>
-                <p className="text-sm text-slate-400">Select an item to edit its settings or open plan settings.</p>
+                <p className="text-sm text-slate-400">Click any item on the plan to edit it.</p>
                 <button
                   onClick={() => {
                     setRightPanelMode("project");
@@ -10650,113 +9540,3 @@ export default function SecurityPlanner() {
     </div>
   );
 }
-
-const NVRCard = ({ camera, renderFn, onMaximize, onExport, isMaximized, aspect }: { camera: CameraItem, renderFn: (c: CameraItem) => string, onMaximize?: () => void, onExport?: () => void, isMaximized?: boolean, aspect?: number }) => {
-  const [src, setSrc] = useState<string | null>(null);
-  const viewAspect = aspect && aspect > 0 ? aspect : 16 / 9;
-  const renderBusyRef = useRef(false);
-  const renderQueuedRef = useRef(false);
-  const renderFrame = () => {
-    if (renderBusyRef.current) {
-      renderQueuedRef.current = true;
-      return;
-    }
-    renderBusyRef.current = true;
-    try {
-      const next = renderFn(camera);
-      if (next) setSrc(next);
-    } catch (err) {
-      console.error("Camera render failed", err);
-    } finally {
-      renderBusyRef.current = false;
-      if (renderQueuedRef.current) {
-        renderQueuedRef.current = false;
-        renderFrame();
-      }
-    }
-  };
-
-  useEffect(() => {
-    if (isMaximized) {
-      renderFrame();
-      const interval = window.setInterval(() => {
-        renderFrame();
-      }, 150);
-      return () => window.clearInterval(interval);
-    }
-    const tid = setTimeout(() => {
-      renderFrame();
-    }, 10);
-    return () => clearTimeout(tid);
-  }, [camera, renderFn, isMaximized]);
-
-  const handleDownload = () => {
-    if (!src) return;
-    const link = document.createElement("a");
-    link.href = src;
-    link.download = `nvr_snapshot_${camera.label}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  return (
-    <div className={`w-full h-full bg-zinc-900/90 backdrop-blur-xl rounded-xl overflow-hidden border border-white/10 relative group shadow-2xl flex flex-col ${isMaximized ? '' : 'hover:ring-1 hover:ring-indigo-500 ring-1 ring-black/50'}`}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5 shrink-0">
-        <div className="flex items-center gap-2">
-          <Camera className="w-4 h-4 text-emerald-400" />
-          <span className="text-sm font-medium text-slate-200 truncate">{camera.label}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <div className="flex items-center gap-1.5 bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/30">
-            <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
-            <span className="text-[10px] text-red-400 font-bold tracking-tight">LIVE</span>
-          </div>
-          {!isMaximized && onMaximize && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onMaximize(); }}
-              className="no-drag text-slate-400 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-              title="Expand View"
-              onMouseDown={e => e.stopPropagation()}
-            >
-              <Maximize className="w-3 h-3" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Camera View */}
-      <div
-        className="relative w-full overflow-hidden bg-slate-800"
-        style={{ aspectRatio: `${viewAspect}` }}
-      >
-        {src ? (
-          <img src={src} className="w-full h-full object-contain select-none" draggable={false} />
-        ) : (
-          <div className="animate-pulse bg-zinc-800 w-full h-full flex items-center justify-center opacity-50">
-            <LayoutGrid className="w-8 h-8" />
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between border-t border-white/5 shrink-0">
-        <div className="flex gap-3">
-          <span>H-FOV: {(camera.hFov ?? camera.fov).toFixed(0)}°</span>
-          <span>V-FOV: {(camera.vFov ?? 45).toFixed(0)}°</span>
-        </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); onExport?.(); }}
-          className="no-drag px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1 transition-colors"
-          onMouseDown={e => e.stopPropagation()}
-          title="Add this camera view to the report"
-        >
-          <Plus className="w-3 h-3" />
-          + Add to Report
-        </button>
-      </div>
-    </div>
-  );
-};
-
