@@ -200,6 +200,44 @@ const COLORS = {
 };
 
 const DEFAULT_CANVAS = { width: 1000, height: 700 };
+// Realistic defaults (plan units are feet): a typical outdoor camera on a wall/eave with a ~4 mm lens.
+const DEFAULT_CAMERA_HEIGHT_FT = 9;
+const DEFAULT_CAMERA_HFOV = 90;
+const DEFAULT_CAMERA_PITCH = -15;
+const DEFAULT_CAMERA_RANGE_FT = 100;
+const DEFAULT_BUILDING = { width: 50, depth: 36, wallHeight: 14 };
+// How close (ft) a new camera must be to a wall to snap onto it.
+const CAMERA_WALL_SNAP_FT = 12;
+// Building-mounted cameras go just under the eave.
+const pointInPolygonXY = (pt: { x: number; y: number }, poly: { x: number; y: number }[]) => {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < ((b.x - a.x) * (pt.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+};
+
+// Unit normal of edge i pointing out of the polygon (works for L-shaped / concave buildings).
+const getEdgeOutwardNormal = (points: { x: number; y: number }[], i: number) => {
+  const a = points[i];
+  const b = points[(i + 1) % points.length];
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  let n = { x: (b.y - a.y) / len, y: -(b.x - a.x) / len };
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const probe = Math.max(0.5, Math.min(2, len * 0.05));
+  if (pointInPolygonXY({ x: mid.x + n.x * probe, y: mid.y + n.y * probe }, points)) n = { x: -n.x, y: -n.y };
+  return n;
+};
+
+// Default camera label sits behind the camera so it never covers the cone or the aim handle.
+const defaultCameraLabelOffset = (rotationDeg: number) => {
+  const rad = (rotationDeg * Math.PI) / 180;
+  return { x: -Math.cos(rad) * 38, y: -Math.sin(rad) * 38 };
+};
+const mountHeightForBuilding = (building?: { wallHeight?: number }) =>
+  Math.max(6, Math.round(((building?.wallHeight ?? DEFAULT_BUILDING.wallHeight) - 1) * 2) / 2);
 const TERRAIN_BRUSH_MIN = 1;
 const TERRAIN_BRUSH_MAX = 12;
 const TERRAIN_FALLOFF_MIN = 0.5;
@@ -1647,7 +1685,7 @@ const create3dTree = (item: TreeItem): THREE.Group => {
   }
 
   group.position.set(item.x, 0, item.y);
-  group.rotation.y = THREE.MathUtils.degToRad(item.rotation);
+  group.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
   return group;
 };
 
@@ -3420,21 +3458,10 @@ export default function SecurityPlanner() {
 
       const pos = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 
-      // Offset camera slightly away from the building center to prevent clipping
-      const center = worldPoints.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-      if (worldPoints.length > 0) {
-        center.x /= worldPoints.length;
-        center.y /= worldPoints.length;
-      }
-
-      const vecToPos = { x: pos.x - center.x, y: pos.y - center.y };
-      const len = Math.hypot(vecToPos.x, vecToPos.y) || 1;
-      const offset = 3.0; // Push out by 3 units (pixels)
-
-      return {
-        x: pos.x + (vecToPos.x / len) * offset,
-        y: pos.y + (vecToPos.y / len) * offset
-      };
+      // Sit just outside the wall (along its outward normal) so the camera doesn't clip into it.
+      const normal = getEdgeOutwardNormal(worldPoints, edgeIndex);
+      const offset = 1.0;
+      return { x: pos.x + normal.x * offset, y: pos.y + normal.y * offset };
     }
     return { x: camera.x, y: camera.y };
   };
@@ -3483,12 +3510,6 @@ export default function SecurityPlanner() {
       const building = item as BuildingItem;
       const worldPoints = getBuildingEdgePointsWorld(building);
 
-      // Calculate building center for determining "outward" direction
-      const center = {
-        x: worldPoints.reduce((sum, p) => sum + p.x, 0) / worldPoints.length,
-        y: worldPoints.reduce((sum, p) => sum + p.y, 0) / worldPoints.length
-      };
-
       for (let i = 0; i < worldPoints.length; i += 1) {
         const nextIndex = (i + 1) % worldPoints.length;
         const a = worldPoints[i];
@@ -3501,11 +3522,9 @@ export default function SecurityPlanner() {
         const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
         const dist = Math.hypot(point.x - proj.x, point.y - proj.y);
 
-        // Calculate outward-facing rotation
-        // The edge normal pointing outward from building center
-        const edgeMidpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const toOutside = { x: edgeMidpoint.x - center.x, y: edgeMidpoint.y - center.y };
-        const outwardAngle = Math.atan2(toOutside.y, toOutside.x) * (180 / Math.PI);
+        // Face straight out from the wall
+        const normal = getEdgeOutwardNormal(worldPoints, i);
+        const outwardAngle = Math.atan2(normal.y, normal.x) * (180 / Math.PI);
 
         if (!best || dist < best.distance) {
           best = {
@@ -3554,18 +3573,17 @@ export default function SecurityPlanner() {
           ...common,
           type: "camera",
           rotation: 45,
-          label: "Camera",
+          label: `Camera ${items.filter(i => i.type === "camera").length + 1}`,
           description: "",
-          fov: 109,
-          hFov: 109,
-          vFov: vFovFromH(109, 16 / 9),
-          pitch: -15, // Slightly steeper downward angle for better coverage
-          height: 60, // Default to building roof height
+          fov: DEFAULT_CAMERA_HFOV,
+          hFov: DEFAULT_CAMERA_HFOV,
+          vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
+          pitch: DEFAULT_CAMERA_PITCH,
+          height: DEFAULT_CAMERA_HEIGHT_FT,
           aspect: 16 / 9,
-          mount: { type: "free", edgeT: 0.5, height: 60 },
-          range: 150,
-          color: COLORS.camera[0],
-          labelOffset: { x: 0, y: 30 },
+          mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
+          range: DEFAULT_CAMERA_RANGE_FT,
+          color: COLORS.camera[items.filter(i => i.type === "camera").length % COLORS.camera.length],
           connectorDashSize: 3
         };
         break;
@@ -3573,11 +3591,12 @@ export default function SecurityPlanner() {
         newItem = {
           ...common,
           type: "building",
-          width: 100,
-          height: 80,
+          width: DEFAULT_BUILDING.width,
+          height: DEFAULT_BUILDING.depth,
+          wallHeight: DEFAULT_BUILDING.wallHeight,
           label: "Building",
           color: COLORS.building[0],
-          points: rectanglePoints(100, 80)
+          points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
         };
         break;
       case "add-tree":
@@ -3613,15 +3632,15 @@ export default function SecurityPlanner() {
 
     if (newItem.type === "camera") {
       const edge = findNearestBuildingEdge({ x, y });
-      // Very generous snap distance (100px) for easy camera placement on buildings
-      if (edge && edge.distance < 100) {
+      // Snap onto a wall only when placed right next to it, so cameras land where the user clicked.
+      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
         const cam = newItem as CameraItem;
         cam.x = edge.point.x;
         cam.y = edge.point.y;
         // Auto-rotate to face outward from building
         cam.rotation = edge.rotation;
-        // Default height to building roof height (60) when attaching to building
-        const buildingHeight = 60;
+        // Mount just under the eave of the building it's attached to
+        const buildingHeight = mountHeightForBuilding(getBuildingById(edge.buildingId));
         cam.mount = {
           type: "building",
           buildingId: edge.buildingId,
@@ -4055,7 +4074,7 @@ export default function SecurityPlanner() {
     const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
-    const pitch = cam.pitch ?? -15;
+    const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
     const range = cam.range;
     const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
 
@@ -5145,7 +5164,7 @@ export default function SecurityPlanner() {
       );
 
       const aspect = cameraItem.aspect ?? 16 / 9;
-      const displayRange = Math.max(1, Math.min(range, 50));
+      const displayRange = Math.max(1, range);
       const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
       const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
       const farWidth = farHeight * aspect;
@@ -5255,14 +5274,17 @@ export default function SecurityPlanner() {
         const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
 
         obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
+        if (!obj) return;
+        obj.rotation.order = 'YZX';
         obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
-        obj.rotation.x = THREE.MathUtils.degToRad(cam.pitch ?? 0);
+        obj.rotation.x = 0;
+        obj.rotation.z = THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH);
         updateCameraFrustum(
           obj as THREE.Group,
           cam,
           camPos,
           camH + camMountHeight,
-          THREE.MathUtils.degToRad(cam.pitch ?? 0),
+          THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH),
           -THREE.MathUtils.degToRad(cam.rotation),
           cam.hFov ?? cam.fov,
           cam.range,
@@ -5272,7 +5294,7 @@ export default function SecurityPlanner() {
       } else if (item.type === "image") {
         const img = item as ImageItem;
         obj.position.set(img.x, h + 0.25, img.y);
-        obj.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        obj.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
         needsRender = true;
       } else if (item.type === "label") {
         obj.position.set(item.x, h + 8, item.y);
@@ -5740,7 +5762,7 @@ export default function SecurityPlanner() {
         const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
         const absHeight = camTerrainH + cameraMountHeight;
         const cameraHeight = cameraMountHeight;
-        const pitch = cameraItem.pitch ?? 0;
+        const pitch = cameraItem.pitch ?? DEFAULT_CAMERA_PITCH;
         const hFov = cameraItem.hFov ?? cameraItem.fov;
         const vFov = cameraItem.vFov ?? vFovFromH(hFov, cameraItem.aspect ?? 16 / 9);
         const range = cameraItem.range;
@@ -5840,9 +5862,10 @@ export default function SecurityPlanner() {
         // - Y rotation controls azimuth (horizontal direction)
         // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
         cameraGroup.position.set(cameraPos.x, absHeight, cameraPos.y);
-        cameraGroup.rotation.order = 'YXZ'; // Apply Y (azimuth) first, then X (pitch)
+        // The lens points along local +X, so pitch is a rotation about local Z applied after the yaw.
+        cameraGroup.rotation.order = 'YZX';
         cameraGroup.rotation.y = rotAngle;
-        cameraGroup.rotation.x = pitchRad; // Pitch: positive = look up, negative = look down
+        cameraGroup.rotation.z = pitchRad; // Pitch: positive = look up, negative = look down
         threeObjectCacheRef.current.set(cameraItem.id, cameraGroup); // Cache for position updates
         group.add(cameraGroup);
 
@@ -5891,7 +5914,7 @@ export default function SecurityPlanner() {
         const mesh = new THREE.Mesh(geometry, material);
         mesh.rotation.x = -Math.PI / 2;
         mesh.position.set(img.x, 0.25, img.y);
-        mesh.rotation.z = THREE.MathUtils.degToRad(img.rotation);
+        mesh.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
         mesh.userData.itemId = img.id;
         threeObjectCacheRef.current.set(img.id, mesh); // Cache for position updates
         group.add(mesh);
@@ -6661,18 +6684,17 @@ export default function SecurityPlanner() {
                   ...common,
                   type: "camera",
                   rotation: 45,
-                  label: "Camera",
+                  label: `Camera ${itemsRef.current.filter(i => i.type === "camera").length + 1}`,
                   description: "",
-                  fov: 109,
-                  hFov: 109,
-                  vFov: vFovFromH(109, 16 / 9),
-                  pitch: -15,
-                  height: 60,
+                  fov: DEFAULT_CAMERA_HFOV,
+                  hFov: DEFAULT_CAMERA_HFOV,
+                  vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
+                  pitch: DEFAULT_CAMERA_PITCH,
+                  height: DEFAULT_CAMERA_HEIGHT_FT,
                   aspect: 16 / 9,
-                  mount: { type: "free", edgeT: 0.5, height: 60 },
-                  range: 150,
-                  color: COLORS.camera[0],
-                  labelOffset: { x: 0, y: 30 },
+                  mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
+                  range: DEFAULT_CAMERA_RANGE_FT,
+                  color: COLORS.camera[itemsRef.current.filter(i => i.type === "camera").length % COLORS.camera.length],
                   connectorDashSize: 3
                 } as CameraItem;
                 break;
@@ -6680,12 +6702,12 @@ export default function SecurityPlanner() {
                 newItem = {
                   ...common,
                   type: "building",
-                  width: 100,
-                  height: 80,
-                  wallHeight: 60,
+                  width: DEFAULT_BUILDING.width,
+                  height: DEFAULT_BUILDING.depth,
+                  wallHeight: DEFAULT_BUILDING.wallHeight,
                   label: "Building",
                   color: COLORS.building[0],
-                  points: rectanglePoints(100, 80)
+                  points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
                 } as BuildingItem;
                 break;
               case "add-tree":
@@ -7090,7 +7112,7 @@ export default function SecurityPlanner() {
     const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
     const camHeight = cam.mount?.height ?? cam.height ?? 10;
     const hFov = cam.hFov ?? cam.fov;
-    const pitch = cam.pitch ?? -15;
+    const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
     const range = cam.range;
     const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
 
@@ -7388,7 +7410,7 @@ export default function SecurityPlanner() {
     if (mode === "add-camera" && viewMode === "plan") {
       const pos = getSvgMousePos(e);
       const edge = findNearestBuildingEdge(pos);
-      if (edge && edge.distance < 100) {
+      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
         setCameraPlacementPreview({
           buildingId: edge.buildingId,
           edgeIndex: edge.edgeIndex,
@@ -7462,7 +7484,7 @@ export default function SecurityPlanner() {
       const dx = pos.x - interactionState.startMouse.x;
       const dy = pos.y - interactionState.startMouse.y;
 
-      const startOffset = interactionState.startVal.labelOffset || { x: 0, y: 30 };
+      const startOffset = interactionState.startVal.labelOffset || defaultCameraLabelOffset(interactionState.startVal.rotation ?? 0);
 
       updateItem(interactionState.itemId, {
         labelOffset: {
@@ -7485,7 +7507,11 @@ export default function SecurityPlanner() {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
       const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-      updateItem(interactionState.itemId, { rotation: angle + 90 });
+      // A camera's aim handle sits in the direction it faces; other items' handles sit above them (-90°).
+      let rotation = item.type === "camera" ? angle : angle + 90;
+      if (e.shiftKey) rotation = Math.round(rotation / 15) * 15;
+      rotation = ((rotation % 360) + 360) % 360;
+      updateItem(interactionState.itemId, { rotation });
     } else if (interactionState.type === "fov" && item.type === "camera") {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
@@ -9351,8 +9377,8 @@ export default function SecurityPlanner() {
                       const hx = handleDist * Math.cos(rotRad);
                       const hy = handleDist * Math.sin(rotRad);
 
-                      const labelX = c.labelOffset?.x ?? 0;
-                      const labelY = c.labelOffset?.y ?? 30;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y;
                       const dash = c.connectorDashSize || 3;
 
 
@@ -9598,8 +9624,8 @@ export default function SecurityPlanner() {
                     if (item.type === "camera") {
                       const c = item as CameraItem;
                       const cameraPos = getCameraPlanPosition(c);
-                      const labelX = c.labelOffset?.x ?? 0;
-                      const labelY = c.labelOffset?.y ?? 30;
+                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x;
+                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y;
                       const isSelected = selectedId === c.id;
 
                       return (
@@ -10534,13 +10560,13 @@ export default function SecurityPlanner() {
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                         <span>Pitch</span>
-                        <span>{Math.round((selectedItem as CameraItem).pitch ?? 0)}deg</span>
+                        <span>{Math.round((selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH)}deg</span>
                       </label>
                       <input
                         type="range"
                         min="-60"
                         max="30"
-                        value={(selectedItem as CameraItem).pitch ?? 0}
+                        value={(selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH}
                         onChange={e => updateItem(selectedItem.id, { pitch: parseInt(e.target.value) })}
                         className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                       />
