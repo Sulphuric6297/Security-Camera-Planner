@@ -25,8 +25,8 @@ import { DEFAULT_CAMERA_PITCH } from "../constants";
 export const STEP_INFO: Record<WorkflowStepId, { n: number; title: string; blurb: string; next?: WorkflowStepId }> = {
   site: { n: 1, title: "Your site", blurb: "The satellite map, elevation and buildings for your property.", next: "buildings" },
   buildings: { n: 2, title: "Buildings", blurb: "Check the buildings, fix heights and roofs, add trees and vehicles that block views.", next: "cameras" },
-  cameras: { n: 3, title: "Cameras", blurb: "Place cameras and aim them. Click right next to a wall to mount one there.", next: "review" },
-  review: { n: 4, title: "Review coverage", blurb: "Check what every camera sees, in 3D and on the camera wall.", next: "report" },
+  cameras: { n: 3, title: "Cameras", blurb: "Mark what to protect, then add cameras until everything is green. Click right next to a wall to mount a camera there.", next: "review" },
+  review: { n: 4, title: "Review coverage", blurb: "Check what's covered, find blind spots, and see every camera's view in 3D and on the camera wall.", next: "report" },
   report: { n: 5, title: "Report", blurb: "A PDF with the site plan, camera list and every camera's view." }
 };
 
@@ -47,6 +47,8 @@ type Props = {
   onPlanPng: () => void;
   onAddViewToReport: () => void;
   onMoreReportOptions: () => void;
+  /** The "What to protect" checklist (shown in the Cameras and Review steps). */
+  coverage?: React.ReactNode;
 };
 
 const card = "rounded-xl border border-white/10 bg-white/5 p-3";
@@ -151,6 +153,7 @@ export function StepPanel(props: Props) {
           <button onClick={() => props.onTool("add-camera")} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
             <Plus className="w-4 h-4" /> Add a camera <span className="text-[10px] px-1.5 rounded bg-black/20 font-mono">C</span>
           </button>
+          {props.coverage}
           <div className={card}>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] uppercase font-bold text-slate-400">Cameras ({cameras.length})</div>
@@ -193,6 +196,7 @@ export function StepPanel(props: Props) {
 
       {step === "review" && (
         <>
+          {props.coverage}
           <div className="grid grid-cols-2 gap-2">
             <button onClick={() => props.onView("iso3d")} className={action}>
               <Box className="w-4 h-4 text-indigo-300" /> 3D view

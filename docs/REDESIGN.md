@@ -79,7 +79,7 @@ and previews that look exact without saying they are estimates.
 - Tests: step → panel mapping, action bar actions, zoom-to-fit, scale bar length correct at 2
   map scales, shortcut overlay.
 
-### Phase 3: coverage you can trust
+### Phase 3: coverage you can trust (done; door suggestions still to do)
 - **"What to protect":** click to add targets (door, gate, driveway, window, area) with a goal
   (identify / recognize / detect). Suggest doors along the building edges.
 - **Coverage checklist + score** in Review: for each target, the best camera and the level reached,

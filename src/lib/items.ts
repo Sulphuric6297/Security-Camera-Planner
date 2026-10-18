@@ -11,7 +11,7 @@ import {
 } from "../constants";
 import { rectanglePoints } from "./geometry";
 import { vFovFromH } from "./camera";
-import type { CanvasItem, ParkingItem } from "../types";
+import type { CanvasItem, ParkingItem, TargetItem, TargetKind } from "../types";
 
 export type VehicleType = NonNullable<ParkingItem["vehicleType"]>;
 
@@ -29,7 +29,17 @@ export const DEFAULT_VEHICLE: VehicleType = "sedan";
 /** A mature yard tree: ~24 ft canopy, ~30 ft tall. */
 export const DEFAULT_TREE = { radius: 12, height: 30 };
 
-export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label";
+export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target";
+
+/** Spots to protect, with the detail you usually want there. */
+export const TARGET_KINDS: Record<TargetKind, { label: string; goal: TargetItem["goal"] }> = {
+  door: { label: "Door", goal: "identify" },
+  gate: { label: "Gate", goal: "recognize" },
+  driveway: { label: "Driveway", goal: "recognize" },
+  window: { label: "Window", goal: "observe" },
+  yard: { label: "Yard", goal: "detect" },
+  other: { label: "Spot", goal: "observe" }
+};
 
 /** Vehicle dimensions in plan units for a type. */
 export const vehicleDimensions = (type: VehicleType, unitsPerFoot = 1) => {
@@ -45,7 +55,7 @@ export const createItem = (
   kind: NewItemKind,
   x: number,
   y: number,
-  opts: { unitsPerFoot?: number; cameraIndex?: number } = {}
+  opts: { unitsPerFoot?: number; cameraIndex?: number; targetIndex?: number } = {}
 ): CanvasItem => {
   const u = opts.unitsPerFoot && opts.unitsPerFoot > 0 ? opts.unitsPerFoot : 1;
   const common = { id: generateId(), x, y, rotation: 0 };
@@ -94,6 +104,8 @@ export const createItem = (
       } as CanvasItem;
     case "label":
       return { ...common, type: "label", text: "Text", fontSize: 14, color: COLORS.label[0] } as CanvasItem;
+    case "target":
+      return { ...common, type: "target", kind: "door", goal: TARGET_KINDS.door.goal, label: `Door ${(opts.targetIndex ?? 0) + 1}` } as CanvasItem;
   }
 };
 

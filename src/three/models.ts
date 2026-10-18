@@ -30,6 +30,7 @@ export const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
   if (type === "tree") return plural ? "Trees" : "Tree";
   if (type === "label") return plural ? "Text" : "Text";
   if (type === "image") return plural ? "Overlays" : "Overlay";
+  if (type === "target") return plural ? "Protected spots" : "Protected spot";
   return type;
 };
 

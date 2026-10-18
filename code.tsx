@@ -58,13 +58,15 @@ import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { StepPanel } from "./src/components/StepPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
+import { CoveragePanel, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
+import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
+import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
-import { VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { TARGET_KINDS, VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
@@ -77,7 +79,7 @@ import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInter
 import { disposeObjectDeep } from "./src/three/dispose";
 import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, type PhotoRect } from "./src/three/buildings";
 import { create3dCar, create3dTree, getCarSignature, getItemTypeLabel, getTreeSignature, resolveVehicleType } from "./src/three/models";
-import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
+import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
@@ -169,6 +171,12 @@ export default function SecurityPlanner() {
   const [show3dMenu, setShow3dMenu] = useState(false);
   // Inspector: rarely used settings stay folded away until asked for.
   const [showMoreOptions, setShowMoreOptions] = useState(false);
+  // Coverage: blind-spot overlay and "aim this camera at the next click".
+  const [showBlindSpots, setShowBlindSpots] = useState(false);
+  const [aimingCameraId, setAimingCameraId] = useState<string | null>(null);
+  // Set when a press already did its job (aimed a camera, placed an item on top of another), so the
+  // click that follows doesn't also deselect or place again.
+  const consumedClickRef = useRef(false);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, panX: 0, panY: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -1687,17 +1695,20 @@ export default function SecurityPlanner() {
   // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
   // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
   const placeNewItemAt = (type: ToolMode, x: number, y: number) => {
-    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label" } as Partial<Record<ToolMode, NewItemKind>>)[type];
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target" } as Partial<Record<ToolMode, NewItemKind>>)[type];
     if (!kind) return null;
     const newItem = createItem(kind, x, y, {
       unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
-      cameraIndex: itemsRef.current.filter(i => i.type === "camera").length
+      cameraIndex: itemsRef.current.filter(i => i.type === "camera").length,
+      targetIndex: itemsRef.current.filter(i => i.type === "target").length
     });
 
     if (newItem.type === "camera") {
-      const edge = findNearestBuildingEdge({ x, y });
-      // Snap onto a wall only when placed right next to it, so cameras land where the user clicked.
-      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
+      // Clicked on a building: mount on its nearest wall. Otherwise snap onto a wall only when placed
+      // right next to it, so cameras land where the user clicked.
+      const onBuilding = items.find(i => i.type === "building" && pointInPolygonXY({ x, y }, getBuildingEdgePointsWorld(i as BuildingItem)));
+      const edge = findNearestBuildingEdge({ x, y }, onBuilding ? [onBuilding] : items);
+      if (edge && (onBuilding || edge.distance < CAMERA_WALL_SNAP_FT)) {
         const cam = newItem as CameraItem;
         cam.x = edge.point.x;
         cam.y = edge.point.y;
@@ -4355,6 +4366,7 @@ export default function SecurityPlanner() {
       const p = getCameraPlanPosition(item as CameraItem);
       return { minX: p.x, minY: p.y, maxX: p.x, maxY: p.y };
     }
+    if (item.type === "target") return { minX: item.x, minY: item.y, maxX: item.x, maxY: item.y };
     const r = item.type === "tree" ? (item as TreeItem).radius : Math.max((item as any).width ?? 0, (item as any).height ?? 0) / 2;
     return { minX: item.x - r, minY: item.y - r, maxX: item.x + r, maxY: item.y + r };
   };
@@ -4503,6 +4515,11 @@ export default function SecurityPlanner() {
       }
 
       if (event.key === "Escape") {
+        // Esc while aiming only cancels the aim (the camera stays selected).
+        if (aimingCameraId) {
+          setAimingCameraId(null);
+          return;
+        }
         setSelectedId(null);
         setMode("select");
         setVertexInsertMode(false);
@@ -4521,7 +4538,7 @@ export default function SecurityPlanner() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [items, selectedId, handleSaveProject, viewMode]);
+  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId]);
 
 
   // Effect to handle environment background updates (HDRI / Panorama)
@@ -5561,7 +5578,15 @@ export default function SecurityPlanner() {
     getSvgMousePosFor(demMiniRef.current, e);
 
   const handleMouseDown = (e: React.MouseEvent, id: string, type: InteractionType = "move", variant?: string) => {
-    if (mode !== "select") return;
+    if (mode !== "select") {
+      // Placing something on top of an existing item (e.g. a camera onto a house) still places it.
+      if (mode.startsWith("add-") && viewMode === "plan") {
+        e.stopPropagation();
+        handleAddItem(e, mode);
+        consumedClickRef.current = true;
+      }
+      return;
+    }
     if (viewMode === "iso3d") return;
     if (e.altKey) return;
     e.stopPropagation();
@@ -5837,6 +5862,10 @@ export default function SecurityPlanner() {
 
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
+    if (consumedClickRef.current) {
+      consumedClickRef.current = false;
+      return;
+    }
     if (wasPlanDrag(e)) return;
     if (isTerrainMode) return;
     if (mode === "trace-building") {
@@ -6044,6 +6073,83 @@ export default function SecurityPlanner() {
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
 
+  // --- Coverage: which protected spots are seen, and where nothing is ---
+  const coverageModel = useMemo(() => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const cameras: CoverageCamera[] = (items.filter(i => i.type === "camera") as CameraItem[]).map(cam => {
+      const pos = getCameraPlanPosition(cam);
+      const hFov = getCameraHFov(cam);
+      return {
+        id: cam.id,
+        x: pos.x,
+        y: pos.y,
+        rotation: cam.rotation,
+        hFov,
+        vFov: cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam)),
+        pitch: cam.pitch ?? DEFAULT_CAMERA_PITCH,
+        heightFt: (cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT),
+        range: cam.range,
+        camera: cam
+      };
+    });
+    const obstacles: Obstacle[] = [];
+    items.forEach(item => {
+      if (item.type === "building") {
+        const b = item as BuildingItem;
+        obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf });
+      } else if (item.type === "tree") {
+        const t = item as TreeItem;
+        const h = (t.height ?? 30) / upf;
+        obstacles.push({ kind: "tree", id: t.id, x: t.x, y: t.y, radius: t.radius * (t.width ?? 1), bottomFt: h * 0.3, topFt: h });
+      }
+    });
+    return { cameras, obstacles, upf };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, planGeoRef]);
+  const targetItems = items.filter(i => i.type === "target") as TargetItem[];
+  const targetResults = useMemo(
+    () => new Map(evaluateTargets(coverageModel.cameras, targetItems, coverageModel.obstacles, coverageModel.upf).map(r => [r.targetId, r])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coverageModel, items]
+  );
+  const blindSpots = useMemo(() => {
+    if (!showBlindSpots || viewMode !== "plan") return null;
+    // Your property, not the whole imported area: around the cameras, the marked spots and the
+    // buildings the cameras are on (falls back to the whole plan with nothing placed).
+    const pts: { x: number; y: number }[] = [...coverageModel.cameras, ...targetItems];
+    items.forEach(i => {
+      if (i.type === "camera" && (i as CameraItem).mount?.type === "building") {
+        const b = items.find(x => x.id === (i as CameraItem).mount?.buildingId) as BuildingItem | undefined;
+        if (b) pts.push(...getBuildingEdgePointsWorld(b));
+      }
+    });
+    const b = boundsOfPoints(pts);
+    const pad = 50 * coverageModel.upf;
+    const area = b
+      ? {
+        x: Math.max(0, b.minX - pad),
+        y: Math.max(0, b.minY - pad),
+        width: Math.min(canvasSize.width, b.maxX + pad) - Math.max(0, b.minX - pad),
+        height: Math.min(canvasSize.height, b.maxY + pad) - Math.max(0, b.minY - pad)
+      }
+      : { x: 0, y: 0, width: canvasSize.width, height: canvasSize.height };
+    const cell = Math.max(area.width, area.height) / 80;
+    return { ...blindSpotCells(coverageModel.cameras, area, cell, coverageModel.obstacles, coverageModel.upf), area };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showBlindSpots, viewMode, coverageModel, canvasSize.width, canvasSize.height]);
+
+  // Point a camera at a plan position: turn toward it and tilt to center it at head height.
+  const aimCameraAt = (cameraId: string, pt: { x: number; y: number }) => {
+    const cam = items.find(i => i.id === cameraId) as CameraItem | undefined;
+    if (!cam) return;
+    const pos = getCameraPlanPosition(cam);
+    const rotation = ((((Math.atan2(pt.y - pos.y, pt.x - pos.x) * 180) / Math.PI) % 360) + 360) % 360;
+    const distanceFt = Math.hypot(pt.x - pos.x, pt.y - pos.y) / (planGeoRef?.unitsPerFoot ?? 1);
+    const pitch = suggestPitchForDistance(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT, distanceFt);
+    updateItem(cam.id, { rotation, pitch });
+    setTimeout(() => saveHistory(), 50);
+  };
+
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
@@ -6055,7 +6161,9 @@ export default function SecurityPlanner() {
       case "add-tree": return "Click to place a tree";
       case "add-parking": return "Click to place a vehicle";
       case "add-label": return "Click to add a text label";
+      case "add-target": return "Click a door, gate or driveway you want covered · Esc to cancel";
       default:
+        if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
         if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
         if (selectedItem?.type === "building") return "Drag to move · drag corners to reshape · Shift+click an edge to add a corner · drag the label to move it";
         return null;
@@ -7352,7 +7460,19 @@ export default function SecurityPlanner() {
                 onMouseMove={handleSvgMouseMove}
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
-                onMouseDownCapture={e => { planPressRef.current = { x: e.clientX, y: e.clientY }; handlePlanTerrainMouseDown(e); }}
+                onMouseDownCapture={e => {
+                  planPressRef.current = { x: e.clientX, y: e.clientY };
+                  if (aimingCameraId) {
+                    // Aim mode: the next click on the plan (anything on it) is where the camera should look.
+                    e.stopPropagation();
+                    e.preventDefault();
+                    aimCameraAt(aimingCameraId, getSvgMousePos(e));
+                    setAimingCameraId(null);
+                    consumedClickRef.current = true;
+                    return;
+                  }
+                  handlePlanTerrainMouseDown(e);
+                }}
                 onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
@@ -7489,6 +7609,18 @@ export default function SecurityPlanner() {
                     </g>
                   )}
 
+                  {blindSpots && (
+                    <rect x={blindSpots.area.x} y={blindSpots.area.y} width={blindSpots.area.width} height={blindSpots.area.height} fill="none" stroke="rgba(239,68,68,0.7)" strokeWidth={1.5 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
+                  )}
+                  {blindSpots && blindSpots.runs.length > 0 && (
+                    <path
+                      data-testid="blind-spots"
+                      d={blindSpots.runs.map(r => `M${r.x} ${r.y}h${r.width}v${r.height}h${-r.width}z`).join("")}
+                      fill="rgba(239, 68, 68, 0.22)"
+                      stroke="none"
+                      pointerEvents="none"
+                    />
+                  )}
                   {items.map(item => {
                     const isSelected = selectedId === item.id;
                     if (item.type === "building" || item.type === "parking") {
@@ -8042,6 +8174,37 @@ export default function SecurityPlanner() {
                   })}
                   {/* --- LABELS OVERLAY (Rendered last to appear on top) --- */}
                   {items.map(item => {
+                    if (item.type === "target") {
+                      const t = item as TargetItem;
+                      const result = targetResults.get(t.id);
+                      const status = targetStatus(result);
+                      const color = STATUS_COLOR[status];
+                      const r = 9 * planUi;
+                      const isSelected = selectedId === t.id;
+                      const coveringCam = result?.best ? coverageModel.cameras.find(c => c.id === result.best!.cameraId) : null;
+                      return (
+                        <g key={t.id} data-testid="target-pin" data-status={status}>
+                          {isSelected && coveringCam && (
+                            <line x1={coveringCam.x} y1={coveringCam.y} x2={t.x} y2={t.y} stroke={color} strokeWidth={2 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
+                          )}
+                          <g
+                            transform={`translate(${t.x}, ${t.y})`}
+                            onMouseDown={e => handleMouseDown(e, t.id, "move")}
+                            onClick={e => e.stopPropagation()}
+                            className="cursor-move"
+                          >
+                            <circle r={r * 1.6} fill={color} fillOpacity={0.18} stroke={isSelected ? "#fff" : "none"} strokeWidth={2 * planUi} />
+                            <circle r={r} fill={color} stroke="#fff" strokeWidth={2 * planUi} />
+                            <text y={r * 0.38} textAnchor="middle" fontSize={r * 1.15} fontWeight="bold" fill="#fff" pointerEvents="none">
+                              {status === "met" ? "✓" : status === "partial" ? "!" : "✕"}
+                            </text>
+                            <text y={r * 2.9} textAnchor="middle" fontSize={11 * planUi} fontWeight={700} fill="#fff" stroke="rgba(0,0,0,0.75)" strokeWidth={3 * planUi} paintOrder="stroke" pointerEvents="none">
+                              {t.label}
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    }
                     if (item.type === "camera") {
                       const c = item as CameraItem;
                       const cameraPos = getCameraPlanPosition(c);
@@ -8509,7 +8672,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && (
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && selectedItem.type !== "target" && (
                 <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
@@ -8529,6 +8692,7 @@ export default function SecurityPlanner() {
               {(selectedItem.type === "camera" ||
                 selectedItem.type === "building" ||
                 selectedItem.type === "image" ||
+                selectedItem.type === "target" ||
                 selectedItem.type === "label") && (
                   <div className={`${panelSection} ${inspectorOrder("name")}`}>
                     <label className="text-xs font-semibold text-slate-400 uppercase">
@@ -8974,6 +9138,10 @@ export default function SecurityPlanner() {
                     mountHeight={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? DEFAULT_CAMERA_HEIGHT_FT}
                     onChange={updates => updateItem(selectedItem.id, updates)}
                     onMountHeightChange={height => setCameraMountHeight(selectedItem as CameraItem, height)}
+                    aiming={aimingCameraId === selectedItem.id}
+                    onAimAtPoint={() => { setViewMode("plan"); setAimingCameraId(aimingCameraId === selectedItem.id ? null : selectedItem.id); }}
+                    targets={targetItems.map(t => ({ id: t.id, label: t.label }))}
+                    onAimAtTarget={id => { const t = targetItems.find(x => x.id === id); if (t) aimCameraAt(selectedItem.id, { x: t.x, y: t.y }); }}
                   />
                 </div>
                 <details className={`${panelSectionLoose} group`}>
@@ -9264,6 +9432,55 @@ export default function SecurityPlanner() {
                   </div>
                 </div>
               )}
+
+              {selectedItem.type === "target" && (() => {
+                const t = selectedItem as TargetItem;
+                const result = targetResults.get(t.id);
+                const status = targetStatus(result);
+                const cams = items.filter(i => i.type === "camera") as CameraItem[];
+                const chipCls = (on: boolean) => `px-2 py-1.5 rounded-lg text-[11px] font-semibold border ${on ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`;
+                return (
+                  <div className={panelSection}>
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="w-3 h-3 rounded-full" style={{ background: STATUS_COLOR[status] }} />
+                      <span className="text-slate-200 font-semibold">
+                        {status === "met" ? "Covered" : status === "partial" ? "Seen, but not enough detail" : "Not covered yet"}
+                      </span>
+                    </div>
+                    <label className="text-xs font-semibold text-slate-400 uppercase">What is it?</label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {(Object.keys(TARGET_KINDS) as TargetItem["kind"][]).map(k => (
+                        <button key={k} className={chipCls(t.kind === k)} onClick={() => updateItem(t.id, { kind: k, goal: TARGET_KINDS[k].goal, ...(t.label.startsWith(TARGET_KINDS[t.kind].label) ? { label: t.label.replace(TARGET_KINDS[t.kind].label, TARGET_KINDS[k].label) } : {}) })}>
+                          {TARGET_KINDS[k].label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="text-xs font-semibold text-slate-400 uppercase">Detail needed</label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {([
+                        ["identify", "See faces"],
+                        ["recognize", "Recognize people"],
+                        ["observe", "See what's happening"],
+                        ["detect", "Notice someone"]
+                      ] as [TargetItem["goal"], string][]).map(([g, label]) => (
+                        <button key={g} className={chipCls(t.goal === g)} onClick={() => updateItem(t.id, { goal: g })}>{label}</button>
+                      ))}
+                    </div>
+                    {cams.length > 0 && (
+                      <>
+                        <label className="text-xs font-semibold text-slate-400 uppercase">Point a camera here</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {cams.map((c, i) => (
+                            <button key={c.id} className={chipCls(false)} onClick={() => aimCameraAt(c.id, { x: t.x, y: t.y })} title={`Turn and tilt ${c.label} toward ${t.label}`}>
+                              {c.label || `Camera ${i + 1}`}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {selectedItem.type === "building" && (
                 <button
@@ -9699,6 +9916,20 @@ export default function SecurityPlanner() {
                 onPlanPng={handleExportPng}
                 onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
                 onMoreReportOptions={() => setShowExportPanel(true)}
+                coverage={
+                  <CoveragePanel
+                    targets={targetItems}
+                    results={targetResults}
+                    cameras={items.filter(i => i.type === "camera") as CameraItem[]}
+                    onAdd={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-target"); }}
+                    onSelect={id => { setSelectedId(id); setMode("select"); }}
+                    onUpdate={(id, patch) => { updateItem(id, patch); setTimeout(() => saveHistory(), 50); }}
+                    onDelete={id => { deleteItem(id); setTimeout(() => saveHistory(), 50); }}
+                    showBlindSpots={showBlindSpots}
+                    onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
+                    coveredFraction={blindSpots?.coveredFraction ?? null}
+                  />
+                }
               />
               <button
                 onClick={() => {
