@@ -44,6 +44,8 @@ import { NVRCard } from "./src/components/NVRCard";
 import { useProjectField, getProject, useProject, createEmptyProject, projectRef } from "./src/state/project";
 import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
+import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
+import { ProjectOverview } from "./src/components/ProjectOverview";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
@@ -1137,6 +1139,10 @@ export default function SecurityPlanner() {
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
+  const [reviewVisited, setReviewVisited] = useState(false);
+  useEffect(() => {
+    if (viewMode !== "plan") setReviewVisited(true);
+  }, [viewMode]);
   // View preference: DORI coverage bands in the 2D cones (remembered per browser).
   const [showDoriZones, setShowDoriZones] = useState(() => {
     try { return localStorage.getItem("scp.showDori") !== "0"; } catch { return true; }
@@ -5562,6 +5568,57 @@ export default function SecurityPlanner() {
 
   // --- Render Helpers ---
 
+  const selectedItem = items.find(i => i.id === selectedId);
+  const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
+
+  // One-line hint for the active tool (status-bar style).
+  const toolHint = (() => {
+    if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
+    if (vertexInsertMode) return "Click on an edge to add a corner";
+    switch (mode) {
+      case "add-camera": return "Click to place a camera · click next to a wall to mount it there · Esc to cancel";
+      case "add-building": return "Click to place a building · then drag its corners to match the roof";
+      case "add-tree": return "Click to place a tree";
+      case "add-parking": return "Click to place a vehicle";
+      case "add-label": return "Click to add a text label";
+      default:
+        if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
+        return null;
+    }
+  })();
+
+  // Guided workflow (header steps): what's done, and where each step takes you.
+  const workflowStepsDone: Record<WorkflowStepId, boolean> = {
+    site: !!backgroundImg || !!siteLocation,
+    buildings: items.some(i => i.type === "building"),
+    cameras: items.some(i => i.type === "camera"),
+    review: reviewVisited,
+    report: exportList.length > 0
+  };
+  const handleWorkflowStep = (step: WorkflowStepId) => {
+    switch (step) {
+      case "site":
+        openElevationDialog();
+        break;
+      case "buildings":
+        setViewMode("plan");
+        setMode("add-building");
+        break;
+      case "cameras":
+        setViewMode("plan");
+        setMode("add-camera");
+        break;
+      case "review":
+        setReviewVisited(true);
+        setMode("select");
+        setViewMode("iso3d");
+        break;
+      case "report":
+        setShowExportPanel(true);
+        break;
+    }
+  };
+
   // Changes whenever anything visible in a camera view changes (used to refresh Monitor Wall tiles).
   const nvrSceneKey = useMemo(
     () => JSON.stringify([
@@ -5572,8 +5629,6 @@ export default function SecurityPlanner() {
     [items, terrainHeights, terrainStats.min, terrainStats.max, backgroundImg, bgSettings, sceneBackgroundImg, gridSize]
   );
 
-  const selectedItem = items.find(i => i.id === selectedId);
-  const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
   const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
   const cameraAspect = getCameraAspectValue(selectedCamera);
   const cameraPreviewWidth = 320;
@@ -6211,21 +6266,23 @@ export default function SecurityPlanner() {
       <div className="absolute left-4 top-4 bottom-4 w-14 flex flex-col items-center py-4 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl z-50 gap-3 ring-1 ring-white/5">
         <div className="flex flex-col gap-2 w-full px-2">
           {[
-            { mode: "select", icon: Move, label: "Select / Move" },
-            { mode: "add-camera", icon: Camera, label: "Place Camera" },
-            { mode: "add-building", icon: Square, label: "Draw Building" },
-            { mode: "add-tree", icon: Trees, label: "Place Tree" },
-            { mode: "add-parking", icon: Car, label: "Vehicles" },
-            { mode: "add-label", icon: Type, label: "Text" }
+            { mode: "select", icon: Move, label: "Select / Move", key: "V" },
+            { mode: "add-camera", icon: Camera, label: "Place Camera", key: "C" },
+            { mode: "add-building", icon: Square, label: "Draw Building", key: "B" },
+            { mode: "add-tree", icon: Trees, label: "Place Tree", key: "T" },
+            { mode: "add-parking", icon: Car, label: "Vehicles", key: "P" },
+            { mode: "add-label", icon: Type, label: "Text", key: "L" }
           ].map(tool => (
             <button
               key={tool.mode}
               onClick={() => mode === tool.mode ? setMode("select") : setMode(tool.mode as any)}
-              title={tool.label}
-              className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${mode === tool.mode ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"
+              title={`${tool.label} (${tool.key})`}
+              aria-label={tool.label}
+              className={`relative w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${mode === tool.mode ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"
                 }`}
             >
               <tool.icon className="w-5 h-5" />
+              <span className="absolute bottom-0.5 right-1 text-[8px] font-bold opacity-50">{tool.key}</span>
             </button>
           ))}
         </div>
@@ -6233,13 +6290,6 @@ export default function SecurityPlanner() {
         <div className="w-8 h-px bg-white/10 my-1"></div>
 
         <div className="flex flex-col gap-2 w-full px-2">
-          <button
-            onClick={() => setViewMode(viewMode === "plan" ? "iso3d" : "plan")}
-            className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${viewMode === "iso3d" ? "bg-indigo-600 text-white shadow-lg" : "text-slate-400 hover:text-white hover:bg-white/10"}`}
-            title="Switch 2D / 3D"
-          >
-            <Layers className="w-5 h-5" />
-          </button>
 
 
 
@@ -6682,95 +6732,31 @@ export default function SecurityPlanner() {
         </div>
       </div>
 
-      {/* --- Top Header Actions --- */}
-      <div className={`absolute top-4 left-24 right-4 ${rightPanelOffset} h-14 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center px-4 justify-between ring-1 ring-white/5 transition-all duration-300`}>
-        <div className="flex items-center gap-4">
-          <h1 className="text-lg font-bold text-slate-200 tracking-tight flex items-center gap-2 whitespace-nowrap min-w-0 max-w-[16rem] truncate" title={projectName}>
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
-              <Camera className="w-5 h-5" />
-            </div>
-            {projectName}
-          </h1>
-          <div className="h-6 w-px bg-white/10 mx-2"></div>
+      {/* --- Hidden file inputs --- */}
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
+      <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
+      <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
+      <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
+      <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
 
-          <div className="flex items-center gap-1">
-            <button onClick={handleNewProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="New Plan">
-              <Plus className="w-5 h-5" />
-            </button>
-            <button onClick={() => projectInputRef.current?.click()} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Open Plan">
-              <FolderOpen className="w-5 h-5" />
-            </button>
-            <button onClick={handleSaveProject} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors" title="Save Plan">
-              <Save className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Inputs */}
-          <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
-          <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
-          <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
-          <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
-          <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
-
-          <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5" role="tablist" aria-label="View">
-            {([
-              { id: "plan", label: "2D" },
-              { id: "iso3d", label: "3D" }
-            ] as { id: ViewMode; label: string }[]).map(v => (
-              <button
-                key={v.id}
-                role="tab"
-                aria-selected={viewMode === v.id}
-                onClick={() => setViewMode(v.id)}
-                className={`px-3 py-1 rounded-md text-sm font-bold transition-all ${viewMode === v.id ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"}`}
-              >
-                {v.label}
-              </button>
-            ))}
-          </div>
-          <button title="Monitor Wall" onClick={() => setViewMode(viewMode === "nvr" ? "plan" : "nvr")} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${viewMode === "nvr" ? "bg-indigo-600 border-indigo-500 text-white shadow-lg" : "bg-white/5 hover:bg-white/10 border-white/5 text-slate-300"}`}>
-            <LayoutGrid className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Monitor Wall</span>
-          </button>
-          <button
-            onClick={() => {
-              setRightPanelMode("project");
-              setIsRightPanelOpen(true);
-            }}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all"
-          >
-            <MapIcon className="w-4 h-4" />
-            <span>Settings</span>
-          </button>
-          <button
-            onClick={openElevationDialog}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 border border-emerald-400/30 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition-all"
-            title="Download satellite imagery and real elevation for an address"
-          >
-            <Mountain className="w-4 h-4" />
-            <span className="whitespace-nowrap">Import Site</span>
-          </button>
-          <button title="Upload Base Map image" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
-            <Upload className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Base Map</span>
-          </button>
-          <button title="Add image overlay" onClick={() => elementImageInputRef.current?.click()} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all">
-            <ImageIcon className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Overlay</span>
-          </button>
-
-          <button onClick={addPlanToExportList} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-sm font-medium text-slate-300 transition-all" title="Add Current View to Report">
-            <Plus className="w-4 h-4" />
-            <span className="hidden min-[1800px]:inline whitespace-nowrap">Add to Report</span>
-          </button>
-          <button onClick={() => setShowExportPanel(true)} className="flex items-center gap-2 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-lg shadow-indigo-500/20 transition-all">
-            <Download className="w-4 h-4" />
-            <span>Report</span>
-          </button>
-        </div>
-      </div>
+      {/* --- Top Header --- */}
+      <AppHeader
+        className={`absolute top-4 left-24 right-4 ${rightPanelOffset} transition-all duration-300`}
+        projectName={projectName}
+        onRename={setProjectName}
+        onNew={handleNewProject}
+        onOpen={() => projectInputRef.current?.click()}
+        onSave={handleSaveProject}
+        stepsDone={workflowStepsDone}
+        onStep={handleWorkflowStep}
+        viewMode={viewMode}
+        onViewMode={setViewMode}
+        onSettings={() => { setRightPanelMode("project"); setIsRightPanelOpen(true); }}
+        onUploadBaseMap={() => fileInputRef.current?.click()}
+        onAddOverlay={() => elementImageInputRef.current?.click()}
+        onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+        onOpenReport={() => setShowExportPanel(true)}
+      />
 
       {demAlignMode && viewMode !== "plan" && demPreview && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
@@ -7772,6 +7758,39 @@ export default function SecurityPlanner() {
                       </GridLayout>
                     </>
                   )}
+                </div>
+              </div>
+            )}
+
+            {viewMode === "plan" && toolHint && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+                <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
+                  {toolHint}
+                </div>
+              </div>
+            )}
+
+            {viewMode === "plan" && items.length === 0 && !backgroundImg && !isTerrainMode && mode === "select" && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                <div className="pointer-events-auto w-[26rem] max-w-[90%] rounded-2xl border border-white/10 bg-zinc-900/95 shadow-2xl p-6 space-y-4 text-center">
+                  <div className="w-12 h-12 mx-auto rounded-2xl bg-emerald-500/15 text-emerald-400 flex items-center justify-center">
+                    <Mountain className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-100">Start your camera plan</h2>
+                    <p className="text-sm text-slate-400 mt-1">Bring in your property's satellite map, elevation and buildings, then place cameras and see exactly what each one covers.</p>
+                  </div>
+                  <button onClick={openElevationDialog} className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white">
+                    Find my property
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => fileInputRef.current?.click()} className="py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-200">
+                      Upload a map or floor plan
+                    </button>
+                    <button onClick={() => setMode("add-camera")} className="py-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-200">
+                      Start on a blank grid
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -9095,7 +9114,7 @@ export default function SecurityPlanner() {
           ) : (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200">No Selection</h2>
+                <h2 className="font-bold text-lg text-slate-200">Overview</h2>
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -9104,8 +9123,18 @@ export default function SecurityPlanner() {
                   <X className="w-4 h-4" />
                 </button>
               </div>
+              <ProjectOverview
+                items={items}
+                hasSite={workflowStepsDone.site}
+                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onImportSite={openElevationDialog}
+                onAddCamera={() => { setViewMode("plan"); setMode("add-camera"); }}
+                onAddBuilding={() => { setViewMode("plan"); setMode("add-building"); }}
+                showAllCones={frustumSettings.showAll !== false}
+                onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
+              />
               <div className={panelSectionLoose}>
-                <p className="text-sm text-slate-400">Select an item to edit its settings or open plan settings.</p>
+                <p className="text-sm text-slate-400">Click any item on the plan to edit it.</p>
                 <button
                   onClick={() => {
                     setRightPanelMode("project");
