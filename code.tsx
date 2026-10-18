@@ -56,7 +56,7 @@ import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { adjustColor, getEdgeOutwardNormal, getPointsBounds, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize } from "./src/lib/geometry";
+import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { disposeObjectDeep } from "./src/three/dispose";
@@ -250,6 +250,7 @@ export default function SecurityPlanner() {
   };
 
   const applyHistoryState = (state: any) => {
+    suppressDemAutoApply();
     if (Array.isArray(state)) {
       setItems(state);
       return;
@@ -619,6 +620,7 @@ export default function SecurityPlanner() {
 
     setTerrainHeights(next);
     terrainHeightsRef.current = next;
+    if (demAutoApply) setDemAutoApply(false);
   };
 
   const applyDemToTerrain = (
@@ -1000,10 +1002,32 @@ export default function SecurityPlanner() {
           buildingText = " Couldn't reach the building services. Draw buildings over the satellite image with the Building tool.";
         } else {
           const newBuildings = buildingsFromOsm(osm, geoBounds, area, unitsPerFoot);
-          setItems(prev => [
-            ...prev.filter(item => !(item.type === "building" && (item as BuildingItem).importSource === "osm")),
-            ...newBuildings
-          ]);
+          setItems(prev => {
+            // Re-import: keep identity and user edits (height, name, color) of buildings that are still
+            // there, so cameras mounted on them stay attached.
+            const oldImported = prev.filter(item => item.type === "building" && (item as BuildingItem).importSource === "osm") as BuildingItem[];
+            const used = new Set<string>();
+            const merged = newBuildings.map(nb => {
+              const worldPoly = (nb.points ?? []).map(p => ({ x: nb.x + p.x, y: nb.y + p.y }));
+              const match = oldImported.find(ob => !used.has(ob.id) && pointInPolygonXY({ x: ob.x, y: ob.y }, worldPoly));
+              if (!match) return nb;
+              used.add(match.id);
+              return { ...nb, id: match.id, wallHeight: match.wallHeight ?? nb.wallHeight, label: match.label || nb.label, color: match.color };
+            });
+            const keptIds = new Set(merged.map(b => b.id));
+            const rest = prev
+              .filter(item => !(item.type === "building" && (item as BuildingItem).importSource === "osm"))
+              .map(item => {
+                const cam = item as CameraItem;
+                if (item.type !== "camera" || cam.mount?.type !== "building" || !cam.mount.buildingId) return item;
+                const stillImported = oldImported.some(b => b.id === cam.mount!.buildingId);
+                if (!stillImported || keptIds.has(cam.mount.buildingId)) return item;
+                // Its building is gone: leave the camera free-standing where it was.
+                const pos = getCameraPlanPosition(cam);
+                return { ...cam, x: pos.x, y: pos.y, mount: { type: "free" as const, edgeT: 0.5, height: cam.mount.height } };
+              });
+            return [...rest, ...merged];
+          });
           buildingText = newBuildings.length > 0
             ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
             : " No buildings were added. Draw them over the satellite image with the Building tool.";
@@ -1028,7 +1052,7 @@ export default function SecurityPlanner() {
   // Terrain is stored per grid vertex, so changing the grid must resample it (or re-apply the DEM).
   const changeGridSize = (next: number) => {
     if (!Number.isFinite(next) || next <= 0 || next === gridSize) return;
-    if (!(demData && demAutoApply) && Object.keys(terrainHeights).length > 0) {
+    if (Object.keys(terrainHeights).length > 0) {
       const resampled: Record<string, number> = {};
       for (let x = 0; x <= canvasSize.width; x += next) {
         for (let z = 0; z <= canvasSize.height; z += next) {
@@ -1052,8 +1076,13 @@ export default function SecurityPlanner() {
   };
 
   const demAutoApplyTimerRef = useRef<number | null>(null);
+  // Loading a project / undo / import set DEM state but already carry the right terrain (possibly
+  // hand-sculpted). Suppress the auto re-apply briefly so it doesn't overwrite that terrain.
+  const suppressDemApplyUntilRef = useRef(0);
+  const suppressDemAutoApply = () => { suppressDemApplyUntilRef.current = Date.now() + 2000; };
   useEffect(() => {
     if (!demData || !demAutoApply) return;
+    if (Date.now() < suppressDemApplyUntilRef.current) return;
     if (demAutoApplyTimerRef.current) {
       window.clearTimeout(demAutoApplyTimerRef.current);
     }
@@ -1066,7 +1095,9 @@ export default function SecurityPlanner() {
         demAutoApplyTimerRef.current = null;
       }
     };
-  }, [demData, demScale, demOffset, demNormalize, demTransform, canvasSize.width, canvasSize.height, gridSize, demAutoApply]);
+    // Re-apply only when the DEM settings themselves change (not on canvas/grid changes, which resample).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demData, demScale, demOffset, demNormalize, demTransform, demAutoApply]);
 
   // Refs
   const isTerrainModeRef = useRef(isTerrainMode);
@@ -1632,7 +1663,27 @@ export default function SecurityPlanner() {
   };
 
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
-    setItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)));
+    setItems(prev => {
+      const current = prev.find(i => i.id === id);
+      if (!current) return prev;
+      let patch: any = updates;
+      // Keep a camera's vertical FOV in step with its horizontal FOV; a manual FOV change clears the lens preset.
+      if (current.type === "camera" && ("hFov" in patch || "fov" in patch) && !("vFov" in patch)) {
+        const cam = current as CameraItem;
+        const h = patch.hFov ?? patch.fov;
+        patch = { ...patch, vFov: vFovFromH(h, getCameraAspectValue(cam)), ...("lensPreset" in patch ? {} : { lensPreset: undefined }) };
+      }
+      // Rotating a building swings the cameras mounted on it by the same amount.
+      const rotationDelta =
+        current.type === "building" && typeof patch.rotation === "number" ? patch.rotation - current.rotation : 0;
+      return prev.map(item => {
+        if (item.id === id) return { ...item, ...patch } as CanvasItem;
+        if (rotationDelta && item.type === "camera" && (item as CameraItem).mount?.type === "building" && (item as CameraItem).mount?.buildingId === id) {
+          return { ...item, rotation: (((item.rotation + rotationDelta) % 360) + 360) % 360 };
+        }
+        return item;
+      });
+    });
   };
 
   // Mount height is stored on the mount (building or free); keep `height` in sync for older readers.
@@ -2572,6 +2623,7 @@ export default function SecurityPlanner() {
   // Loads a saved project, replacing everything from the current one (anything the file
   // doesn't contain is reset rather than left over from the previous project).
   const applyProjectData = (projectData: any) => {
+    suppressDemAutoApply();
     setItems(Array.isArray(projectData.items) ? projectData.items : []);
     setSelectedId(null);
     setMode("select");
@@ -5425,8 +5477,8 @@ export default function SecurityPlanner() {
     setSelectedId(id);
     const pos = getSvgMousePos(e);
 
-    // Check for Edge Click on Building (Insert Vertex)
-    if (type === "move" && selectedId === id && item.type === "building") {
+    // Shift+click on an edge of the selected building inserts a corner (a plain press always moves it).
+    if (type === "move" && e.shiftKey && selectedId === id && item.type === "building") {
       const building = item as BuildingItem;
       const worldPoints = getBuildingEdgePointsWorld(building);
       for (let i = 0; i < worldPoints.length; i++) {
@@ -5439,7 +5491,7 @@ export default function SecurityPlanner() {
         const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
         const dist = Math.sqrt((pos.x - proj.x) ** 2 + (pos.y - proj.y) ** 2);
 
-        if (dist < 8) {
+        if (dist < 10 * planUi) {
           handleInsertBuildingVertexAtPoint(id, proj);
           setTimeout(() => saveHistory(), 50);
           return;
@@ -5629,7 +5681,7 @@ export default function SecurityPlanner() {
       const deltaX = pos.x - basePos.x;
       const deltaY = pos.y - basePos.y;
       const dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-      updateItem(interactionState.itemId, { range: Math.max(dist, 50) });
+      updateItem(interactionState.itemId, { range: Math.max(dist, 5) });
     } else if (interactionState.type === "vertex" && item.type === "building") {
       const local = toLocalPoint(pos, item);
       const points = getBuildingPoints(item);
@@ -5816,6 +5868,7 @@ export default function SecurityPlanner() {
       case "add-label": return "Click to add a text label";
       default:
         if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
+        if (selectedItem?.type === "building") return "Drag to move · drag corners to reshape · Shift+click an edge to add a corner · drag the label to move it";
         return null;
     }
   })();
@@ -7248,6 +7301,8 @@ export default function SecurityPlanner() {
                             {!(building.importSource && !building.label?.trim()) && <g
                               transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
                               onMouseDown={e => {
+                                // Labels move separately only once the building is selected; otherwise drag the building.
+                                if (selectedId !== building.id) return;
                                 e.stopPropagation();
                                 handleMouseDown(e, building.id, "move-label");
                               }}
@@ -8773,7 +8828,7 @@ export default function SecurityPlanner() {
                     </label>
                     <input
                       type="range"
-                      min="50"
+                      min="5"
                       max="800"
                       value={(selectedItem as CameraItem).range}
                       onChange={e => updateItem(selectedItem.id, { range: parseInt(e.target.value) })}
