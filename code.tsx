@@ -43,8 +43,9 @@ import "react-resizable/css/styles.css";
 import { NVRCard } from "./src/components/NVRCard";
 import { useProjectField, getProject, useProject, createEmptyProject, projectRef } from "./src/state/project";
 import { SitePickerMap } from "./src/components/SitePickerMap";
+import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { diagonalFromHv, fovFromDiagonal, getCameraAspectValue, hFovFromV, vFovFromH } from "./src/lib/camera";
+import { DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
@@ -102,6 +103,7 @@ export default function SecurityPlanner() {
   const [elevationOverlay, setElevationOverlay] = useProjectField("elevationOverlay");
   const [elevationImagery, setElevationImagery] = useState<MapImagerySource | "keep">("satellite");
   const elevationReadoutRef = useRef<HTMLDivElement>(null);
+  const cameraReadoutRef = useRef<HTMLDivElement>(null);
   const planBrushCursorRef = useRef<SVGCircleElement>(null);
   const [demTransformDrag, setDemTransformDrag] = useState<{
     mode: "move" | "scale" | "rotate";
@@ -511,6 +513,22 @@ export default function SecurityPlanner() {
   }, [terrainHeights, gridSize, canvasSize.width, canvasSize.height, terrainStats.min, terrainStats.relief, hasTerrain]);
 
   const formatElevation = (value: number) => `${value >= 0 ? "" : "-"}${Math.abs(value) < 10 ? Math.abs(value).toFixed(1) : Math.round(Math.abs(value))} ft`;
+
+  // "32 ft from Camera 2 · 52 px/ft · Recognize" under the cursor while a camera is selected.
+  const updateCameraReadout = (x: number, y: number) => {
+    const el = cameraReadoutRef.current;
+    if (!el) return;
+    const cam = items.find(i => i.id === selectedId && i.type === "camera") as CameraItem | undefined;
+    if (!cam) {
+      el.style.opacity = "0";
+      return;
+    }
+    const pos = getCameraPlanPosition(cam);
+    const dist = Math.hypot(x - pos.x, y - pos.y);
+    const level = doriLevelAt(cam, dist);
+    el.style.opacity = "1";
+    el.textContent = `${Math.round(dist)} ft from ${cam.label} · ${Math.round(pixelsPerFootAt(cam, dist))} px/ft · ${level ? level.label : "Too far"}`;
+  };
 
   const updateElevationReadout = (x: number, y: number) => {
     const el = elevationReadoutRef.current;
@@ -1119,6 +1137,13 @@ export default function SecurityPlanner() {
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
+  // View preference: DORI coverage bands in the 2D cones (remembered per browser).
+  const [showDoriZones, setShowDoriZones] = useState(() => {
+    try { return localStorage.getItem("scp.showDori") !== "0"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.showDori", showDoriZones ? "1" : "0"); } catch { /* ignore */ }
+  }, [showDoriZones]);
 
   // Export list - curated snapshots for client report
   const [exportList, setExportList] = useProjectField("exportList");
@@ -1599,6 +1624,11 @@ export default function SecurityPlanner() {
 
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
     setItems(prev => prev.map(item => (item.id === id ? { ...item, ...updates } : item)));
+  };
+
+  // Mount height is stored on the mount (building or free); keep `height` in sync for older readers.
+  const setCameraMountHeight = (camera: CameraItem, height: number) => {
+    updateItem(camera.id, { height, mount: { ...(camera.mount ?? { type: "free" as const }), height } });
   };
 
   const updateCameraMount = (cameraId: string, updates: Partial<NonNullable<CameraItem["mount"]>>) => {
@@ -5238,6 +5268,7 @@ export default function SecurityPlanner() {
     {
       const hoverPos = getSvgMousePos(e);
       updateElevationReadout(hoverPos.x, hoverPos.y);
+      updateCameraReadout(hoverPos.x, hoverPos.y);
       const brushCursor = planBrushCursorRef.current;
       if (brushCursor) {
         brushCursor.setAttribute("cx", `${hoverPos.x}`);
@@ -6824,12 +6855,16 @@ export default function SecurityPlanner() {
                 onMouseUp={handleSvgMouseUp}
                 onMouseDown={handleSvgMouseDown}
                 onMouseDownCapture={handlePlanTerrainMouseDown}
-                onMouseLeave={() => updateElevationReadout(-1, -1)}
+                onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
                 onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
                 xmlns="http://www.w3.org/2000/svg"
               >
                 <defs>
+                  <pattern id="blind-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="6" height="6" fill="rgba(239,68,68,0.08)" />
+                    <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(239,68,68,0.45)" strokeWidth="2" />
+                  </pattern>
                   <pattern id="smallGrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
                     <path
                       d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
@@ -7306,6 +7341,37 @@ export default function SecurityPlanner() {
                               stroke={`url(#grad-blue-stroke-${c.id})`}
                               strokeWidth="1" pointerEvents="none"
                             />
+                            {showDoriZones && (() => {
+                              // What the camera can make out at each distance (DORI), clipped to what it can actually see.
+                              const a0 = ((c.rotation - hFov / 2) * Math.PI) / 180;
+                              const a1 = ((c.rotation + hFov / 2) * Math.PI) / 180;
+                              const large = hFov > 180 ? 1 : 0;
+                              const pt = (radius: number, a: number) => `${radius * Math.cos(a)} ${radius * Math.sin(a)}`;
+                              const ring = (rIn: number, rOut: number) =>
+                                rIn <= 0.01
+                                  ? `M 0 0 L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} Z`
+                                  : `M ${pt(rIn, a0)} L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} L ${pt(rIn, a1)} A ${rIn} ${rIn} 0 ${large} 0 ${pt(rIn, a0)} Z`;
+                              const zones = getDoriDistances(c);
+                              const camMount = c.mount?.height ?? c.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+                              const vf = c.vFov ?? vFovFromH(hFov, getCameraAspectValue(c));
+                              const blind = getGroundCoverage(camMount, c.pitch ?? DEFAULT_CAMERA_PITCH, vf).near;
+                              let inner = 0;
+                              return (
+                                <g clipPath={`url(#clip-${c.id})`} pointerEvents="none">
+                                  <clipPath id={`clip-${c.id}`}><path d={dClear} /></clipPath>
+                                  {zones.map(zone => {
+                                    const outer = Math.min(zone.distance, r);
+                                    if (outer <= inner) return null;
+                                    const d = ring(inner, outer);
+                                    inner = outer;
+                                    return <path key={zone.id} d={d} fill={zone.color} fillOpacity={0.16} stroke={zone.color} strokeOpacity={0.5} strokeWidth={0.75 / zoom} />;
+                                  })}
+                                  {Number.isFinite(blind) && blind > 0.5 && (
+                                    <path d={ring(0, Math.min(blind, r))} fill="url(#blind-hatch)" stroke="#ef4444" strokeOpacity={0.6} strokeWidth={0.75 / zoom} strokeDasharray={`${3 / zoom} ${3 / zoom}`} />
+                                  )}
+                                </g>
+                              );
+                            })()}
                             <g transform={`rotate(${c.rotation})`}>
                               <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
                               <circle cx="0" cy="0" r="4" fill={c.color} />
@@ -7713,10 +7779,37 @@ export default function SecurityPlanner() {
             {(viewMode === "plan" || viewMode === "iso3d") && (
               <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2 pointer-events-none">
                 <div
+                  ref={cameraReadoutRef}
+                  className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
+                  style={{ opacity: 0 }}
+                />
+                <div
                   ref={elevationReadoutRef}
                   className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
                   style={{ opacity: 0 }}
                 />
+                {viewMode === "plan" && items.some(i => i.type === "camera") && (
+                  <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto space-y-1.5">
+                    <label className="flex items-center justify-between gap-3 cursor-pointer font-semibold text-slate-200">
+                      Coverage zones
+                      <input type="checkbox" checked={showDoriZones} onChange={e => setShowDoriZones(e.target.checked)} className="accent-emerald-500" />
+                    </label>
+                    {showDoriZones && (
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        {DORI_LEVELS.map(level => (
+                          <span key={level.id} className="flex items-center gap-1.5" title={level.hint}>
+                            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: level.color }} />
+                            {level.label}
+                          </span>
+                        ))}
+                        <span className="flex items-center gap-1.5 col-span-2" title="Too close/steep for the camera to see">
+                          <span className="w-2.5 h-2.5 rounded-sm border border-red-400" style={{ background: "repeating-linear-gradient(45deg, rgba(239,68,68,.5) 0 2px, transparent 2px 4px)" }} />
+                          Blind spot under camera
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {hasTerrain && (
                   <div className="flex items-center gap-0.5 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto" role="group" aria-label="Elevation display">
                     <Mountain className="w-3.5 h-3.5 text-slate-400 mx-1.5" />
@@ -8307,7 +8400,21 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "camera" && (
-                <div className={panelSectionLoose}>
+                <>
+                <div className={panelSection}>
+                  <CameraSetupPanel
+                    camera={selectedItem as CameraItem}
+                    mountHeight={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? DEFAULT_CAMERA_HEIGHT_FT}
+                    onChange={updates => updateItem(selectedItem.id, updates)}
+                    onMountHeightChange={height => setCameraMountHeight(selectedItem as CameraItem, height)}
+                  />
+                </div>
+                <details className={`${panelSectionLoose} group`}>
+                  <summary className="cursor-pointer list-none flex items-center justify-between gap-3 text-xs font-semibold text-slate-300">
+                    <span className="uppercase whitespace-nowrap">Fine-tune</span>
+                    <span className="text-slate-500 font-normal text-right group-open:hidden">exact angles, lens & mounting</span>
+                  </summary>
+                  <div className="space-y-4 pt-4">
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                       <span>Horizontal FOV</span>
@@ -8452,14 +8559,7 @@ export default function SecurityPlanner() {
                         min="4"
                         max="40"
                         value={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10}
-                        onChange={e => {
-                          const value = parseInt(e.target.value);
-                          if ((selectedItem as CameraItem).mount?.type === "building") {
-                            updateCameraMount(selectedItem.id, { height: value });
-                          } else {
-                            updateItem(selectedItem.id, { height: value });
-                          }
-                        }}
+                        onChange={e => setCameraMountHeight(selectedItem as CameraItem, parseInt(e.target.value))}
                         className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                       />
                     </div>
@@ -8577,7 +8677,9 @@ export default function SecurityPlanner() {
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                     />
                   </div>
-                </div>
+                  </div>
+                </details>
+                </>
               )}
 
               {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (

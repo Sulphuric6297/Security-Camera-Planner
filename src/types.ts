@@ -87,6 +87,9 @@ export interface CameraItem extends BaseItem {
   color: string;
   labelOffset?: { x: number; y: number };
   connectorDashSize?: number;
+  resolutionWidth?: number; // horizontal pixels (e.g. 2688 for 4 MP); drives DORI distances
+  mountPreset?: string;
+  lensPreset?: string;
 }
 
 export interface BuildingItem extends BaseItem {
