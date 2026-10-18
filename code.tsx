@@ -252,38 +252,168 @@ const latToPixel = (lat: number, z: number) => {
 };
 
 // Accepts "lat, lon", a Google Maps / Apple Maps / OSM link, or a plain address (geocoded via OpenStreetMap).
-const resolveSiteLocation = async (input: string): Promise<SiteLocation> => {
-  const text = input.trim();
-  if (!text) throw new Error("Enter an address, coordinates, or a map link.");
-  const isValid = (lat: number, lon: number) =>
-    Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+// --- Address search (free, keyless; several providers so one outage or gap doesn't break search) ---
+
+type PlaceSuggestion = { text: string; detail?: string; lat?: number; lon?: number; magicKey?: string };
+
+const isValidLatLon = (lat: number, lon: number) =>
+  Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+
+// Coordinates or a map link (Google/Apple/OSM) typed or pasted into the search box.
+const parseCoordinateInput = (text: string): SiteLocation | null => {
   const patterns = [
     /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/, // Google Maps pin
     /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/, // Google Maps view center
     /[?&](?:q|ll|query|center)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i, // ?q=lat,lon
     /[#&]map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/, // openstreetmap.org/#map=z/lat/lon
-    /^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/ // "lat, lon"
+    /^\s*(-?\d+(?:\.\d+)?)°?\s*[, ]\s*(-?\d+(?:\.\d+)?)°?\s*$/ // "lat, lon"
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match) {
       const lat = parseFloat(match[1]);
       const lon = parseFloat(match[2]);
-      if (isValid(lat, lon)) return { lat, lon, label: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
+      if (isValidLatLon(lat, lon)) return { lat, lon, label: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
     }
   }
-  const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(text)}`, {
-    headers: { Accept: "application/json" }
-  });
-  if (!res.ok) throw new Error("Address lookup failed. Try entering coordinates instead (e.g. 39.7392, -104.9903).");
-  const results = await res.json();
-  if (!Array.isArray(results) || results.length === 0) {
-    throw new Error("Couldn't find that address. Try a more specific address or paste coordinates.");
+  return null;
+};
+
+const fetchJson = async (url: string, timeoutMs = 8000) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (json?.error) throw new Error(json.error.message || "Service error");
+    return json;
+  } finally {
+    window.clearTimeout(timer);
   }
-  const lat = parseFloat(results[0].lat);
-  const lon = parseFloat(results[0].lon);
-  if (!isValid(lat, lon)) throw new Error("Address lookup returned an invalid location.");
-  return { lat, lon, label: results[0].display_name || text };
+};
+
+const ESRI_GEOCODER = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer";
+
+// Esri World Geocoder: strongest for US street addresses, including rural routes.
+const esriFindCandidates = async (text: string, near?: { lat: number; lon: number }, magicKey?: string): Promise<SiteLocation[]> => {
+  const params = new URLSearchParams({ SingleLine: text, f: "json", maxLocations: "5", outFields: "Match_addr,Addr_type" });
+  if (magicKey) params.set("magicKey", magicKey);
+  if (near) params.set("location", `${near.lon},${near.lat}`);
+  const json = await fetchJson(`${ESRI_GEOCODER}/findAddressCandidates?${params.toString()}`);
+  return (json.candidates ?? [])
+    .filter((c: any) => c.score >= 70 && isValidLatLon(c.location?.y, c.location?.x))
+    .map((c: any) => ({ lat: c.location.y, lon: c.location.x, label: c.address || text }));
+};
+
+// US Census geocoder: official US address ranges. Called via JSONP because it doesn't send CORS headers.
+const censusFindCandidates = (text: string): Promise<SiteLocation[]> =>
+  new Promise((resolve, reject) => {
+    const callback = `__censusGeocode${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const script = document.createElement("script");
+    const cleanup = () => {
+      delete (window as any)[callback];
+      script.remove();
+      window.clearTimeout(timer);
+    };
+    const timer = window.setTimeout(() => { cleanup(); reject(new Error("Census timeout")); }, 8000);
+    (window as any)[callback] = (json: any) => {
+      cleanup();
+      const matches = json?.result?.addressMatches ?? [];
+      resolve(matches
+        .filter((m: any) => isValidLatLon(m.coordinates?.y, m.coordinates?.x))
+        .map((m: any) => ({ lat: m.coordinates.y, lon: m.coordinates.x, label: m.matchedAddress || text })));
+    };
+    script.onerror = () => { cleanup(); reject(new Error("Census unavailable")); };
+    script.src = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?${new URLSearchParams({
+      address: text,
+      benchmark: "Public_AR_Current",
+      format: "jsonp",
+      callback
+    }).toString()}`;
+    document.head.appendChild(script);
+  });
+
+// Photon (OpenStreetMap-based): good for places, roads and towns; supports a location bias.
+const photonSearch = async (text: string, near?: { lat: number; lon: number }, limit = 5): Promise<PlaceSuggestion[]> => {
+  const params = new URLSearchParams({ q: text, limit: String(limit), lang: "en" });
+  if (near) {
+    params.set("lat", String(near.lat));
+    params.set("lon", String(near.lon));
+  }
+  const json = await fetchJson(`https://photon.komoot.io/api/?${params.toString()}`);
+  return (json.features ?? []).map((f: any) => {
+    const p = f.properties ?? {};
+    const street = [p.housenumber, p.street].filter(Boolean).join(" ");
+    const title = p.name || street || p.city || text;
+    const detail = [p.name && street ? street : null, p.city || p.county, p.state, p.postcode].filter(Boolean).join(", ");
+    return { text: title, detail, lon: f.geometry?.coordinates?.[0], lat: f.geometry?.coordinates?.[1] };
+  }).filter((s: PlaceSuggestion) => isValidLatLon(s.lat as number, s.lon as number));
+};
+
+const nominatimSearch = async (text: string): Promise<SiteLocation[]> => {
+  const json = await fetchJson(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(text)}`);
+  return (Array.isArray(json) ? json : [])
+    .map((r: any) => ({ lat: parseFloat(r.lat), lon: parseFloat(r.lon), label: r.display_name || text }))
+    .filter((r: SiteLocation) => isValidLatLon(r.lat, r.lon));
+};
+
+// Suggestions while typing: Esri first (addresses), Photon as backup (places).
+const fetchPlaceSuggestions = async (text: string, near?: { lat: number; lon: number }): Promise<PlaceSuggestion[]> => {
+  if (text.trim().length < 3 || parseCoordinateInput(text)) return [];
+  try {
+    const params = new URLSearchParams({ text, f: "json", maxSuggestions: "6", countryCode: "USA,CAN" });
+    if (near) params.set("location", `${near.lon},${near.lat}`);
+    const json = await fetchJson(`${ESRI_GEOCODER}/suggest?${params.toString()}`, 5000);
+    const list: PlaceSuggestion[] = (json.suggestions ?? [])
+      .filter((s: any) => !s.isCollection)
+      .map((s: any) => {
+        const [first, ...rest] = String(s.text).split(", ");
+        return { text: first, detail: rest.join(", "), magicKey: s.magicKey };
+      });
+    if (list.length > 0) return list;
+  } catch {
+    // fall back to Photon
+  }
+  try {
+    return await photonSearch(text, near, 6);
+  } catch {
+    return [];
+  }
+};
+
+// Resolves typed text (or a picked suggestion) to a location, trying each provider in turn.
+const resolveSiteLocation = async (
+  input: string,
+  options?: { near?: { lat: number; lon: number }; suggestion?: PlaceSuggestion }
+): Promise<SiteLocation> => {
+  const text = input.trim();
+  if (!text) throw new Error("Enter an address, coordinates, or a map link.");
+  const coords = parseCoordinateInput(text);
+  if (coords) return coords;
+  const suggestion = options?.suggestion;
+  if (suggestion && isValidLatLon(suggestion.lat as number, suggestion.lon as number)) {
+    return { lat: suggestion.lat as number, lon: suggestion.lon as number, label: [suggestion.text, suggestion.detail].filter(Boolean).join(", ") };
+  }
+  const attempts: (() => Promise<SiteLocation[]>)[] = [
+    () => esriFindCandidates(text, options?.near, suggestion?.magicKey),
+    () => censusFindCandidates(text),
+    () => photonSearch(text, options?.near, 1).then(list => list.map(s => ({
+      lat: s.lat as number,
+      lon: s.lon as number,
+      label: [s.text, s.detail].filter(Boolean).join(", ")
+    }))),
+    () => nominatimSearch(text)
+  ];
+  for (const attempt of attempts) {
+    try {
+      const results = await attempt();
+      if (results.length > 0) return results[0];
+    } catch (err) {
+      console.info("Geocoder unavailable, trying the next one", err);
+    }
+  }
+  throw new Error("Couldn't find that address. Try adding the town and state, pick a suggestion, or just drag the map to your property.");
 };
 
 const loadTileImage = (url: string) =>
@@ -824,6 +954,81 @@ const fetchOsmBuildings = async (bounds: GeoBounds): Promise<OsmBuilding[]> => {
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Building lookup failed.");
+};
+
+// AI-detected building footprints for the whole US (FEMA / Oak Ridge National Lab "USA Structures").
+// Used to guess buildings where OpenStreetMap has none; the user confirms which to keep.
+const USA_STRUCTURES_QUERY = "https://services2.arcgis.com/FiaPA4ga0iQKduv3/ArcGIS/rest/services/USA_Structures_View/FeatureServer/0/query";
+
+const fetchDetectedStructures = async (bounds: GeoBounds): Promise<OsmBuilding[]> => {
+  const params = new URLSearchParams({
+    where: "1=1",
+    geometry: `${bounds.west},${bounds.south},${bounds.east},${bounds.north}`,
+    geometryType: "esriGeometryEnvelope",
+    inSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    outFields: "HEIGHT,OCC_CLS,PRIM_OCC",
+    returnGeometry: "true",
+    outSR: "4326",
+    resultRecordCount: "1000",
+    f: "geojson"
+  });
+  const json = await fetchJson(`${USA_STRUCTURES_QUERY}?${params.toString()}`, 15000);
+  const buildings: OsmBuilding[] = [];
+  (json.features ?? []).forEach((f: any) => {
+    const geom = f.geometry;
+    const ring: number[][] | undefined =
+      geom?.type === "Polygon" ? geom.coordinates?.[0] : geom?.type === "MultiPolygon" ? geom.coordinates?.[0]?.[0] : undefined;
+    if (!ring || ring.length < 4) return;
+    const points = ring.map(([lon, lat]) => ({ lat, lon }));
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (first.lat === last.lat && first.lon === last.lon) points.pop();
+    const heightM = Number(f.properties?.HEIGHT);
+    const heightFt = Number.isFinite(heightM) && heightM > 1 && heightM < 200 ? Math.round(heightM * FEET_PER_METER) : 18;
+    buildings.push({ points, heightFt, label: "" });
+  });
+  return buildings;
+};
+
+// A building found for the selected area, shown on the picker map for the user to keep or drop.
+type BuildingCandidate = OsmBuilding & { id: string; source: "osm" | "detected"; selected: boolean };
+
+const pointInLatLonPolygon = (pt: { lat: number; lon: number }, poly: { lat: number; lon: number }[]) => {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if ((a.lat > pt.lat) !== (b.lat > pt.lat) && pt.lon < ((b.lon - a.lon) * (pt.lat - a.lat)) / (b.lat - a.lat) + a.lon) {
+      inside = !inside;
+    }
+  }
+  return inside;
+};
+
+const latLonCentroid = (points: { lat: number; lon: number }[]) => ({
+  lat: points.reduce((sum, p) => sum + p.lat, 0) / points.length,
+  lon: points.reduce((sum, p) => sum + p.lon, 0) / points.length
+});
+
+// Mapped (OpenStreetMap) buildings first; detected footprints fill in where nothing is mapped.
+const findBuildingCandidates = async (bounds: GeoBounds) => {
+  const [osm, detected] = await Promise.all([
+    fetchOsmBuildings(bounds).catch(err => { console.info("OpenStreetMap buildings unavailable", err); return null; }),
+    fetchDetectedStructures(bounds).catch(err => { console.info("Detected structures unavailable", err); return null; })
+  ]);
+  const inArea = (b: OsmBuilding) => {
+    const c = latLonCentroid(b.points);
+    return c.lat >= bounds.south && c.lat <= bounds.north && c.lon >= bounds.west && c.lon <= bounds.east;
+  };
+  const candidates: BuildingCandidate[] = [];
+  (osm ?? []).filter(inArea).forEach(b => candidates.push({ ...b, id: generateId(), source: "osm", selected: true }));
+  (detected ?? []).filter(inArea).forEach(b => {
+    const c = latLonCentroid(b.points);
+    const duplicate = candidates.some(o => o.source === "osm" && pointInLatLonPolygon(c, o.points));
+    if (!duplicate) candidates.push({ ...b, id: generateId(), source: "detected", selected: true });
+  });
+  return { candidates: candidates.slice(0, 600), osmOk: osm !== null, detectedOk: detected !== null };
 };
 
 const getTerrainStats = (heights: Record<string, number>) => {
@@ -1561,14 +1766,19 @@ const getCameraAspectValue = (camera?: CameraItem | null) => {
   return 16 / 9;
 };
 
-// Interactive satellite map used to pick the site: pan/zoom, then drag to draw the import rectangle.
+// Interactive satellite map used to pick the site.
+// Drag pans the map; draw a rectangle with the Draw tool or Shift+drag; then move/resize it with its handles.
+// Building candidates are drawn on top and toggled by clicking them.
 function SitePickerMap({
   imagery,
   view,
   selection,
   drawing,
   onDrawingChange,
-  onSelect
+  onSelect,
+  selectViewSignal,
+  candidates,
+  onToggleCandidate
 }: {
   imagery: MapImagerySource;
   view: { lat: number; lon: number; zoom: number; key: number };
@@ -1576,28 +1786,90 @@ function SitePickerMap({
   drawing: boolean;
   onDrawingChange: (drawing: boolean) => void;
   onSelect: (bounds: GeoBounds) => void;
+  selectViewSignal: number;
+  candidates: BuildingCandidate[];
+  onToggleCandidate: (id: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layersRef = useRef<L.Layer[]>([]);
   const rectRef = useRef<L.Rectangle | null>(null);
+  const handlesRef = useRef<L.Marker[]>([]);
+  const candidateLayerRef = useRef<L.LayerGroup | null>(null);
   const onSelectRef = useRef(onSelect);
   const onDrawingChangeRef = useRef(onDrawingChange);
+  const onToggleRef = useRef(onToggleCandidate);
+  const drawingRef = useRef(drawing);
   onSelectRef.current = onSelect;
   onDrawingChangeRef.current = onDrawingChange;
+  onToggleRef.current = onToggleCandidate;
+  drawingRef.current = drawing;
+
+  const boundsToObj = (b: L.LatLngBounds): GeoBounds => ({ north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() });
+  const dimsLabel = (b: GeoBounds) => {
+    const d = selectionFromBounds(b, "");
+    return `${Math.round(d.widthFt)} × ${Math.round(d.heightFt)} ft`;
+  };
+  const isUsable = (b: GeoBounds) => {
+    const d = selectionFromBounds(b, "");
+    return d.widthFt >= SITE_MIN_WIDTH_FT && d.heightFt >= SITE_MIN_WIDTH_FT;
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: true, maxZoom: 21, attributionControl: true })
+    const map = L.map(containerRef.current, { zoomControl: true, maxZoom: 21, attributionControl: true, boxZoom: false })
       .setView([view.lat, view.lon], view.zoom);
     mapRef.current = map;
-    // The dialog animates in; make sure Leaflet measures the final size.
+    candidateLayerRef.current = L.layerGroup().addTo(map);
     const resize = window.setTimeout(() => map.invalidateSize(), 60);
+
+    // Rectangle drawing: Draw tool, or Shift+drag at any time. Pointer events so touch works too.
+    const container = map.getContainer();
+    let start: L.LatLng | null = null;
+    let preview: L.Rectangle | null = null;
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0 || !(drawingRef.current || e.shiftKey)) return;
+      if ((e.target as HTMLElement).closest(".leaflet-control, .site-handle")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      container.setPointerCapture?.(e.pointerId);
+      start = map.mouseEventToLatLng(e as unknown as MouseEvent);
+      preview = L.rectangle(L.latLngBounds(start, start), { color: "#f59e0b", weight: 2, fillOpacity: 0.12, interactive: false }).addTo(map);
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!start || !preview) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const b = L.latLngBounds(start, map.mouseEventToLatLng(e as unknown as MouseEvent));
+      preview.setBounds(b);
+      preview.unbindTooltip();
+      preview.bindTooltip(dimsLabel(boundsToObj(b)), { permanent: true, direction: "center", className: "site-picker-tooltip" }).openTooltip();
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (!start) return;
+      e.stopPropagation();
+      const b = L.latLngBounds(start, map.mouseEventToLatLng(e as unknown as MouseEvent));
+      preview?.remove();
+      preview = null;
+      start = null;
+      const bounds = boundsToObj(b);
+      if (isUsable(bounds)) {
+        onSelectRef.current(bounds);
+        onDrawingChangeRef.current(false);
+      }
+    };
+    container.addEventListener("pointerdown", onPointerDown, true);
+    container.addEventListener("pointermove", onPointerMove, true);
+    container.addEventListener("pointerup", onPointerUp, true);
     return () => {
       window.clearTimeout(resize);
+      container.removeEventListener("pointerdown", onPointerDown, true);
+      container.removeEventListener("pointermove", onPointerMove, true);
+      container.removeEventListener("pointerup", onPointerUp, true);
       map.remove();
       mapRef.current = null;
       rectRef.current = null;
+      handlesRef.current = [];
       layersRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1606,6 +1878,22 @@ function SitePickerMap({
   useEffect(() => {
     mapRef.current?.setView([view.lat, view.lon], view.zoom);
   }, [view.key]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getContainer().style.cursor = drawing ? "crosshair" : "";
+  }, [drawing]);
+
+  // "Select this view": the visible map minus a margin.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || selectViewSignal === 0) return;
+    const b = map.getBounds().pad(-0.12);
+    const bounds = boundsToObj(b);
+    if (isUsable(bounds)) onSelectRef.current(bounds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectViewSignal]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1639,9 +1927,12 @@ function SitePickerMap({
     layersRef.current.forEach(layer => layer.addTo(map));
   }, [imagery]);
 
+  // Selection rectangle with corner handles (resize) and a center handle (move).
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+    handlesRef.current.forEach(h => h.remove());
+    handlesRef.current = [];
     if (!selection) {
       rectRef.current?.remove();
       rectRef.current = null;
@@ -1653,65 +1944,93 @@ function SitePickerMap({
         color: "#10b981",
         weight: 3,
         fillColor: "#10b981",
-        fillOpacity: 0.12,
+        fillOpacity: 0.08,
         dashArray: "8 6",
         interactive: false
       }).addTo(map);
     } else {
       rectRef.current.setBounds(latLngBounds);
     }
-    const dims = selectionFromBounds(selection, "");
-    rectRef.current.unbindTooltip();
-    rectRef.current.bindTooltip(`${Math.round(dims.widthFt)} × ${Math.round(dims.heightFt)} ft`, {
-      permanent: true,
-      direction: "center",
-      className: "site-picker-tooltip"
-    }).openTooltip();
+    const rect = rectRef.current;
+    const setLabel = (b: GeoBounds) => {
+      rect.unbindTooltip();
+      rect.bindTooltip(dimsLabel(b), { permanent: true, direction: "top", className: "site-picker-tooltip", offset: [0, -8] }).openTooltip(L.latLng(b.north, (b.west + b.east) / 2));
+    };
+    setLabel(selection);
+
+    let live: GeoBounds = { ...selection };
+    const cornerIcon = L.divIcon({ className: "site-handle site-handle-corner", iconSize: [16, 16] });
+    const moveIcon = L.divIcon({ className: "site-handle site-handle-move", iconSize: [30, 30], html: "<span>✥</span>" });
+    const corners: { key: "nw" | "ne" | "se" | "sw"; pos: () => L.LatLngExpression }[] = [
+      { key: "nw", pos: () => [live.north, live.west] },
+      { key: "ne", pos: () => [live.north, live.east] },
+      { key: "se", pos: () => [live.south, live.east] },
+      { key: "sw", pos: () => [live.south, live.west] }
+    ];
+    const markers: L.Marker[] = [];
+    const center = () => L.latLng((live.north + live.south) / 2, (live.west + live.east) / 2);
+    const refresh = (except?: L.Marker) => {
+      rect.setBounds(L.latLngBounds([live.south, live.west], [live.north, live.east]));
+      setLabel(live);
+      corners.forEach((c, i) => { if (markers[i] !== except) markers[i].setLatLng(c.pos()); });
+      if (markers[4] !== except) markers[4].setLatLng(center());
+    };
+    corners.forEach(c => {
+      const marker = L.marker(c.pos(), { icon: cornerIcon, draggable: true, keyboard: false, zIndexOffset: 1000 }).addTo(map);
+      marker.on("drag", () => {
+        const p = marker.getLatLng();
+        if (c.key.includes("n")) live.north = p.lat; else live.south = p.lat;
+        if (c.key.includes("w")) live.west = p.lng; else live.east = p.lng;
+        const n = Math.max(live.north, live.south);
+        const sth = Math.min(live.north, live.south);
+        const e = Math.max(live.east, live.west);
+        const w = Math.min(live.east, live.west);
+        live = { north: n, south: sth, east: e, west: w };
+        refresh(marker);
+      });
+      marker.on("dragend", () => { if (isUsable(live)) onSelectRef.current({ ...live }); else refresh(); });
+      markers.push(marker);
+    });
+    const mover = L.marker(center(), { icon: moveIcon, draggable: true, keyboard: false, zIndexOffset: 1000, title: "Drag to move the area" }).addTo(map);
+    let moveStart: L.LatLng | null = null;
+    let startBounds = live;
+    mover.on("dragstart", () => { moveStart = mover.getLatLng(); startBounds = { ...live }; });
+    mover.on("drag", () => {
+      if (!moveStart) return;
+      const p = mover.getLatLng();
+      const dLat = p.lat - moveStart.lat;
+      const dLon = p.lng - moveStart.lng;
+      live = { north: startBounds.north + dLat, south: startBounds.south + dLat, west: startBounds.west + dLon, east: startBounds.east + dLon };
+      refresh(mover);
+    });
+    mover.on("dragend", () => onSelectRef.current({ ...live }));
+    markers.push(mover);
+    handlesRef.current = markers;
   }, [selection]);
 
+  // Building candidates: green = mapped (OpenStreetMap), amber = detected; faded when excluded. Click to toggle.
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !drawing) return;
-    const container = map.getContainer();
-    map.dragging.disable();
-    map.boxZoom.disable();
-    container.style.cursor = "crosshair";
-    let start: L.LatLng | null = null;
-    let preview: L.Rectangle | null = null;
-
-    const onDown = (e: L.LeafletMouseEvent) => {
-      start = e.latlng;
-      preview = L.rectangle(L.latLngBounds(start, start), { color: "#f59e0b", weight: 2, fillOpacity: 0.1, interactive: false }).addTo(map);
-    };
-    const onMove = (e: L.LeafletMouseEvent) => {
-      if (start && preview) preview.setBounds(L.latLngBounds(start, e.latlng));
-    };
-    const onUp = (e: L.LeafletMouseEvent) => {
-      if (!start) return;
-      const b = L.latLngBounds(start, e.latlng);
-      preview?.remove();
-      preview = null;
-      start = null;
-      const bounds = { north: b.getNorth(), south: b.getSouth(), west: b.getWest(), east: b.getEast() };
-      const dims = selectionFromBounds(bounds, "");
-      if (dims.widthFt >= SITE_MIN_WIDTH_FT && dims.heightFt >= SITE_MIN_WIDTH_FT) {
-        onSelectRef.current(bounds);
-        onDrawingChangeRef.current(false);
-      }
-    };
-    map.on("mousedown", onDown);
-    map.on("mousemove", onMove);
-    map.on("mouseup", onUp);
-    return () => {
-      map.off("mousedown", onDown);
-      map.off("mousemove", onMove);
-      map.off("mouseup", onUp);
-      preview?.remove();
-      map.dragging.enable();
-      map.boxZoom.enable();
-      container.style.cursor = "";
-    };
-  }, [drawing]);
+    const group = candidateLayerRef.current;
+    if (!group) return;
+    group.clearLayers();
+    candidates.forEach(c => {
+      const color = c.source === "osm" ? "#22c55e" : "#f59e0b";
+      const poly = L.polygon(c.points.map(p => [p.lat, p.lon] as [number, number]), {
+        color: c.selected ? color : "#94a3b8",
+        weight: c.selected ? 2.5 : 1.5,
+        dashArray: c.selected ? undefined : "4 4",
+        fillColor: c.selected ? color : "#0f172a",
+        fillOpacity: c.selected ? 0.35 : 0.15,
+        bubblingMouseEvents: false
+      });
+      poly.bindTooltip(
+        `${c.selected ? "Included" : "Excluded"} · ${c.source === "osm" ? "mapped" : "detected"} building · ~${c.heightFt} ft tall<br/><em>Click to ${c.selected ? "remove" : "add back"}</em>`,
+        { sticky: true }
+      );
+      poly.on("click", () => onToggleRef.current(c.id));
+      poly.addTo(group);
+    });
+  }, [candidates]);
 
   return <div ref={containerRef} className="absolute inset-0 bg-zinc-800" />;
 }
@@ -1748,6 +2067,12 @@ export default function SecurityPlanner() {
   const [pickerView, setPickerView] = useState({ lat: 39.5, lon: -98.35, zoom: 4, key: 0 });
   const [pickerDrawing, setPickerDrawing] = useState(false);
   const [importBuildings, setImportBuildings] = useState(true);
+  const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
+  const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  const [selectViewSignal, setSelectViewSignal] = useState(0);
+  const [placeSuggestions, setPlaceSuggestions] = useState<PlaceSuggestion[]>([]);
+  const [showPlaceSuggestions, setShowPlaceSuggestions] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [planGeoRef, setPlanGeoRef] = useState<PlanGeoRef | null>(null);
   const [elevationExaggeration, setElevationExaggeration] = useState(1);
   const [elevationStatus, setElevationStatus] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
@@ -2416,16 +2741,78 @@ export default function SecurityPlanner() {
     setPickerView(v => ({ lat, lon, zoom: 18, key: v.key + 1 }));
   };
 
-  const searchSiteLocation = async () => {
+  const searchSiteLocation = async (suggestion?: PlaceSuggestion) => {
+    const query = suggestion ? [suggestion.text, suggestion.detail].filter(Boolean).join(", ") : elevationQuery;
+    if (suggestion) setElevationQuery(query);
+    setShowPlaceSuggestions(false);
+    setPlaceSuggestions([]);
     setElevationStatus({ state: "loading", message: "Searching…" });
     try {
-      const location = await resolveSiteLocation(elevationQuery);
+      const location = await resolveSiteLocation(query, { near: { lat: pickerView.lat, lon: pickerView.lon }, suggestion });
       selectAroundPoint(location.lat, location.lon, location.label);
       setElevationStatus({ state: "idle", message: "" });
     } catch (err) {
       setElevationStatus({ state: "error", message: err instanceof Error ? err.message : "Search failed." });
     }
   };
+
+  // Suggestions while typing (debounced), biased toward where the map is looking.
+  useEffect(() => {
+    if (!showElevationDialog || !showPlaceSuggestions) return;
+    const text = elevationQuery.trim();
+    if (text.length < 3) {
+      setPlaceSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      const list = await fetchPlaceSuggestions(text, { lat: pickerView.lat, lon: pickerView.lon });
+      if (!cancelled) {
+        setPlaceSuggestions(list);
+        setActiveSuggestion(-1);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elevationQuery, showPlaceSuggestions, showElevationDialog]);
+
+  // Look for buildings whenever the selected area settles, so they can be reviewed on the map before importing.
+  useEffect(() => {
+    if (!showElevationDialog || !siteBounds || !importBuildings) {
+      if (!siteBounds) setBuildingCandidates([]);
+      return;
+    }
+    const dims = selectionFromBounds(siteBounds, "");
+    if (dims.widthFt > SITE_MAX_WIDTH_FT || dims.heightFt > SITE_MAX_WIDTH_FT) return;
+    let cancelled = false;
+    setBuildingScan({ state: "loading", message: "Looking for buildings…" });
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await findBuildingCandidates(siteBounds);
+        if (cancelled) return;
+        setBuildingCandidates(result.candidates);
+        if (!result.osmOk && !result.detectedOk) {
+          setBuildingScan({ state: "error", message: "Couldn't reach the building services. You can still import and draw buildings yourself." });
+        } else {
+          setBuildingScan({ state: "done", message: "" });
+        }
+      } catch (err) {
+        if (!cancelled) setBuildingScan({ state: "error", message: "Couldn't look up buildings for this area." });
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [siteBounds, showElevationDialog, importBuildings]);
+
+  const toggleBuildingCandidate = (id: string) =>
+    setBuildingCandidates(prev => prev.map(c => (c.id === id ? { ...c, selected: !c.selected } : c)));
+  const setAllBuildingCandidates = (selected: boolean, source?: "osm" | "detected") =>
+    setBuildingCandidates(prev => prev.map(c => (!source || c.source === source ? { ...c, selected } : c)));
 
   const useMyLocation = () => {
     if (!navigator.geolocation) {
@@ -2536,13 +2923,12 @@ export default function SecurityPlanner() {
       const unitsPerFoot = area.width / realWidthFt;
       const geoBounds = getGeoBounds(location, realWidthFt, realHeightFt);
       setPlanGeoRef({ bounds: geoBounds, area, unitsPerFoot });
-      // Buildings download alongside the elevation; a failure there doesn't stop the import.
-      const buildingsJob = importBuildings
-        ? fetchOsmBuildings(geoBounds).catch(err => {
-          console.warn("Building import failed", err);
-          return null;
-        })
-        : Promise.resolve([] as OsmBuilding[]);
+      // Buildings the user reviewed on the picker map (if the lookup is still running, wait for it).
+      const buildingsJob: Promise<OsmBuilding[] | null> = !importBuildings
+        ? Promise.resolve([])
+        : buildingScan.state === "loading" || (buildingScan.state === "idle" && buildingCandidates.length === 0)
+          ? findBuildingCandidates(siteBounds).then(r => r.candidates.filter(c => c.selected), () => null)
+          : Promise.resolve(buildingScan.state === "error" && buildingCandidates.length === 0 ? null : buildingCandidates.filter(c => c.selected));
 
       setElevationStatus({ state: "loading", message: "Downloading high-detail elevation…" });
       const grid = nextGrid;
@@ -2591,7 +2977,7 @@ export default function SecurityPlanner() {
       let buildingText = "";
       if (importBuildings) {
         if (osm === null) {
-          buildingText = " Couldn't reach OpenStreetMap for buildings. Draw them over the satellite image instead.";
+          buildingText = " Couldn't reach the building services. Draw buildings over the satellite image with the Building tool.";
         } else {
           const newBuildings = buildingsFromOsm(osm, geoBounds, area, unitsPerFoot);
           setItems(prev => [
@@ -2599,8 +2985,8 @@ export default function SecurityPlanner() {
             ...newBuildings
           ]);
           buildingText = newBuildings.length > 0
-            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"} from OpenStreetMap — adjust heights in the right panel.`
-            : " No building outlines are mapped here yet. Draw them over the satellite image with the Building tool.";
+            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
+            : " No buildings were added. Draw them over the satellite image with the Building tool.";
         }
       }
 
@@ -7538,6 +7924,9 @@ export default function SecurityPlanner() {
                   selection={siteBounds}
                   drawing={pickerDrawing}
                   onDrawingChange={setPickerDrawing}
+                  selectViewSignal={selectViewSignal}
+                  candidates={importBuildings ? buildingCandidates : []}
+                  onToggleCandidate={toggleBuildingCandidate}
                   onSelect={(bounds) => {
                     setSiteBounds(bounds);
                     const c = selectionFromBounds(bounds, "");
@@ -7548,15 +7937,53 @@ export default function SecurityPlanner() {
 
                 <form
                   className="absolute top-3 left-14 right-3 z-[1000] flex gap-2"
-                  onSubmit={(e) => { e.preventDefault(); if (!loading && elevationQuery.trim()) searchSiteLocation(); }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (loading) return;
+                    if (showPlaceSuggestions && activeSuggestion >= 0 && placeSuggestions[activeSuggestion]) {
+                      searchSiteLocation(placeSuggestions[activeSuggestion]);
+                    } else if (elevationQuery.trim()) {
+                      searchSiteLocation();
+                    }
+                  }}
                 >
-                  <input
-                    autoFocus
-                    value={elevationQuery}
-                    onChange={(e) => setElevationQuery(e.target.value)}
-                    placeholder="Search an address, place, or paste coordinates / Google Maps link"
-                    className="flex-1 min-w-0 rounded-xl border border-white/10 bg-zinc-900/95 px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
-                  />
+                  <div className="relative flex-1 min-w-0">
+                    <input
+                      autoFocus
+                      value={elevationQuery}
+                      onChange={(e) => { setElevationQuery(e.target.value); setShowPlaceSuggestions(true); }}
+                      onFocus={() => setShowPlaceSuggestions(true)}
+                      onBlur={() => window.setTimeout(() => setShowPlaceSuggestions(false), 150)}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowDown") { e.preventDefault(); setActiveSuggestion(i => Math.min(i + 1, placeSuggestions.length - 1)); }
+                        else if (e.key === "ArrowUp") { e.preventDefault(); setActiveSuggestion(i => Math.max(i - 1, -1)); }
+                        else if (e.key === "Escape") { setShowPlaceSuggestions(false); }
+                      }}
+                      placeholder="Search your address — e.g. 123 Main St, Springfield IL"
+                      aria-label="Search address"
+                      autoComplete="off"
+                      className="w-full rounded-xl border border-white/10 bg-zinc-900/95 px-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 shadow-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/60"
+                    />
+                    {showPlaceSuggestions && placeSuggestions.length > 0 && (
+                      <ul className="absolute left-0 right-0 top-full mt-1 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl overflow-hidden" role="listbox">
+                        {placeSuggestions.map((sug, i) => (
+                          <li key={`${sug.text}-${i}`}>
+                            <button
+                              type="button"
+                              onMouseDown={(e) => { e.preventDefault(); searchSiteLocation(sug); }}
+                              className={`w-full text-left px-4 py-2 flex items-start gap-2.5 ${i === activeSuggestion ? "bg-emerald-500/15" : "hover:bg-white/5"}`}
+                            >
+                              <MapPin className="w-4 h-4 mt-0.5 shrink-0 text-emerald-400" />
+                              <span className="min-w-0">
+                                <span className="block text-sm text-slate-100 truncate">{sug.text}</span>
+                                {sug.detail && <span className="block text-[11px] text-slate-400 truncate">{sug.detail}</span>}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                   <button type="submit" disabled={loading || !elevationQuery.trim()} className="px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-semibold text-white shadow-lg">
                     Search
                   </button>
@@ -7565,28 +7992,32 @@ export default function SecurityPlanner() {
                   </button>
                 </form>
 
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl">
-                  <button
-                    type="button"
-                    onClick={() => setPickerDrawing(false)}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${!pickerDrawing ? "bg-white/10 text-white" : "text-slate-400 hover:text-white"}`}
-                  >
-                    <Hand className="w-4 h-4" /> Move map
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPickerDrawing(true)}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${pickerDrawing ? "bg-emerald-600 text-white" : "text-slate-300 hover:text-white"}`}
-                  >
-                    <SquareDashed className="w-4 h-4" /> {siteBounds ? "Redraw area" : "Draw area"}
-                  </button>
-                </div>
-
-                {pickerDrawing && (
-                  <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1000] rounded-full bg-amber-500 px-4 py-1.5 text-xs font-semibold text-zinc-950 shadow-lg pointer-events-none">
-                    Click and drag over the map to select your site
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex flex-col items-center gap-2">
+                  <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-[11px] text-slate-300 shadow pointer-events-none whitespace-nowrap">
+                    {pickerDrawing
+                      ? "Drag across the map to draw your area"
+                      : siteBounds
+                        ? "Drag the corners to resize · drag ✥ to move · click buildings to keep/remove"
+                        : "Drag to move the map · scroll to zoom · Shift+drag to draw an area"}
                   </div>
-                )}
+                  <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl">
+                    <button
+                      type="button"
+                      onClick={() => setPickerDrawing(v => !v)}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold ${pickerDrawing ? "bg-amber-500 text-zinc-950" : "text-slate-200 hover:bg-white/10"}`}
+                    >
+                      <SquareDashed className="w-4 h-4" /> {pickerDrawing ? "Cancel drawing" : siteBounds ? "Draw new area" : "Draw area"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setPickerDrawing(false); setSelectViewSignal(n => n + 1); }}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold text-slate-200 hover:bg-white/10"
+                      title="Select the area you can see on the map"
+                    >
+                      <Maximize className="w-4 h-4" /> Select this view
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Side panel */}
@@ -7610,8 +8041,8 @@ export default function SecurityPlanner() {
                 <div className="flex-1 overflow-y-auto custom-scrollbar px-5 pb-5 space-y-5">
                   <ol className="space-y-2.5 text-xs">
                     <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(1)}>1</span>Find your property (search or zoom)</li>
-                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(2)}>2</span>Drag a rectangle around it</li>
-                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(3)}>3</span>Click Import</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(2)}>2</span>Draw or adjust the area around it</li>
+                    <li className="flex items-center gap-2.5 text-slate-300"><span className={stepClass(3)}>3</span>Check the buildings, then Import</li>
                   </ol>
 
                   <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
@@ -7658,13 +8089,56 @@ export default function SecurityPlanner() {
                     </p>
                   </div>
 
-                  <label className="flex items-start gap-2.5 cursor-pointer">
-                    <input type="checkbox" checked={importBuildings} onChange={e => setImportBuildings(e.target.checked)} className="mt-0.5 accent-emerald-500" />
-                    <span className="text-xs text-slate-300">
-                      Create 3D buildings
-                      <span className="block text-[10px] text-slate-500">Footprints and heights from OpenStreetMap where mapped. You can edit or draw more after.</span>
-                    </span>
-                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-[10px] uppercase font-bold text-slate-400">3D buildings</span>
+                      <span className="flex items-center gap-2 text-xs text-slate-300">
+                        Include
+                        <input type="checkbox" checked={importBuildings} onChange={e => setImportBuildings(e.target.checked)} className="accent-emerald-500" />
+                      </span>
+                    </label>
+                    {importBuildings && (() => {
+                      const mapped = buildingCandidates.filter(c => c.source === "osm");
+                      const detected = buildingCandidates.filter(c => c.source === "detected");
+                      const kept = buildingCandidates.filter(c => c.selected).length;
+                      if (!siteBounds) {
+                        return <p className="text-[11px] text-slate-500">Select an area and the buildings in it will appear on the map for you to confirm.</p>;
+                      }
+                      if (buildingScan.state === "loading") {
+                        return <div className="flex items-center gap-2 text-xs text-slate-300"><LoaderCircle className="w-3.5 h-3.5 animate-spin" /> Looking for buildings…</div>;
+                      }
+                      if (buildingScan.state === "error") {
+                        return <p className="text-[11px] text-amber-300/90">{buildingScan.message}</p>;
+                      }
+                      if (buildingCandidates.length === 0) {
+                        return <p className="text-[11px] text-slate-400">No buildings found here. You can draw them over the satellite image after importing.</p>;
+                      }
+                      return (
+                        <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 space-y-2">
+                          <div className="text-sm font-semibold text-slate-100">{kept} of {buildingCandidates.length} buildings will be added</div>
+                          <div className="space-y-1 text-[11px]">
+                            {mapped.length > 0 && (
+                              <div className="flex items-center gap-2 text-slate-300">
+                                <span className="w-3 h-3 rounded-sm bg-green-500/60 border border-green-400" />
+                                {mapped.length} mapped (OpenStreetMap)
+                              </div>
+                            )}
+                            {detected.length > 0 && (
+                              <div className="flex items-center gap-2 text-slate-300">
+                                <span className="w-3 h-3 rounded-sm bg-amber-500/60 border border-amber-400" />
+                                {detected.length} detected from aerial imagery — please check
+                              </div>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-400">Click a building on the map to remove it (or add it back).</p>
+                          <div className="flex gap-1.5">
+                            <button type="button" onClick={() => setAllBuildingCandidates(true)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Keep all</button>
+                            <button type="button" onClick={() => setAllBuildingCandidates(false)} className="flex-1 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200">Remove all</button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
 
                   <div className="space-y-1.5">
                     <label className="text-[10px] uppercase font-bold text-slate-400">Terrain height</label>
