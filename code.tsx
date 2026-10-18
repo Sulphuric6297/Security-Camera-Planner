@@ -32,6 +32,7 @@ import {
   Maximize,
   Minimize,
   Mountain,
+  WandSparkles,
   LoaderCircle,
   MapPin,
   Hand,
@@ -46,6 +47,7 @@ import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { ProjectOverview } from "./src/components/ProjectOverview";
+import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
@@ -1819,6 +1821,71 @@ export default function SecurityPlanner() {
       width: canvasSize.width,
       height: canvasSize.height
     });
+  };
+
+  // --- Auto-trace a roof from the satellite map ---
+  const roofImageCacheRef = useRef<{ src: string; data: ImageData } | null>(null);
+  const getMapImageData = () => {
+    const img = bgImageRef.current;
+    if (!backgroundImg || !img || !img.naturalWidth) return null;
+    if (roofImageCacheRef.current?.src === backgroundImg) return roofImageCacheRef.current.data;
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    roofImageCacheRef.current = { src: backgroundImg, data };
+    return data;
+  };
+
+  const traceRoofAt = (pos: { x: number; y: number }) => {
+    const data = getMapImageData();
+    if (!data) {
+      showExportNotice("Import your site (satellite map) first, then click a roof.", "info");
+      return;
+    }
+    const pxPerUnitX = data.width / bgSettings.width;
+    const pxPerUnitY = data.height / bgSettings.height;
+    const ix = (pos.x - bgSettings.x) * pxPerUnitX;
+    const iy = (pos.y - bgSettings.y) * pxPerUnitY;
+    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
+    const result = traceRoof(data, ix, iy, {
+      maxRadius: 90 * unitsPerFoot * pxPerUnitX, // roofs up to ~180 ft across
+      minPixels: 120 * unitsPerFoot * unitsPerFoot * pxPerUnitX * pxPerUnitY // at least ~120 sq ft
+    });
+    if (!result) {
+      showExportNotice("Couldn't find a roof edge there. Try clicking the middle of a roof, or draw it with the Building tool.", "error");
+      return;
+    }
+    const corners = result.corners.map(c => ({ x: bgSettings.x + c.x / pxPerUnitX, y: bgSettings.y + c.y / pxPerUnitY }));
+    const cx = corners.reduce((sum, c) => sum + c.x, 0) / corners.length;
+    const cy = corners.reduce((sum, c) => sum + c.y, 0) / corners.length;
+    const points = corners.map(c => ({ x: c.x - cx, y: c.y - cy }));
+    const bounds = getPointsBounds(points);
+    const building: BuildingItem = {
+      id: generateId(),
+      type: "building",
+      x: cx,
+      y: cy,
+      rotation: 0,
+      width: bounds.width,
+      height: bounds.height,
+      wallHeight: Math.round(DEFAULT_BUILDING.wallHeight * unitsPerFoot),
+      label: "Building",
+      color: COLORS.building[0],
+      points
+    };
+    const nextItems = [...items, building];
+    setItems(nextItems);
+    saveHistory(nextItems);
+    showExportNotice(
+      result.fill < 0.7
+        ? "Traced a building — the shape may be rough; drag its corners to match the roof."
+        : "Traced a building. Click more roofs, or press Esc when done.",
+      "success"
+    );
   };
 
   const showExportNotice = (message: string, tone: 'success' | 'error' | 'info' = 'success') => {
@@ -3986,7 +4053,7 @@ export default function SecurityPlanner() {
 
       // Single-key tools (shown in the toolbar tooltips)
       if (!mod && !event.altKey) {
-        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", t: "add-tree", p: "add-parking", l: "add-label" };
+        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label" };
         const tool = toolKeys[event.key.toLowerCase()];
         if (tool) {
           event.preventDefault();
@@ -5460,6 +5527,10 @@ export default function SecurityPlanner() {
   const handleSvgClick = (e: React.MouseEvent) => {
     if (viewMode === "iso3d") return;
     if (isTerrainMode) return;
+    if (mode === "trace-building") {
+      traceRoofAt(getSvgMousePos(e));
+      return;
+    }
     if (isPanning) return;
     if (vertexInsertMode && selectedId) {
       const selectedItem = items.find(item => item.id === selectedId);
@@ -5578,6 +5649,7 @@ export default function SecurityPlanner() {
     switch (mode) {
       case "add-camera": return "Click to place a camera · click next to a wall to mount it there · Esc to cancel";
       case "add-building": return "Click to place a building · then drag its corners to match the roof";
+      case "trace-building": return backgroundImg ? "Click a roof on the map to trace it into a 3D building · Esc when done" : "Import your site first — this tool traces roofs from the satellite map";
       case "add-tree": return "Click to place a tree";
       case "add-parking": return "Click to place a vehicle";
       case "add-label": return "Click to add a text label";
@@ -6269,6 +6341,7 @@ export default function SecurityPlanner() {
             { mode: "select", icon: Move, label: "Select / Move", key: "V" },
             { mode: "add-camera", icon: Camera, label: "Place Camera", key: "C" },
             { mode: "add-building", icon: Square, label: "Draw Building", key: "B" },
+            { mode: "trace-building", icon: WandSparkles, label: "Auto-trace a roof from the map", key: "R" },
             { mode: "add-tree", icon: Trees, label: "Place Tree", key: "T" },
             { mode: "add-parking", icon: Car, label: "Vehicles", key: "P" },
             { mode: "add-label", icon: Type, label: "Text", key: "L" }

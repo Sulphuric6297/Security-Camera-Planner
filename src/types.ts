@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
