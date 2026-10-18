@@ -49,7 +49,7 @@ import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { ProjectOverview } from "./src/components/ProjectOverview";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
+import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
@@ -2454,28 +2454,86 @@ export default function SecurityPlanner() {
     link.click();
     document.body.removeChild(link);
   };
-  const handleExportReportPdf = () => {
-    if (exportList.length === 0) {
-      showExportNotice("Your report is empty. Add views first.", "info");
-      return;
-    }
+  const escapeHtml = (text: string) =>
+    String(text ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
 
+  // Camera schedule for the report: mounting, lens and what each camera can make out at what distance.
+  const buildCameraScheduleHtml = () => {
+    const cameras = items.filter(i => i.type === "camera") as CameraItem[];
+    if (cameras.length === 0) return "";
+    const rows = cameras.map((cam, i) => {
+      const dori = getDoriDistances(cam);
+      const height = Math.round(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT);
+      const mountedOn = cam.mount?.type === "building" && cam.mount.buildingId
+        ? `on ${escapeHtml((getBuildingById(cam.mount.buildingId) as BuildingItem | undefined)?.label || "building")}`
+        : "free-standing";
+      const res = RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`;
+      return `<tr>
+        <td><span class="dot" style="background:${escapeHtml(cam.color)}"></span>${i + 1}. ${escapeHtml(cam.label)}</td>
+        <td>${height} ft ${mountedOn}</td>
+        <td>${Math.round(cam.hFov ?? cam.fov)}° · ${res}</td>
+        <td>${Math.abs(Math.round(cam.pitch ?? DEFAULT_CAMERA_PITCH))}° down</td>
+        <td>${Math.round(dori[0].distance)} ft</td>
+        <td>${Math.round(dori[1].distance)} ft</td>
+        <td>${Math.round(dori[3].distance)} ft</td>
+        <td>${escapeHtml(cam.description || "")}</td>
+      </tr>`;
+    }).join("");
+    return `<h2>Camera schedule</h2>
+      <table>
+        <thead><tr><th>Camera</th><th>Mount</th><th>Lens</th><th>Tilt</th><th>Identify to</th><th>Recognize to</th><th>Detect to</th><th>Notes</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="note">Identify ≈ recognize a stranger's face or read a plate (250 px/m); Recognize ≈ tell if it's someone you know (125 px/m); Detect ≈ notice someone is there (25 px/m), per IEC 62676-4. Distances assume good lighting.</p>`;
+  };
+
+  const handleExportReportPdf = async () => {
+    // Open the window synchronously (inside the click) so popup blockers allow it.
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       showExportNotice("Popups blocked. Allow popups to export PDF.", "error");
       return;
     }
+    printWindow.document.write("<p style='font-family:system-ui;padding:40px;color:#334155'>Preparing your report…</p>");
+
+    // No views added yet? Build the full report automatically: plan + every camera's view.
+    let views = exportList;
+    if (views.length === 0) {
+      const auto: typeof exportList = [];
+      try {
+        auto.push({ id: "plan", type: "plan", label: "Site plan", dataUrl: await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" }) });
+      } catch (err) {
+        console.error("Plan capture failed", err);
+      }
+      (items.filter(i => i.type === "camera") as CameraItem[]).forEach(cam => {
+        try {
+          auto.push({ id: cam.id, type: "camera", label: `${cam.label} view`, dataUrl: renderCameraViewToDataUrl(cam), cameraId: cam.id });
+        } catch (err) {
+          console.error("Camera view failed", err);
+        }
+      });
+      views = auto;
+    }
+
+    const site = siteLocation ? `<div><b>Site:</b> ${escapeHtml(siteLocation.label)} (${siteLocation.lat.toFixed(5)}, ${siteLocation.lon.toFixed(5)})</div>` : "";
+    const counts = `${items.filter(i => i.type === "camera").length} cameras · ${items.filter(i => i.type === "building").length} buildings`;
 
     const htmlContent = `
       <!DOCTYPE html>
       <html>
       <head>
-        <title>${projectName || 'Security Plan Report'}</title>
+        <title>${escapeHtml(projectName || 'Security Plan Report')}</title>
         <style>
-          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; }
-          h1 { color: #0f172a; margin-bottom: 5px; }
-          .meta { color: #64748b; font-size: 14px; margin-bottom: 40px; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; }
-          .item { margin-bottom: 40px; page-break-inside: avoid; }
+          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; color: #0f172a; }
+          h1 { margin-bottom: 5px; }
+          h2 { margin-top: 32px; font-size: 18px; }
+          .meta { color: #64748b; font-size: 14px; margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; line-height: 1.6; }
+          table { width: 100%; border-collapse: collapse; font-size: 12px; }
+          th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+          th { background: #f8fafc; font-weight: 600; }
+          .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+          .note { color: #64748b; font-size: 11px; }
+          .item { margin-bottom: 32px; page-break-inside: avoid; }
           .item h3 { color: #334155; margin-bottom: 10px; }
           .item img { width: 100%; border: 1px solid #e2e8f0; border-radius: 4px; }
           @media print {
@@ -2485,16 +2543,16 @@ export default function SecurityPlanner() {
         </style>
       </head>
       <body>
-        <h1>${projectName || 'Security Camera Plan'}</h1>
-        <div class="meta">Exported: ${new Date().toLocaleString()} | ${exportList.length} view(s)</div>
-        
-        ${exportList.map(item => `
+        <h1>${escapeHtml(projectName || 'Security Camera Plan')}</h1>
+        <div class="meta">${site}<div>${counts} · Prepared ${new Date().toLocaleString()}</div></div>
+        ${buildCameraScheduleHtml()}
+        ${views.length ? "<h2>Views</h2>" : ""}
+        ${views.map(item => `
           <div class="item">
-            <h3>${item.label}</h3>
+            <h3>${escapeHtml(item.label)}</h3>
             <img src="${item.dataUrl}" />
           </div>
         `).join('')}
-        
         <script>
           window.onload = () => {
              setTimeout(() => {
@@ -2506,6 +2564,7 @@ export default function SecurityPlanner() {
       </html>
     `;
 
+    printWindow.document.open();
     printWindow.document.write(htmlContent);
     printWindow.document.close();
   };
@@ -3059,6 +3118,13 @@ export default function SecurityPlanner() {
         return pts.map((p, i) => [p, pts[(i + 1) % pts.length]]);
       }
       return [];
+    }).filter(([a, b]) => {
+      // Only walls within the camera's range can block it (huge saving with many imported buildings).
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const len2 = abx * abx + aby * aby || 1;
+      const t = Math.max(0, Math.min(1, ((origin.x - a.x) * abx + (origin.y - a.y) * aby) / len2));
+      return Math.hypot(a.x + abx * t - origin.x, a.y + aby * t - origin.y) <= range;
     });
 
     const rayCount = 128;
@@ -5831,8 +5897,8 @@ export default function SecurityPlanner() {
                 </div>
                 {exportList.length === 0 ? (
                   <div className="bg-slate-50 rounded-lg p-4 text-center text-slate-400 text-sm">
-                    <p>No views added yet</p>
-                    <p className="text-xs mt-1">Use "Add to Report" buttons while working</p>
+                    <p>No views picked yet</p>
+                    <p className="text-xs mt-1">"Report PDF" will include the site plan, the camera schedule and every camera's view automatically.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
@@ -5959,11 +6025,8 @@ export default function SecurityPlanner() {
                   handleExportReportPdf();
                   setShowExportPanel(false);
                 }}
-                disabled={exportList.length === 0}
-                className={`px-3 py-2 text-sm font-semibold rounded-lg ${exportList.length === 0
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-                  }`}
+                className="px-3 py-2 text-sm font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
+                title={exportList.length === 0 ? "Builds a full report: site plan, camera schedule and every camera's view" : "Report with your selected views and the camera schedule"}
               >
                 Report PDF
               </button>
