@@ -92,7 +92,7 @@ and previews that look exact without saying they are estimates.
 - Tests: line-of-sight blocking, target levels against hand-computed DORI, the checklist updates
   on aim, aim-at math.
 
-### Phase 4: a one-click professional report
+### Phase 4: a one-click professional report (done)
 - Cover page with the site overview and numbered camera badges, coverage summary and checklist,
   then a page per camera (view, DORI distances, mount, aim, targets covered). Add a parts list
   (cameras by model/lens) with a CSV export. Move scale and padding under Advanced, and match the

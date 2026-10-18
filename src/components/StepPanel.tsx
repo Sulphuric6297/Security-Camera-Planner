@@ -47,6 +47,7 @@ type Props = {
   onPlanPng: () => void;
   onAddViewToReport: () => void;
   onMoreReportOptions: () => void;
+  onCamerasCsv: () => void;
   /** The "What to protect" checklist (shown in the Cameras and Review steps). */
   coverage?: React.ReactNode;
 };
@@ -244,7 +245,7 @@ export function StepPanel(props: Props) {
           <p className="text-xs text-slate-400 -mt-2">
             {props.reportViews > 0
               ? `Includes your ${props.reportViews} picked view${props.reportViews === 1 ? "" : "s"}, the camera list and each camera's view.`
-              : "Includes the site plan, the camera list and every camera's view."}
+              : "Includes the site plan, the coverage checklist, the camera list, a parts list and every camera's view."}
           </p>
           <div className="space-y-2">
             <button onClick={props.onAddViewToReport} className={action}>
@@ -252,6 +253,9 @@ export function StepPanel(props: Props) {
             </button>
             <button onClick={props.onPlanPng} className={action}>
               <ImageIcon className="w-4 h-4 text-slate-400" /> Download the plan as an image
+            </button>
+            <button onClick={props.onCamerasCsv} className={action}>
+              <Download className="w-4 h-4 text-slate-400" /> Download the camera list (CSV)
             </button>
             <button onClick={props.onMoreReportOptions} className={action}>
               <Download className="w-4 h-4 text-slate-400" /> More report options…

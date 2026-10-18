@@ -5,14 +5,14 @@ import type { TargetCoverage } from "../lib/coverage";
 import { TARGET_KINDS } from "../lib/items";
 import { DORI_LEVELS } from "../lib/camera";
 
-const LEVEL_LABEL: Record<string, string> = { identify: "faces", recognize: "recognize", observe: "observe", detect: "detect" };
-const GOAL_LABEL: Record<string, string> = {
+export const LEVEL_LABEL: Record<string, string> = { identify: "faces", recognize: "recognize", observe: "observe", detect: "detect" };
+export const GOAL_LABEL: Record<string, string> = {
   identify: "See faces",
   recognize: "Recognize people",
   observe: "See what's happening",
   detect: "Notice someone"
 };
-const REASON_TEXT: Record<string, string> = {
+export const REASON_TEXT: Record<string, string> = {
   "outside-view": "outside every camera's view",
   "too-far": "too far for any camera",
   "under-camera": "under a camera's view (too close/steep)",

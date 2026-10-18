@@ -58,12 +58,13 @@ import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { StepPanel } from "./src/components/StepPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
-import { CoveragePanel, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
+import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
+import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
 import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
+import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
 import { TARGET_KINDS, VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
@@ -2631,6 +2632,75 @@ export default function SecurityPlanner() {
       <p class="note">Identify ≈ recognize a stranger's face or read a plate (250 px/m); Recognize ≈ tell if it's someone you know (125 px/m); Detect ≈ notice someone is there (25 px/m), per IEC 62676-4. Distances assume good lighting.</p>`;
   };
 
+  // Report data: cameras (numbered in plan order) and protected spots with their coverage.
+  const buildReportCameras = (withViews: boolean): ReportCamera[] =>
+    (items.filter(i => i.type === "camera") as CameraItem[]).map((cam, i) => {
+      const dori = getDoriDistances(cam);
+      const heightFt = cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT;
+      const hFov = getCameraHFov(cam);
+      const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
+      const vFov = cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam));
+      const ground = getGroundCoverage(heightFt, pitch, vFov);
+      const building = cam.mount?.type === "building" && cam.mount.buildingId ? (getBuildingById(cam.mount.buildingId) as BuildingItem | undefined) : undefined;
+      let viewImage: string | undefined;
+      if (withViews) {
+        try {
+          viewImage = renderCameraViewToDataUrl(cam);
+        } catch (err) {
+          console.error("Camera view failed", err);
+        }
+      }
+      return {
+        number: i + 1,
+        label: cam.label,
+        color: cam.color,
+        heightFt,
+        mount: building ? `on ${building.label?.trim() || "building"}` : "free-standing",
+        lensLabel: LENS_PRESETS.find(l => l.id === cam.lensPreset)?.label ?? `${Math.round(hFov)}°`,
+        hFov,
+        resolutionLabel: RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`,
+        tiltDeg: pitch,
+        facing: compassFromRotation(cam.rotation),
+        identifyFt: dori[0].distance,
+        recognizeFt: dori[1].distance,
+        detectFt: dori[3].distance,
+        blindSpotFt: Number.isFinite(ground.near) ? ground.near : null,
+        notes: cam.description || "",
+        covers: targetItems
+          .filter(t => targetResults.get(t.id)?.best?.cameraId === cam.id)
+          .map(t => `${t.label} (${LEVEL_LABEL[targetResults.get(t.id)!.best!.level]})`),
+        viewImage
+      };
+    });
+  const buildReportSpots = (): ReportSpot[] => {
+    const cams = items.filter(i => i.type === "camera") as CameraItem[];
+    return targetItems.map(t => {
+      const r = targetResults.get(t.id);
+      const cam = r?.best ? cams.find(c => c.id === r.best!.cameraId) : undefined;
+      return {
+        label: t.label,
+        kind: TARGET_KINDS[t.kind]?.label ?? t.kind,
+        needs: GOAL_LABEL[t.goal],
+        status: targetStatus(r),
+        camera: cam ? `${cams.indexOf(cam) + 1}. ${cam.label}` : undefined,
+        got: r?.best ? LEVEL_LABEL[r.best.level] : undefined,
+        reason: r && !r.best ? `Not covered: ${REASON_TEXT[r.reason ?? "outside-view"]}` : undefined
+      };
+    });
+  };
+
+  const handleDownloadCamerasCsv = () => {
+    const blob = new Blob([camerasCsv(buildReportCameras(false))], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(projectName || "security_plan").replace(/[^\w-]+/g, "_")}_cameras.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const handleExportReportPdf = async () => {
     // Open the window synchronously (inside the click) so popup blockers allow it.
     const printWindow = window.open('', '_blank');
@@ -2640,76 +2710,29 @@ export default function SecurityPlanner() {
     }
     printWindow.document.write("<p style='font-family:system-ui;padding:40px;color:#334155'>Preparing your report…</p>");
 
-    // No views added yet? Build the full report automatically: plan + every camera's view.
-    let views = exportList;
-    if (views.length === 0) {
-      const auto: typeof exportList = [];
-      try {
-        auto.push({ id: "plan", type: "plan", label: "Site plan", dataUrl: await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" }) });
-      } catch (err) {
-        console.error("Plan capture failed", err);
-      }
-      (items.filter(i => i.type === "camera") as CameraItem[]).forEach(cam => {
-        try {
-          auto.push({ id: cam.id, type: "camera", label: `${cam.label} view`, dataUrl: renderCameraViewToDataUrl(cam), cameraId: cam.id });
-        } catch (err) {
-          console.error("Camera view failed", err);
-        }
-      });
-      views = auto;
+    // The site plan always leads; picked views ("Add to report") replace the automatic camera views.
+    let planImage: string | undefined;
+    try {
+      planImage = await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" });
+    } catch (err) {
+      console.error("Plan capture failed", err);
     }
-
-    const site = siteLocation ? `<div><b>Site:</b> ${escapeHtml(siteLocation.label)} (${siteLocation.lat.toFixed(5)}, ${siteLocation.lon.toFixed(5)})</div>` : "";
-    const counts = `${items.filter(i => i.type === "camera").length} cameras · ${items.filter(i => i.type === "building").length} buildings`;
-
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>${escapeHtml(projectName || 'Security Plan Report')}</title>
-        <style>
-          body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; max-width: 1000px; margin: 0 auto; color: #0f172a; }
-          h1 { margin-bottom: 5px; }
-          h2 { margin-top: 32px; font-size: 18px; }
-          .meta { color: #64748b; font-size: 14px; margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; line-height: 1.6; }
-          table { width: 100%; border-collapse: collapse; font-size: 12px; }
-          th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
-          th { background: #f8fafc; font-weight: 600; }
-          .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-          .note { color: #64748b; font-size: 11px; }
-          .item { margin-bottom: 32px; page-break-inside: avoid; }
-          .item h3 { color: #334155; margin-bottom: 10px; }
-          .item img { width: 100%; border: 1px solid #e2e8f0; border-radius: 4px; }
-          @media print {
-            body { padding: 0; }
-            .no-print { display: none; }
-          }
-        </style>
-      </head>
-      <body>
-        <h1>${escapeHtml(projectName || 'Security Camera Plan')}</h1>
-        <div class="meta">${site}<div>${counts} · Prepared ${new Date().toLocaleString()}</div></div>
-        ${buildCameraScheduleHtml()}
-        ${views.length ? "<h2>Views</h2>" : ""}
-        ${views.map(item => `
-          <div class="item">
-            <h3>${escapeHtml(item.label)}</h3>
-            <img src="${item.dataUrl}" />
-          </div>
-        `).join('')}
-        <script>
-          window.onload = () => {
-             setTimeout(() => {
-               window.print();
-             }, 500);
-          }
-        </script>
-      </body>
-      </html>
-    `;
-
+    const picked = exportList.map(v => ({ label: v.label, dataUrl: v.dataUrl }));
+    const html = buildReportHtml(
+      {
+        title: projectName,
+        site: siteLocation,
+        preparedAt: new Date().toLocaleString(),
+        planImage: picked.length ? undefined : planImage,
+        pickedViews: picked,
+        cameras: buildReportCameras(picked.length === 0),
+        spots: buildReportSpots(),
+        counts: { buildings: items.filter(i => i.type === "building").length }
+      },
+      { autoPrint: true }
+    );
     printWindow.document.open();
-    printWindow.document.write(htmlContent);
+    printWindow.document.write(html);
     printWindow.document.close();
   };
 
@@ -6283,7 +6306,7 @@ export default function SecurityPlanner() {
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Report</p>
-                <h2 className="text-lg font-semibold text-slate-200">Export Report</h2>
+                <h2 className="text-lg font-semibold text-slate-200">Report options</h2>
               </div>
               <button onClick={() => setShowExportPanel(false)} className="p-2 text-slate-400 hover:text-slate-600">
                 <X className="w-5 h-5" />
@@ -6316,9 +6339,9 @@ export default function SecurityPlanner() {
                   )}
                 </div>
                 {exportList.length === 0 ? (
-                  <div className="bg-slate-50 rounded-lg p-4 text-center text-slate-400 text-sm">
+                  <div className="bg-white/5 border border-white/10 rounded-lg p-4 text-center text-slate-400 text-sm">
                     <p>No views picked yet</p>
-                    <p className="text-xs mt-1">"Report PDF" will include the site plan, the camera schedule and every camera's view automatically.</p>
+                    <p className="text-xs mt-1">The PDF report includes the site plan, the coverage checklist, the camera list, a parts list and every camera's view automatically.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
@@ -6358,9 +6381,12 @@ export default function SecurityPlanner() {
                 )}
               </div>
 
+              <details className="group rounded-lg border border-white/10 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-semibold text-slate-300">Plan image options (size, margins, grid, legend)</summary>
+              <div className="mt-3 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Scale</label>
+                  <label className="text-xs font-semibold text-slate-400 uppercase">Image size (×)</label>
                   <input
                     type="number"
                     min="1"
@@ -6371,7 +6397,7 @@ export default function SecurityPlanner() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Padding</label>
+                  <label className="text-xs font-semibold text-slate-400 uppercase">Margin (px)</label>
                   <input
                     type="number"
                     min="0"
@@ -6400,7 +6426,7 @@ export default function SecurityPlanner() {
                             [option.key]: !active
                           })
                         }
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${active ? "bg-emerald-100 border-emerald-200 text-emerald-700" : "bg-white border-slate-200 text-slate-400"
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${active ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-200" : "bg-white/5 border-white/10 text-slate-400"
                           }`}
                       >
                         {option.label}
@@ -6409,12 +6435,14 @@ export default function SecurityPlanner() {
                   })}
                 </div>
               </div>
-              <p className="text-xs text-slate-400">Tip: Add views using "Add to Report" buttons, then export a client report.</p>
+              </div>
+              </details>
+              <p className="text-xs text-slate-400">Tip: pick specific views with "Add to report" (3D Snapshot menu or the More menu); otherwise every camera's view is included.</p>
             </div>
-            <div className="px-5 py-4 border-t border-white/10 bg-slate-50 flex flex-wrap justify-end gap-2">
+            <div className="px-5 py-4 border-t border-white/10 bg-black/20 flex flex-wrap justify-end gap-2">
               <button
                 onClick={() => setShowExportPanel(false)}
-                className="px-4 py-2 text-sm font-medium text-slate-400 hover:text-slate-800"
+                className="px-4 py-2 text-sm font-medium text-slate-400 hover:text-slate-200"
               >
                 Cancel
               </button>
@@ -6425,7 +6453,7 @@ export default function SecurityPlanner() {
                 }}
                 className="px-4 py-2 text-sm font-semibold bg-slate-600 hover:bg-slate-700 text-white rounded-lg"
               >
-                Plan PNG
+                Plan image
               </button>
               <button
                 onClick={() => {
@@ -6434,11 +6462,11 @@ export default function SecurityPlanner() {
                 }}
                 disabled={exportList.length === 0}
                 className={`px-3 py-2 text-sm font-semibold rounded-lg ${exportList.length === 0
-                  ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                  ? 'bg-white/5 text-slate-500 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                   }`}
               >
-                Report PNG
+                Report image
               </button>
               <button
                 onClick={() => {
@@ -6448,7 +6476,7 @@ export default function SecurityPlanner() {
                 className="px-3 py-2 text-sm font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
                 title={exportList.length === 0 ? "Builds a full report: site plan, camera schedule and every camera's view" : "Report with your selected views and the camera schedule"}
               >
-                Report PDF
+                PDF report
               </button>
             </div>
           </div>
@@ -9916,6 +9944,7 @@ export default function SecurityPlanner() {
                 onPlanPng={handleExportPng}
                 onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
                 onMoreReportOptions={() => setShowExportPanel(true)}
+                onCamerasCsv={handleDownloadCamerasCsv}
                 coverage={
                   <CoveragePanel
                     targets={targetItems}

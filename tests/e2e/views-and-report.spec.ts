@@ -85,8 +85,33 @@ test.describe("3D, camera views and report", () => {
     const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Download PDF report" }).click()]);
     await popup.waitForLoadState();
     await expect(popup.getByText("Camera schedule")).toBeVisible({ timeout: 15_000 });
-    await expect(popup.locator("tbody tr")).toHaveCount(1);
-    await expect(popup.locator("tbody tr")).toContainText("11 ft");
+    await expect(popup.locator("#camera-schedule tbody tr")).toHaveCount(1);
+    await expect(popup.locator("#camera-schedule tbody tr")).toContainText("11 ft");
+    await expect(popup.locator("#parts-list tbody tr")).toHaveCount(1);
     await expect(popup.locator("img")).toHaveCount(2); // site plan + camera view
+  });
+
+  test("PDF report includes the coverage checklist; camera list downloads as CSV", async ({ page, context }) => {
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    const box = (await page.getByTestId("plan").boundingBox())!;
+    await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.45);
+    await page.keyboard.press("Escape");
+    await placeWithKey(page, "c", 0.5, 0.5);
+    await page.getByRole("button", { name: /→ Door 1/ }).click();
+    await page.keyboard.press("Escape");
+    await page.locator('nav[aria-label="Steps"] button').nth(4).click();
+    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Download PDF report" }).click()]);
+    await popup.waitForLoadState();
+    await expect(popup.locator("#coverage-checklist tbody tr")).toHaveCount(1, { timeout: 15_000 });
+    await expect(popup.locator("#coverage-checklist")).toContainText("Door 1");
+    await popup.close();
+
+    const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: /camera list \(CSV\)/ }).click()]);
+    expect(download.suggestedFilename()).toMatch(/\.csv$/);
+    const text = await (await download.createReadStream()).toArray().then(chunks => Buffer.concat(chunks).toString("utf8"));
+    expect(text.split("\n")[0]).toContain("Faces to (ft)");
+    expect(text).toContain("Camera 1");
+    expect(text).toContain("Door 1");
   });
 });
