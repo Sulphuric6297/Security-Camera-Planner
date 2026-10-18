@@ -18,7 +18,7 @@ export const resolveVehicleType = (item: ParkingItem): ParkingItem['vehicleType'
 };
 
 export const getCarSignature = (item: ParkingItem) =>
-  `${item.width}|${item.height}|${item.vehicleHeight ?? 12}|${resolveVehicleType(item)}|${item.color}`;
+  `${item.width}|${item.height}|${item.vehicleHeight ?? 5}|${resolveVehicleType(item)}|${item.color}`;
 
 export const getTreeSignature = (item: TreeItem) =>
   `${item.radius}|${item.height ?? 30}|${item.width ?? 1}|${item.treeType ?? 'deciduous'}|${item.color}`;
@@ -33,8 +33,31 @@ export const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
   return type;
 };
 
-// Create a detailed 3D car model with variations
+// The car model's details (wheels, trim, minimum part sizes) were designed around ~3x real size.
+// Build it there and scale it down uniformly so a real-size car keeps its proportions.
+const CAR_MODEL_SCALE = 3;
+
+// Create a detailed 3D car model with variations, at the item's real size.
 export const create3dCar = (item: ParkingItem): THREE.Group => {
+  const k = CAR_MODEL_SCALE;
+  const model = buildCarModel({
+    ...item,
+    width: item.width * k,
+    height: item.height * k,
+    vehicleHeight: (item.vehicleHeight ?? 5) * k
+  });
+  model.scale.setScalar(1 / k);
+  // Placement lives on the outer group (the model sets its own, which the scale would shrink).
+  const group = new THREE.Group();
+  group.position.set(item.x, 0, item.y);
+  group.rotation.y = model.rotation.y;
+  model.position.set(0, 0, 0);
+  model.rotation.y = 0;
+  group.add(model);
+  return group;
+};
+
+const buildCarModel = (item: ParkingItem): THREE.Group => {
   const group = new THREE.Group();
   const bodyGroup = new THREE.Group();
   const shellGroup = new THREE.Group();

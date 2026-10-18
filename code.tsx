@@ -54,6 +54,7 @@ import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, 
 import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
+import { VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
@@ -1649,77 +1650,18 @@ export default function SecurityPlanner() {
     const x = snapValue(pos.x);
     const y = snapValue(pos.y);
 
-    let newItem: CanvasItem;
+    placeNewItemAt(type, x, y);
+  };
 
-    const common = {
-      id: generateId(),
-      x,
-      y,
-      rotation: 0
-    };
-
-    switch (type) {
-      case "add-camera":
-        newItem = {
-          ...common,
-          type: "camera",
-          rotation: 45,
-          label: `Camera ${items.filter(i => i.type === "camera").length + 1}`,
-          description: "",
-          fov: DEFAULT_CAMERA_HFOV,
-          hFov: DEFAULT_CAMERA_HFOV,
-          vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
-          pitch: DEFAULT_CAMERA_PITCH,
-          height: DEFAULT_CAMERA_HEIGHT_FT,
-          aspect: 16 / 9,
-          mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
-          range: DEFAULT_CAMERA_RANGE_FT,
-          color: COLORS.camera[items.filter(i => i.type === "camera").length % COLORS.camera.length],
-          connectorDashSize: 3
-        };
-        break;
-      case "add-building":
-        newItem = {
-          ...common,
-          type: "building",
-          width: DEFAULT_BUILDING.width,
-          height: DEFAULT_BUILDING.depth,
-          wallHeight: DEFAULT_BUILDING.wallHeight,
-          label: "Building",
-          color: COLORS.building[0],
-          points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
-        };
-        break;
-      case "add-tree":
-        newItem = {
-          ...common,
-          type: "tree",
-          radius: 12,
-          color: COLORS.tree[0]
-        };
-        break;
-      case "add-parking":
-        newItem = {
-          ...common,
-          type: "parking",
-          width: 24,
-          height: 48,
-          color: COLORS.parking[0],
-          vehicleHeight: 14
-        };
-        break;
-      case "add-label":
-        newItem = {
-          ...common,
-          type: "label",
-          text: "Text",
-          fontSize: 14,
-          color: COLORS.label[0]
-        };
-        break;
-      default:
-        return;
-    }
+  // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
+  // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
+  const placeNewItemAt = (type: ToolMode, x: number, y: number) => {
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label" } as Partial<Record<ToolMode, NewItemKind>>)[type];
+    if (!kind) return null;
+    const newItem = createItem(kind, x, y, {
+      unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
+      cameraIndex: itemsRef.current.filter(i => i.type === "camera").length
+    });
 
     if (newItem.type === "camera") {
       const edge = findNearestBuildingEdge({ x, y });
@@ -1745,10 +1687,13 @@ export default function SecurityPlanner() {
       setCameraPlacementPreview(null);
     }
 
-    setItems([...items, newItem]);
+    setItems(prev => [...prev, newItem]);
     setSelectedId(newItem.id);
     setMode("select");
+    return newItem;
   };
+  const placeNewItemAtRef = useRef(placeNewItemAt);
+  placeNewItemAtRef.current = placeNewItemAt;
   const addImageElement = (src: string) => {
     const newItem: ImageItem = {
       id: generateId(),
@@ -2728,7 +2673,7 @@ export default function SecurityPlanner() {
   // doesn't contain is reset rather than left over from the previous project).
   const applyProjectData = (projectData: any) => {
     suppressDemAutoApply();
-    setItems(Array.isArray(projectData.items) ? projectData.items : []);
+    setItems(Array.isArray(projectData.items) ? migrateItems(projectData.items, projectData.planGeoRef?.unitsPerFoot ?? 1) : []);
     setSelectedId(null);
     setMode("select");
     setTerrainHeights(projectData.terrainHeights && typeof projectData.terrainHeights === "object" ? projectData.terrainHeights : {});
@@ -5090,82 +5035,7 @@ export default function SecurityPlanner() {
             const x = snapEnabled ? Math.round(groundPos.x / snapSize) * snapSize : groundPos.x;
             const y = snapEnabled ? Math.round(groundPos.z / snapSize) * snapSize : groundPos.z; // z in 3D maps to y in 2D
 
-            const common = {
-              id: generateId(),
-              x,
-              y,
-              rotation: 0
-            };
-
-            let newItem: CanvasItem | null = null;
-
-            switch (currentMode) {
-              case "add-camera":
-                newItem = {
-                  ...common,
-                  type: "camera",
-                  rotation: 45,
-                  label: `Camera ${itemsRef.current.filter(i => i.type === "camera").length + 1}`,
-                  description: "",
-                  fov: DEFAULT_CAMERA_HFOV,
-                  hFov: DEFAULT_CAMERA_HFOV,
-                  vFov: vFovFromH(DEFAULT_CAMERA_HFOV, 16 / 9),
-                  pitch: DEFAULT_CAMERA_PITCH,
-                  height: DEFAULT_CAMERA_HEIGHT_FT,
-                  aspect: 16 / 9,
-                  mount: { type: "free", edgeT: 0.5, height: DEFAULT_CAMERA_HEIGHT_FT },
-                  range: DEFAULT_CAMERA_RANGE_FT,
-                  color: COLORS.camera[itemsRef.current.filter(i => i.type === "camera").length % COLORS.camera.length],
-                  connectorDashSize: 3
-                } as CameraItem;
-                break;
-              case "add-building":
-                newItem = {
-                  ...common,
-                  type: "building",
-                  width: DEFAULT_BUILDING.width,
-                  height: DEFAULT_BUILDING.depth,
-                  wallHeight: DEFAULT_BUILDING.wallHeight,
-                  label: "Building",
-                  color: COLORS.building[0],
-                  points: rectanglePoints(DEFAULT_BUILDING.width, DEFAULT_BUILDING.depth)
-                } as BuildingItem;
-                break;
-              case "add-tree":
-                newItem = {
-                  ...common,
-                  type: "tree",
-                  radius: 12,
-                  color: COLORS.tree[0]
-                } as TreeItem;
-                break;
-              case "add-parking":
-                newItem = {
-                  ...common,
-                  type: "parking",
-                  width: 24,
-                  height: 48,
-                  color: COLORS.parking[0],
-                  vehicleHeight: 14
-                } as ParkingItem;
-                break;
-              case "add-label":
-                newItem = {
-                  ...common,
-                  type: "label",
-                  text: "Label",
-                  fontSize: 14,
-                  color: COLORS.label[0]
-                } as LabelItem;
-                break;
-            }
-
-            if (newItem) {
-              setItems(prev => [...prev, newItem!]);
-              setSelectedId(newItem.id);
-              setMode("select");
-              setTimeout(() => saveHistory(), 50);
-            }
+            if (placeNewItemAtRef.current(currentMode as ToolMode, x, y)) setTimeout(() => saveHistory(), 50);
           }
           return;
         }
@@ -8519,11 +8389,13 @@ export default function SecurityPlanner() {
                       <label className="text-xs font-semibold text-slate-400 uppercase">Width (ft)</label>
                       <input
                         type="number"
+                      step="0.1"
+                      min="1"
                       value={Math.round((selectedItem as any).width * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
-                          ? updateBuildingSize(selectedItem.id, parseInt(e.target.value), (selectedItem as BuildingItem).height)
-                          : updateItem(selectedItem.id, { width: parseInt(e.target.value) })
+                          ? updateBuildingSize(selectedItem.id, (parseFloat(e.target.value) || 1), (selectedItem as BuildingItem).height)
+                          : updateItem(selectedItem.id, { width: (parseFloat(e.target.value) || 1) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
@@ -8534,11 +8406,13 @@ export default function SecurityPlanner() {
                       </label>
                       <input
                         type="number"
+                      step="0.1"
+                      min="1"
                       value={Math.round((selectedItem as any).height * 10) / 10}
                       onChange={e =>
                         selectedItem.type === "building"
-                          ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, parseInt(e.target.value))
-                          : updateItem(selectedItem.id, { height: parseInt(e.target.value) })
+                          ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, (parseFloat(e.target.value) || 1))
+                          : updateItem(selectedItem.id, { height: (parseFloat(e.target.value) || 1) })
                       }
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
@@ -8553,16 +8427,18 @@ export default function SecurityPlanner() {
                   <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Vehicle Type</label>
                     <div className="grid grid-cols-3 gap-1">
-                      {(['sedan', 'suv', 'truck', 'sports', 'van', 'hatchback'] as const).map(type => (
+                      {(Object.keys(VEHICLE_SIZES) as VehicleType[]).map(type => (
                         <button
                           key={type}
-                          onClick={() => updateItem(selectedItem.id, { vehicleType: type })}
+                          title={`${VEHICLE_SIZES[type].label}: ${VEHICLE_SIZES[type].width} × ${VEHICLE_SIZES[type].length} ft`}
+                          // Picking a type also sets its real-world size.
+                          onClick={() => updateItem(selectedItem.id, { vehicleType: type, ...vehicleDimensions(type, planGeoRef?.unitsPerFoot ?? 1) })}
                           className={`px-2 py-1.5 text-xs rounded capitalize transition-colors ${resolveVehicleType(selectedItem as ParkingItem) === type
                             ? 'bg-blue-600 text-white'
                             : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                             }`}
                         >
-                          {type === 'sedan' ? '🚗' : type === 'suv' ? '🚙' : type === 'truck' ? '🛻' : type === 'sports' ? '🏎️' : type === 'van' ? '🚐' : '🏍️'} {type}
+                          {VEHICLE_SIZES[type].label}
                         </button>
                       ))}
                     </div>
@@ -8625,23 +8501,25 @@ export default function SecurityPlanner() {
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Height (Z)</span>
-                    <span>{(selectedItem as ParkingItem).vehicleHeight ?? 12} ft</span>
+                    <span>{Math.round(((selectedItem as ParkingItem).vehicleHeight ?? 5) * 10) / 10} ft</span>
                   </label>
                   <div className="flex gap-2">
                     <input
                       type="range"
-                      min="6"
-                      max="60"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      min="3"
+                      max="14"
+                      step="0.1"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
                       className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
                     />
                     <input
                       type="number"
-                      min="6"
-                      max="60"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 12}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseInt(e.target.value) })}
+                      min="3"
+                      max="14"
+                      step="0.1"
+                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
+                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
                   </div>

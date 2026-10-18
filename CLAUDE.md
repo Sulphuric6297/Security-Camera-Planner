@@ -40,7 +40,7 @@ Useful commands:
 | --- | --- |
 | `smoke.spec.ts` | App loads, onboarding, steps, 2D/3D/camera-wall views, tool and view shortcuts |
 | `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
-| `plan-editing.spec.ts` | Placing every item type, dragging, adding corners, undo/redo, duplicate, nudge, delete + Undo toast, panning |
+| `plan-editing.spec.ts` | Placing every item type (2D and 3D) at real size, vehicle types, dragging, adding corners, undo/redo, duplicate, nudge, delete + Undo toast, panning |
 | `camera.spec.ts` | Aim handle matches the stored rotation, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
@@ -48,6 +48,7 @@ Useful commands:
 | `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), camera wall tiles, PDF report contents |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
+| `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
 
@@ -71,6 +72,8 @@ When you add a feature in a new area, add a new spec file and a row to this tabl
 - Plan units are feet. Plan (x, y) maps to 3D world (x, z), with Y up. Camera rotation 0° = +x,
   clockwise on screen.
 - Saved-document state lives in `src/state/project.ts` (zustand). UI-only state stays in components.
+- New items come from `createItem` in `src/lib/items.ts`, with sizes in real feet times
+  `unitsPerFoot`. Never hard-code sizes in placement code.
 - Pure logic goes in `src/lib/` (geo, camera, terrain, geometry). UI pieces go in
   `src/components/`.
 - Changes are developed on a feature branch. Do not merge or deploy to `main` without the
