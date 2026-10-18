@@ -36,7 +36,15 @@ import {
   LoaderCircle,
   MapPin,
   Hand,
-  SquareDashed
+  SquareDashed,
+  Copy,
+  RotateCw,
+  Maximize2,
+  ZoomIn,
+  ZoomOut,
+  Crosshair,
+  Navigation2,
+  ChevronDown
 } from "lucide-react";
 import GridLayoutBase from "react-grid-layout";
 // react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
@@ -48,7 +56,9 @@ import { useProjectField, getProject, useProject, createEmptyProject, projectRef
 import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
-import { ProjectOverview } from "./src/components/ProjectOverview";
+import { StepPanel } from "./src/components/StepPanel";
+import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
+import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DEFAULT_RESOLUTION_WIDTH, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, vFovFromH } from "./src/lib/camera";
@@ -154,6 +164,11 @@ export default function SecurityPlanner() {
   });
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+  // On-screen size of the plan SVG (for the scale bar and the floating action bar).
+  const [planRect, setPlanRect] = useState({ width: 0, height: 0 });
+  const [show3dMenu, setShow3dMenu] = useState(false);
+  // Inspector: rarely used settings stay folded away until asked for.
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0, panX: 0, panY: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -1136,6 +1151,17 @@ export default function SecurityPlanner() {
               });
             return [...rest, ...merged];
           });
+          // Show the property: zoom to the buildings near the middle of the area (the searched address).
+          const mid = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
+          const nearby = newBuildings.filter(b => Math.hypot(b.x - mid.x, b.y - mid.y) < 150 * unitsPerFoot);
+          const near = boundsOfPoints(nearby.flatMap(b => (b.points ?? []).map(p => ({ x: b.x + p.x, y: b.y + p.y }))));
+          if (near) {
+            const f = fitBounds(near, canvasSizeRef.current, { margin: 1.4, minSpan: 220 * unitsPerFoot });
+            if (f.zoom > 1.05) {
+              setZoom(f.zoom);
+              setPanOffset(f.pan);
+            }
+          }
           buildingText = newBuildings.length > 0
             ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
             : " No buildings were added. Draw them over the satellite image with the Building tool.";
@@ -1281,6 +1307,9 @@ export default function SecurityPlanner() {
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
   const [reviewVisited, setReviewVisited] = useState(false);
+  // Which workflow step's panel is showing (null = follow progress: the first unfinished step).
+  const [activeStepChoice, setActiveStepChoice] = useState<WorkflowStepId | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   useEffect(() => {
     if (viewMode !== "plan") setReviewVisited(true);
   }, [viewMode]);
@@ -4319,6 +4348,57 @@ export default function SecurityPlanner() {
     return copy as CanvasItem;
   };
 
+  // --- Plan view: zoom to fit / to the selection ---
+  const itemPlanBounds = (item: CanvasItem): Bounds | null => {
+    if (item.type === "building") return boundsOfPoints(getBuildingEdgePointsWorld(item as BuildingItem));
+    if (item.type === "camera") {
+      const p = getCameraPlanPosition(item as CameraItem);
+      return { minX: p.x, minY: p.y, maxX: p.x, maxY: p.y };
+    }
+    const r = item.type === "tree" ? (item as TreeItem).radius : Math.max((item as any).width ?? 0, (item as any).height ?? 0) / 2;
+    return { minX: item.x - r, minY: item.y - r, maxX: item.x + r, maxY: item.y + r };
+  };
+  const zoomToBounds = (b: Bounds | null, minSpanFt = 60, canvas = canvasSizeRef.current) => {
+    if (!b) return;
+    const f = fitBounds(b, canvas, { margin: 1.3, minSpan: minSpanFt * (planGeoRef?.unitsPerFoot ?? 1) });
+    setZoom(f.zoom);
+    setPanOffset(f.pan);
+  };
+  const zoomToFit = () => {
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+  const zoomToSelection = () => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (item) zoomToBounds(itemPlanBounds(item), item.type === "camera" ? 80 : 50);
+    else zoomToFit();
+  };
+  const zoomBy = (factor: number) => {
+    // Zoom around the middle of the view
+    const cx = canvasSize.width / 2;
+    const cy = canvasSize.height / 2;
+    const next = clamp(zoom * factor, 0.3, MAX_ZOOM);
+    setPanOffset({ x: cx - ((cx - panOffset.x) / zoom) * next, y: cy - ((cy - panOffset.y) / zoom) * next });
+    setZoom(next);
+  };
+
+  // --- Actions on the selection (shared by the floating action bar and shortcuts) ---
+  const duplicateSelected = () => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (!item) return;
+    const copy = pastedCopy(item);
+    const nextItems = [...items, copy];
+    setItems(nextItems);
+    setSelectedId(copy.id);
+    saveHistory(nextItems);
+  };
+  const rotateSelected = (deg: number) => {
+    const item = selectedId ? items.find(i => i.id === selectedId) : null;
+    if (!item) return;
+    updateItem(item.id, { rotation: (((item.rotation + deg) % 360) + 360) % 360 });
+    setTimeout(() => saveHistory(), 50);
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -4336,6 +4416,9 @@ export default function SecurityPlanner() {
         }
         if (event.key === "2") { setViewMode("plan"); return; }
         if (event.key === "3") { setViewMode("iso3d"); return; }
+        if (event.key === "?") { event.preventDefault(); setShowShortcuts(true); return; }
+        if (viewMode === "plan" && event.key === "0") { event.preventDefault(); zoomToFit(); return; }
+        if (viewMode === "plan" && event.key.toLowerCase() === "f") { event.preventDefault(); zoomToSelection(); return; }
         // Nudge the selection with the arrow keys (Shift = 10 ft)
         if (selectedId && event.key.startsWith("Arrow")) {
           const item = items.find(i => i.id === selectedId);
@@ -4389,15 +4472,8 @@ export default function SecurityPlanner() {
 
         // Duplicate (Ctrl/Cmd+D)
         if (key === "d" && selectedId) {
-          const item = items.find(i => i.id === selectedId);
-          if (item) {
-            event.preventDefault();
-            const copy = pastedCopy(item);
-            const nextItems = [...items, copy];
-            setItems(nextItems);
-            setSelectedId(copy.id);
-            saveHistory(nextItems);
-          }
+          event.preventDefault();
+          duplicateSelected();
         }
 
         // Copy (Ctrl+C)
@@ -5865,7 +5941,7 @@ export default function SecurityPlanner() {
     const worldX = (rawX - panOffset.x) / zoom;
     const worldY = (rawY - panOffset.y) / zoom;
 
-    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.3, 3.5);
+    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.3, MAX_ZOOM);
     const nextPanX = rawX - worldX * nextZoom;
     const nextPanY = rawY - worldY * nextZoom;
 
@@ -5873,11 +5949,97 @@ export default function SecurityPlanner() {
     setPanOffset({ x: nextPanX, y: nextPanY });
   };
 
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || viewMode !== "plan") return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setPlanRect(prev => (prev.width === r.width && prev.height === r.height ? prev : { width: r.width, height: r.height }));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [viewMode]);
+
+  // Plan point -> pixel position inside the plan container.
+  const planToScreen = (p: { x: number; y: number }) => {
+    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
+    const offX = (planRect.width - canvasSize.width * scale) / 2;
+    const offY = (planRect.height - canvasSize.height * scale) / 2;
+    return { x: offX + (panOffset.x + p.x * zoom) * scale, y: offY + (panOffset.y + p.y * zoom) * scale, scale };
+  };
+
+  const renderPlanOverlays = () => {
+    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
+    const pxPerFoot = (scale * zoom) / (planGeoRef?.unitsPerFoot ?? 1);
+    const bar = niceScaleBar(pxPerFoot, 110);
+    const sel = selectedId ? items.find(i => i.id === selectedId) : null;
+    const selBounds = sel ? itemPlanBounds(sel) : null;
+    let actionBar: React.ReactNode = null;
+    if (sel && selBounds && mode === "select" && !interactionState.type && !isTerrainMode && planRect.width > 0) {
+      const top = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.minY });
+      const bottom = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.maxY });
+      const above = top.y - (sel.type === "camera" ? 70 : 66);
+      const y = above > 70 ? above : bottom.y + (sel.type === "camera" ? 40 : 14);
+      const x = clamp(top.x, 110, Math.max(110, planRect.width - 110));
+      const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
+      actionBar = (
+        <div
+          role="toolbar"
+          aria-label="Selection actions"
+          className="absolute z-30 flex items-center gap-0.5 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl backdrop-blur"
+          style={{ left: x, top: y, transform: "translateX(-50%)" }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <button className={btn} title="Duplicate (Ctrl/⌘+D)" aria-label="Duplicate" onClick={duplicateSelected}><Copy className="w-4 h-4" /></button>
+          <button className={btn} title={sel.type === "camera" ? "Turn 15° clockwise" : "Rotate 15° clockwise"} aria-label="Rotate" onClick={() => rotateSelected(15)}><RotateCw className="w-4 h-4" /></button>
+          <button className={btn} title="Zoom to it (F)" aria-label="Zoom to selection" onClick={zoomToSelection}><Crosshair className="w-4 h-4" /></button>
+          <span className="w-px h-5 bg-white/10 mx-0.5" />
+          <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={() => { deleteItem(sel.id); setTimeout(() => saveHistory(), 50); }}><Trash2 className="w-4 h-4" /></button>
+        </div>
+      );
+    }
+    const ctl = "w-8 h-8 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10";
+    return (
+      <>
+        {actionBar}
+        <div className="absolute top-20 right-4 z-20 flex items-start gap-2">
+          {bar && (
+            <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
+              <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
+              <div data-testid="scale-bar" style={{ width: bar.px }} className="h-1.5 border-x-2 border-b-2 border-slate-200" />
+            </div>
+          )}
+          {planGeoRef && (
+            <div className="w-10 h-12 rounded-lg bg-zinc-900/85 border border-white/10 flex flex-col items-center justify-center text-slate-200 shadow" title="North is up" aria-label="North arrow">
+              <Navigation2 className="w-4 h-4 fill-current" />
+              <span className="text-[10px] font-bold leading-none mt-0.5">N</span>
+            </div>
+          )}
+          <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
+            <button className={ctl} title="Zoom in" aria-label="Zoom in" onClick={() => zoomBy(1.25)}><ZoomIn className="w-4 h-4" /></button>
+            <button className={ctl} title="Zoom out" aria-label="Zoom out" onClick={() => zoomBy(0.8)}><ZoomOut className="w-4 h-4" /></button>
+            <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={zoomToFit}><Maximize2 className="w-4 h-4" /></button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
   // --- Render Helpers ---
 
   // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
   // regardless of how many feet the site spans or how far you zoom.
   const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
+
+  // Building inspector order: the everyday settings first, the rest folded under "More options".
+  // (Other item types keep their natural order.)
+  const inspectorOrder = (slot: "name" | "main" | "size" | "color" | "toggle" | "advanced") => {
+    if (selectedItem?.type !== "building") return "";
+    const order = { name: "order-1", main: "order-2", size: "order-3", color: "order-4", toggle: "order-5", advanced: "order-6" }[slot];
+    return slot === "advanced" && !showMoreOptions ? `${order} hidden` : order;
+  };
 
   const selectedItem = items.find(i => i.id === selectedId);
   const selectedCamera = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
@@ -5908,26 +6070,25 @@ export default function SecurityPlanner() {
     review: reviewVisited,
     report: exportList.length > 0
   };
+  const WORKFLOW_ORDER: WorkflowStepId[] = ["site", "buildings", "cameras", "review", "report"];
+  const activeStep: WorkflowStepId = activeStepChoice ?? WORKFLOW_ORDER.find(id => !workflowStepsDone[id]) ?? "report";
+  // A step shows its panel (a workspace with that step's tools); it never locks the user in.
   const handleWorkflowStep = (step: WorkflowStepId) => {
+    setActiveStepChoice(step);
+    setSelectedId(null);
+    setRightPanelMode("properties");
+    setIsRightPanelOpen(true);
+    if (mode !== "select") setMode("select");
     switch (step) {
       case "site":
-        openElevationDialog();
+        if (!workflowStepsDone.site) openElevationDialog();
         break;
       case "buildings":
-        setViewMode("plan");
-        setMode("add-building");
-        break;
       case "cameras":
-        setViewMode("plan");
-        setMode("add-camera");
+        if (viewMode === "nvr") setViewMode("plan");
         break;
       case "review":
         setReviewVisited(true);
-        setMode("select");
-        setViewMode("iso3d");
-        break;
-      case "report":
-        setShowExportPanel(true);
         break;
     }
   };
@@ -7095,6 +7256,7 @@ export default function SecurityPlanner() {
         onOpen={() => projectInputRef.current?.click()}
         onSave={handleSaveProject}
         stepsDone={workflowStepsDone}
+        activeStep={activeStep}
         onStep={handleWorkflowStep}
         viewMode={viewMode}
         onViewMode={setViewMode}
@@ -7102,8 +7264,9 @@ export default function SecurityPlanner() {
         onUploadBaseMap={() => fileInputRef.current?.click()}
         onAddOverlay={() => elementImageInputRef.current?.click()}
         onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
-        onOpenReport={() => setShowExportPanel(true)}
+        onShortcuts={() => setShowShortcuts(true)}
       />
+      {showShortcuts && <ShortcutsDialog onClose={() => setShowShortcuts(false)} />}
 
       {demAlignMode && viewMode !== "plan" && demPreview && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
@@ -7177,6 +7340,7 @@ export default function SecurityPlanner() {
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
           <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr") ? "w-full h-full" : ""}`}>
             {viewMode === "plan" ? (
+              <>
               <svg
                 ref={svgRef}
                 data-testid="plan"
@@ -7943,6 +8107,8 @@ export default function SecurityPlanner() {
                   )}
                 </g>
               </svg>
+              {renderPlanOverlays()}
+              </>
             ) : viewMode === "iso3d" ? (
               <div className="relative w-full h-full">
                 <div ref={threeContainerRef} className="absolute inset-0" />
@@ -8030,36 +8196,34 @@ export default function SecurityPlanner() {
                   </div>
                   <div className="flex items-center gap-2 pointer-events-auto">
                     <button
-                      onClick={() => bg3dInputRef.current?.click()}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors flex items-center gap-1"
-                    >
-                      <ImageIcon className="w-3 h-3" />
-                      Set 3D BG
-                    </button>
-                    <button
-                      onClick={handleCaptureSnapshot}
-                      className="px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/20 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/30 shadow-sm transition-colors"
-                    >
-                      Take Snapshot
-                    </button>
-                    <button
-                      onClick={handleExportCurrent3d}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
-                    >
-                      Download Snapshot
-                    </button>
-                    <button
-                      onClick={add3dToExportList}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
-                    >
-                      + Add to Report
-                    </button>
-                    <button
                       onClick={handleReset3dView}
-                      className="px-3 py-1 rounded-full border border-white/10 bg-zinc-800/80 text-xs font-semibold text-slate-300 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
+                      className="px-3 py-1.5 rounded-full border border-white/10 bg-zinc-800/90 text-xs font-semibold text-slate-200 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
                     >
-                      Reset View
+                      Reset view
                     </button>
+                    <div className="relative">
+                      <button
+                        onClick={() => setShow3dMenu(v => !v)}
+                        aria-expanded={show3dMenu}
+                        className="px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/20 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/30 shadow-sm transition-colors flex items-center gap-1"
+                      >
+                        <Camera className="w-3.5 h-3.5" /> Snapshot <ChevronDown className="w-3 h-3" />
+                      </button>
+                      {show3dMenu && (
+                        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setShow3dMenu(false)}>
+                          {[
+                            { label: "Download as image", action: handleExportCurrent3d },
+                            { label: "Add to the report", action: add3dToExportList },
+                            { label: "Keep in snapshots", action: handleCaptureSnapshot },
+                            { label: "Set 3D background image…", action: () => bg3dInputRef.current?.click() }
+                          ].map(m => (
+                            <button key={m.label} onClick={() => { setShow3dMenu(false); m.action(); }} className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-white/10 rounded-lg">
+                              {m.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -8345,8 +8509,8 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && (
-                <div className={panelSection}>
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && (
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
                     <span>{Math.round(selectedItem.rotation)}deg</span>
@@ -8366,7 +8530,7 @@ export default function SecurityPlanner() {
                 selectedItem.type === "building" ||
                 selectedItem.type === "image" ||
                 selectedItem.type === "label") && (
-                  <div className={panelSection}>
+                  <div className={`${panelSection} ${inspectorOrder("name")}`}>
                     <label className="text-xs font-semibold text-slate-400 uppercase">
                       {selectedItem.type === "label" ? "Text Content" : "Label"}
                     </label>
@@ -8394,7 +8558,7 @@ export default function SecurityPlanner() {
               )}
 
               {(selectedItem.type === "building" || selectedItem.type === "parking") && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("size")}`}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="text-xs font-semibold text-slate-400 uppercase">Width (ft)</label>
@@ -8539,7 +8703,7 @@ export default function SecurityPlanner() {
             )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("main")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
                     <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>
@@ -8584,7 +8748,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-semibold text-slate-400 uppercase">Label Font</label>
                     <button
@@ -8640,7 +8804,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type === "building" && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase">Building Shape</label>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -9086,7 +9250,7 @@ export default function SecurityPlanner() {
               )}
 
               {selectedItem.type !== "image" && selectedItem.type !== "parking" && COLORS[selectedItem.type as keyof typeof COLORS] && (
-                <div className={panelSection}>
+                <div className={`${panelSection} ${inspectorOrder("color")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Color Code</label>
                   <div className="flex flex-wrap gap-2">
                     {COLORS[selectedItem.type as keyof typeof COLORS].map(color => (
@@ -9101,7 +9265,19 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
-              <div className={panelSection}>
+              {selectedItem.type === "building" && (
+                <button
+                  type="button"
+                  onClick={() => setShowMoreOptions(v => !v)}
+                  aria-expanded={showMoreOptions}
+                  className={`${inspectorOrder("toggle")} flex items-center justify-between w-full px-1 text-xs font-semibold text-slate-400 hover:text-slate-200`}
+                >
+                  <span>{showMoreOptions ? "Fewer options" : "More options: rotation, label font, corners"}</span>
+                  <ChevronDown className={`w-4 h-4 transition-transform ${showMoreOptions ? "rotate-180" : ""}`} />
+                </button>
+              )}
+
+              <div className={`${panelSection} order-last`}>
                 <button
                   onClick={() => deleteItem(selectedItem.id)}
                   className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-red-500/30 text-red-400 hover:text-red-200 hover:bg-red-500/10 transition-colors text-sm font-semibold"
@@ -9496,9 +9672,8 @@ export default function SecurityPlanner() {
               </div>
             </div>
           ) : (
-            <div className="p-6 flex flex-col gap-6">
-              <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200">Overview</h2>
+            <div className="p-6 flex flex-col gap-5">
+              <div className="flex justify-end -mb-4">
                 <button
                   onClick={() => setIsRightPanelOpen(false)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -9507,28 +9682,33 @@ export default function SecurityPlanner() {
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <ProjectOverview
+              <StepPanel
+                step={activeStep}
                 items={items}
-                hasSite={workflowStepsDone.site}
-                onSelect={id => { setSelectedId(id); setMode("select"); }}
-                onImportSite={openElevationDialog}
-                onAddCamera={() => { setViewMode("plan"); setMode("add-camera"); }}
-                onAddBuilding={() => { setViewMode("plan"); setMode("add-building"); }}
+                site={workflowStepsDone.site ? { label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
+                reportViews={exportList.length}
                 showAllCones={frustumSettings.showAll !== false}
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
+                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onStep={handleWorkflowStep}
+                onImportSite={openElevationDialog}
+                onUploadBaseMap={() => fileInputRef.current?.click()}
+                onTool={tool => { if (viewMode === "nvr") setViewMode("plan"); setMode(tool); }}
+                onView={setViewMode}
+                onReportPdf={handleExportReportPdf}
+                onPlanPng={handleExportPng}
+                onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+                onMoreReportOptions={() => setShowExportPanel(true)}
               />
-              <div className={panelSectionLoose}>
-                <p className="text-sm text-slate-400">Click any item on the plan to edit it.</p>
-                <button
-                  onClick={() => {
-                    setRightPanelMode("project");
-                    setIsRightPanelOpen(true);
-                  }}
-                  className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-sm font-medium text-slate-200 transition-colors"
-                >
-                  Open Plan Settings
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  setRightPanelMode("project");
+                  setIsRightPanelOpen(true);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-300 text-left"
+              >
+                Plan settings (name, size, grid, labels)…
+              </button>
             </div>
           )}
         </div>

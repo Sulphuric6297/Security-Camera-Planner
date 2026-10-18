@@ -80,8 +80,9 @@ test.describe("3D, camera views and report", () => {
     await placeWithKey(page, "c", 0.5, 0.6);
     await page.getByRole("button", { name: /^Eave/ }).click();
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Report", exact: true }).click();
-    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Report PDF" }).click()]);
+    // The Report step's panel has the one-click PDF
+    await page.locator('nav[aria-label="Steps"] button').nth(4).click();
+    const [popup] = await Promise.all([context.waitForEvent("page"), page.getByRole("button", { name: "Download PDF report" }).click()]);
     await popup.waitForLoadState();
     await expect(popup.getByText("Camera schedule")).toBeVisible({ timeout: 15_000 });
     await expect(popup.locator("tbody tr")).toHaveCount(1);

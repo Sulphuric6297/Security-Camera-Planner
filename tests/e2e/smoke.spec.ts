@@ -4,7 +4,9 @@ test.describe("app shell", () => {
   test("loads with onboarding, guided steps and view switching", async ({ page }) => {
     await expect(page.getByRole("button", { name: "Find my property" })).toBeVisible();
     await expect(page.locator('nav[aria-label="Steps"] button')).toHaveCount(5);
-    await expect(page.getByText("Getting started")).toBeVisible();
+    // The side panel shows the current step's workspace
+    await expect(page.getByTestId("step-panel")).toHaveAttribute("data-step", "site");
+    await expect(page.getByText("Step 1 of 5")).toBeVisible();
 
     await page.getByRole("tab", { name: "3D" }).click();
     await expect(page.locator("canvas").first()).toBeVisible();

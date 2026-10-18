@@ -188,6 +188,8 @@ export async function placeWithKey(page: Page, key: string, fx: number, fy: numb
 export async function importSite(page: Page) {
   await page.locator('nav[aria-label="Steps"] button').first().click();
   const search = page.getByLabel("Search address");
+  // With a site already imported, the Site step shows its panel; re-import from there.
+  if (!(await search.isVisible())) await page.getByRole("button", { name: "Change or re-import the site" }).click();
   await search.fill("123 Main St Fra");
   await page.getByRole("button", { name: /123 Main St/ }).click();
   await expect(page.getByText(/of \d+ buildings will be added/)).toBeVisible();

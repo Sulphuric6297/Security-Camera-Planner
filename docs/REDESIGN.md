@@ -65,7 +65,7 @@ and previews that look exact without saying they are estimates.
   from far away.
 - Tests: roof meshes get the photo texture, roof type switch, model sizes sane, no WebGL errors.
 
-### Phase 2: a simpler, step-driven interface
+### Phase 2: a simpler, step-driven interface (done, except touch-size handles)
 - **The steps drive the side panel.** Site = import/re-import, map, elevation. Buildings = list,
   trace a roof, add or draw. Cameras = camera list, add, outcome presets. Review = coverage
   checklist and blind spots (phase 3). Report = the report builder (phase 4). Remove the duplicate
