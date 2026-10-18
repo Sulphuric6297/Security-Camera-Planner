@@ -1159,6 +1159,7 @@ export default function SecurityPlanner() {
     id: number;
     message: string;
     tone: 'success' | 'error' | 'info';
+    action?: { label: string; run: () => void };
   } | null>(null);
   const exportNoticeTimerRef = useRef<number | null>(null);
 
@@ -1725,8 +1726,15 @@ export default function SecurityPlanner() {
   };
 
   const deleteItem = (id: string) => {
-    setItems(prev => prev.filter(i => i.id !== id));
+    const removed = items.find(i => i.id === id);
+    const nextItems = items.filter(i => i.id !== id);
+    setItems(nextItems);
     setSelectedId(prev => (prev === id ? null : prev));
+    saveHistory(nextItems);
+    if (removed) {
+      const name = (removed as any).label || (removed as any).text || getItemTypeLabel(removed.type);
+      showExportNotice(`Deleted ${name}`, "info", { label: "Undo", run: handleUndo });
+    }
   };
 
   const handleClearCanvas = () => {
@@ -1888,12 +1896,16 @@ export default function SecurityPlanner() {
     );
   };
 
-  const showExportNotice = (message: string, tone: 'success' | 'error' | 'info' = 'success') => {
-    setExportNotice({ id: Date.now(), message, tone });
+  const showExportNotice = (
+    message: string,
+    tone: 'success' | 'error' | 'info' = 'success',
+    action?: { label: string; run: () => void }
+  ) => {
+    setExportNotice({ id: Date.now(), message, tone, action });
     if (exportNoticeTimerRef.current) {
       window.clearTimeout(exportNoticeTimerRef.current);
     }
-    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), 2400);
+    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), action ? 6000 : 3000);
   };
 
   const getPlanViewBox = () => {
@@ -5234,6 +5246,16 @@ export default function SecurityPlanner() {
   }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg, terrainHeights, gridSize, backgroundImg]);
 
 
+  // React attaches wheel listeners as passive, so preventDefault there can't stop the page scrolling
+  // while zooming the plan; block it with a native non-passive listener.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const block = (event: WheelEvent) => event.preventDefault();
+    el.addEventListener("wheel", block, { passive: false });
+    return () => el.removeEventListener("wheel", block);
+  }, [viewMode]);
+
   // --- Event Handlers ---
 
   const getSvgMousePosFor = (
@@ -5378,8 +5400,10 @@ export default function SecurityPlanner() {
       return;
     }
     if (isPanning) {
-      const dx = e.clientX - panStart.x;
-      const dy = e.clientY - panStart.y;
+      // panOffset is in SVG viewBox units; convert the screen-pixel drag so the plan follows the cursor.
+      const k = svgRef.current?.getScreenCTM()?.a || 1;
+      const dx = (e.clientX - panStart.x) / k;
+      const dy = (e.clientY - panStart.y) / k;
       setPanOffset({ x: panStart.panX + dx, y: panStart.panY + dy });
       return;
     }
@@ -5755,8 +5779,16 @@ export default function SecurityPlanner() {
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
       {exportNotice && (
-        <div className={`absolute top-20 right-4 z-50 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-top-2`}>
-          {exportNotice.message}
+        <div role="status" className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
+          <span>{exportNotice.message}</span>
+          {exportNotice.action && (
+            <button
+              onClick={() => { exportNotice.action?.run(); setExportNotice(null); }}
+              className="px-2.5 py-0.5 rounded-full bg-white/15 hover:bg-white/25 text-xs font-bold uppercase tracking-wide"
+            >
+              {exportNotice.action.label}
+            </button>
+          )}
         </div>
       )}
       {showExportPanel && (
@@ -7075,7 +7107,7 @@ export default function SecurityPlanner() {
                             <polygon
                               points={points.map(point => `${point.x},${point.y}`).join(" ")}
                               fill={building.color}
-                              fillOpacity={building.importSource ? 0.55 : 1}
+                              fillOpacity={backgroundImg ? 0.55 : 1}
                               stroke={isSelected ? "#059669" : building.importSource ? "#f8fafc" : "#334155"}
                               strokeWidth={isSelected ? 3 : building.importSource ? 1.5 : 1}
                             />
