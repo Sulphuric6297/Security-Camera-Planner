@@ -1790,7 +1790,18 @@ export class SiteView {
           const length = car0.height * (Math.hypot(p.x - car0.x, p.y - car0.y) / reach0);
           return scaledVehicle(car0, clamp(length, 4 * this.upf(), 60 * this.upf())) as Partial<CanvasItem>;
         });
-      }, { index: i, title: "Drag to make the vehicle bigger or smaller (it keeps its proportions)" });
+      }, {
+        index: i,
+        title: "Drag to make the vehicle bigger or smaller (it keeps its proportions)",
+        // Only when the vehicle is big enough on screen that its body can still be grabbed to move it
+        visible: () => {
+          const car = this.item(id) as ParkingItem | null;
+          if (!car) return false;
+          const a = corner(car, 0), c = corner(car, 2);
+          const pa = this.project(new THREE.Vector3(a.x, this.h(a.x, a.y), a.y)), pc = this.project(new THREE.Vector3(c.x, this.h(c.x, c.y), c.y));
+          return !!pa && !!pc && Math.hypot(pa.x - pc.x, pa.y - pc.y) > 70;
+        }
+      });
     }
   }
 

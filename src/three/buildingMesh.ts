@@ -486,7 +486,7 @@ export const createBuildingModel = (
       const porch = !!front && partList.some(p => p.floor > 0.2 * upf && pointInPolygonXY(front, p.pts));
       if (place) group.add(createOpening(o, place, upf, b.color, !porch));
     });
-  }
+  } else if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
   // The foundation below the first floor (a crawl space or a raised floor shows more of it)
   const floorH = b.floorHeight ?? 1 * upf;
   if (!b.openSides && floorH > 0.3 * upf) {
@@ -501,7 +501,7 @@ export const createBuildingModel = (
       m.userData.itemId = b.id;
       group.add(m);
     }
-  } else if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
+  }
   // Open parts (porch, carport, patio): floors, posts and railings where the outer walls are left out.
   partList.forEach(part => group.add(openPartModel(pts, part, wallHeight, upf, b.color)));
 

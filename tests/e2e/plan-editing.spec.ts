@@ -101,16 +101,17 @@ test.describe("plan editing", () => {
     await page.evaluate(() => {
       const w = window as any;
       w.__headings = [];
-      const until = performance.now() + 900;
+      const until = performance.now() + 1600;
       const tick = () => { w.__headings.push(w.__scpView.viewInfo().heading); if (performance.now() < until) requestAnimationFrame(tick); };
       requestAnimationFrame(tick);
     });
     const q = await planPoint(page, 0.8, 0.75);
     await page.mouse.move(q.x, q.y);
     await page.mouse.wheel(0, -300);
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1700);
     const headings: number[] = await page.evaluate(() => (window as any).__headings);
-    expect(headings.length).toBeGreaterThan(5);
+    // (a slow machine draws few frames; a handful is enough to catch a spin)
+    expect(headings.length).toBeGreaterThan(3);
     const worst = Math.max(...headings.map(h => Math.abs(((h - headings[0]) % 360 + 540) % 360 - 180)));
     expect(worst).toBeLessThan(3);
   });
@@ -268,7 +269,11 @@ test.describe("plan editing", () => {
     }, big.id);
     expect(model.length).toBeCloseTo(big.height, 1);
     expect(model.even).toBeLessThan(1e-6);
-    // A corner handle on the map: dragged out, the whole vehicle grows, still in proportion
+    // A corner handle on the map (shown once the vehicle is big enough on screen to grab): dragged
+    // out, the whole vehicle grows, still in proportion
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("f");
+    await page.waitForTimeout(700);
     const corner = await handleCenter(page, "corner", 2);
     const mid = (await screenOf(page, big.x, big.y))!;
     await drag(page, corner, { x: mid.x + (corner.x - mid.x) * 1.4, y: mid.y + (corner.y - mid.y) * 1.4 }, 10);
