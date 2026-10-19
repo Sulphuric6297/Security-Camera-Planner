@@ -1,4 +1,4 @@
-import { test, expect, drag, handleCenter, itemBox, itemsOfType, placeWithKey, planPoint, project, screenOf } from "./fixtures";
+import { test, expect, drag, handleCenter, itemBox, itemsOfType, measuredPxPerFt, placeWithKey, planAt, planPoint, project, screenOf } from "./fixtures";
 
 test.describe("plan editing", () => {
   test("places every item type with shortcuts", async ({ page }) => {
@@ -83,6 +83,22 @@ test.describe("plan editing", () => {
     const after = await screenOf(page, b.x, b.y);
     expect(after.x - before.x).toBeCloseTo(-100, -1);
     expect(after.y - before.y).toBeCloseTo(-50, -1);
+  });
+
+  test("two-finger scroll up/down zooms at the cursor; sideways slides the map", async ({ page }) => {
+    const before = await measuredPxPerFt(page);
+    const p = await planPoint(page, 0.8, 0.8); // (the start card covers the middle of an empty plan)
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.wheel(0, -200); // fingers up: zoom in
+    await expect.poll(() => measuredPxPerFt(page)).toBeGreaterThan(before * 1.3);
+    const zoomed = await measuredPxPerFt(page);
+    await page.waitForTimeout(400);
+    const at = await planAt(page, p.x, p.y);
+    await page.mouse.wheel(80, 0); // sideways: the map slides, the zoom stays
+    await page.waitForTimeout(200);
+    const after = await planAt(page, p.x, p.y);
+    expect(Math.abs(after!.x - at!.x)).toBeGreaterThan(10);
+    expect(Math.abs((await measuredPxPerFt(page)) - zoomed) / zoomed).toBeLessThan(0.05);
   });
 
   test("building rotation handle, and height handle in 3D", async ({ page }) => {

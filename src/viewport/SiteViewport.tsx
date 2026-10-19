@@ -18,6 +18,8 @@ type Props = {
   actions: { duplicate: () => void; rotate: () => void; remove: () => void; zoomTo: () => void } | null;
   snapshot: { download: () => void; addToReport: () => void; keep: () => void; background: () => void };
   onReady: (view: SiteView | null) => void;
+  /** Width covered by a panel on the right (the inspector); the controls move left of it. */
+  rightInset?: number;
 };
 
 /** The map view (2D and 3D in one) with its on-screen controls. */
@@ -74,6 +76,7 @@ export function SiteViewport(props: Props) {
   }, [props.poseSignal]);
 
   const view = viewRef.current;
+  const inset = props.rightInset ?? 0;
   const pxPerFoot = info ? info.pxPerUnit * props.doc.unitsPerFoot : 0;
   const bar = info && info.tiltDeg < 30 ? niceScaleBar(pxPerFoot, 110) : null;
   const tilted = (info?.tiltDeg ?? 0) > 8;
@@ -83,7 +86,7 @@ export function SiteViewport(props: Props) {
   if (props.actions && box && info && !props.hidden) {
     const above = box.y - 56;
     const y = above > 8 ? above : Math.min(info.height - 48, box.y + box.height + 14);
-    const x = clamp(box.x + box.width / 2, 110, Math.max(110, info.width - 110));
+    const x = clamp(box.x + box.width / 2, 110, Math.max(110, info.width - inset - 110));
     const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
     actionBar = (
       <div
@@ -105,37 +108,9 @@ export function SiteViewport(props: Props) {
     <div className={`absolute inset-0 ${props.hidden ? "invisible pointer-events-none" : ""}`}>
       <div ref={hostRef} data-testid="plan" className="absolute inset-0 overflow-hidden select-none" style={{ touchAction: "none" }} />
       {actionBar}
-      <div className="absolute top-3 right-3 z-20 flex items-start gap-2">
-        {bar && (
-          <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
-            <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
-            <div data-testid="scale-bar" style={{ width: bar.px }} className="h-1.5 border-x-2 border-b-2 border-slate-200" />
-          </div>
-        )}
-        <button
-          onClick={() => view?.resetNorth()}
-          className="w-10 h-12 rounded-lg bg-zinc-900/85 border border-white/10 flex flex-col items-center justify-center text-slate-200 shadow hover:bg-zinc-800"
-          title={info && Math.abs(((info.heading + 540) % 360) - 180) < 0.5 ? "North is up" : "Turn north up (N)"}
-          aria-label={props.doc.geo ? "North arrow" : "Compass"}
-        >
-          <span className="flex flex-col items-center" style={{ transform: `rotate(${-(info?.heading ?? 0)}deg)` }}>
-            <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true"><path d="M7 0 L13 15 L7 11 L1 15 Z" fill="#ef4444" /></svg>
-            <span className="text-[10px] font-bold leading-none mt-0.5">N</span>
-          </span>
-        </button>
-        <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
-          <button className={ctl} title="Zoom in (+)" aria-label="Zoom in" onClick={() => view?.zoomBy(1.4)}><ZoomIn className="w-4 h-4" /></button>
-          <button className={ctl} title="Zoom out (-)" aria-label="Zoom out" onClick={() => view?.zoomBy(1 / 1.4)}><ZoomOut className="w-4 h-4" /></button>
-          <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={() => view?.fitSite()}><Maximize2 className="w-4 h-4" /></button>
-        </div>
-        <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
-          <button className={`${ctl} ${tilted ? "text-indigo-300" : ""}`} title={tilted ? "Look straight down (T)" : "Tilt into 3D (T)"} aria-label={tilted ? "Look straight down" : "Tilt into 3D"} onClick={() => view?.toggleTilt()}><Box className="w-4 h-4" /></button>
-          <button className={ctl} title="Turn the view left" aria-label="Rotate view left" onClick={() => view?.rotateBy(-22.5)}><RotateCcw className="w-4 h-4" /></button>
-          <button className={ctl} title="Turn the view right" aria-label="Rotate view right" onClick={() => view?.rotateBy(22.5)}><RotateCw className="w-4 h-4" /></button>
-        </div>
-      </div>
-      {tilted && (
-        <div className="absolute top-3 right-[13.5rem] z-20 flex items-center gap-2">
+      <div className="absolute top-3 z-20 flex items-start gap-2" style={{ right: 12 + inset }}>
+        {tilted && (
+          <div className="flex items-center gap-2">
           <button
             onClick={() => { view?.fitSite(); view?.resetNorth(); }}
             className="px-3 py-1.5 rounded-lg border border-white/10 bg-zinc-900/90 text-xs font-semibold text-slate-200 hover:bg-zinc-800 shadow"
@@ -165,10 +140,38 @@ export function SiteViewport(props: Props) {
               </div>
             )}
           </div>
+          </div>
+        )}
+        {bar && (
+          <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
+            <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
+            <div data-testid="scale-bar" style={{ width: bar.px }} className="h-1.5 border-x-2 border-b-2 border-slate-200" />
+          </div>
+        )}
+        <button
+          onClick={() => view?.resetNorth()}
+          className="w-10 h-12 rounded-lg bg-zinc-900/85 border border-white/10 flex flex-col items-center justify-center text-slate-200 shadow hover:bg-zinc-800"
+          title={info && Math.abs(((info.heading + 540) % 360) - 180) < 0.5 ? "North is up" : "Turn north up (N)"}
+          aria-label={props.doc.geo ? "North arrow" : "Compass"}
+        >
+          <span className="flex flex-col items-center" style={{ transform: `rotate(${-(info?.heading ?? 0)}deg)` }}>
+            <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true"><path d="M7 0 L13 15 L7 11 L1 15 Z" fill="#ef4444" /></svg>
+            <span className="text-[10px] font-bold leading-none mt-0.5">N</span>
+          </span>
+        </button>
+        <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
+          <button className={ctl} title="Zoom in (+)" aria-label="Zoom in" onClick={() => view?.zoomBy(1.4)}><ZoomIn className="w-4 h-4" /></button>
+          <button className={ctl} title="Zoom out (-)" aria-label="Zoom out" onClick={() => view?.zoomBy(1 / 1.4)}><ZoomOut className="w-4 h-4" /></button>
+          <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={() => view?.fitSite()}><Maximize2 className="w-4 h-4" /></button>
         </div>
-      )}
+        <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
+          <button className={`${ctl} ${tilted ? "text-indigo-300" : ""}`} title={tilted ? "Look straight down (T)" : "Tilt into 3D (T)"} aria-label={tilted ? "Look straight down" : "Tilt into 3D"} onClick={() => view?.toggleTilt()}><Box className="w-4 h-4" /></button>
+          <button className={ctl} title="Turn the view left" aria-label="Rotate view left" onClick={() => view?.rotateBy(-22.5)}><RotateCcw className="w-4 h-4" /></button>
+          <button className={ctl} title="Turn the view right" aria-label="Rotate view right" onClick={() => view?.rotateBy(22.5)}><RotateCw className="w-4 h-4" /></button>
+        </div>
+      </div>
       {props.doc.blindSpots && props.doc.blindSpots.runs.length > 0 && (
-        <div data-testid="blind-spots" className="absolute bottom-20 right-3 z-20 rounded-full bg-red-600/90 px-3 py-1 text-[11px] font-semibold text-white shadow">
+        <div data-testid="blind-spots" style={{ right: 12 + inset }} className="absolute bottom-20 z-20 rounded-full bg-red-600/90 px-3 py-1 text-[11px] font-semibold text-white shadow">
           Red = not seen by any camera
         </div>
       )}

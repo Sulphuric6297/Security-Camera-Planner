@@ -140,6 +140,7 @@ export function AppHeader(props: Props) {
                   onClick={() => props.onStep(step.id)}
                   title={step.hint}
                   aria-current={current ? "step" : undefined}
+                  data-done={done ? "true" : "false"}
                   className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${current
                     ? "bg-emerald-600 text-white shadow"
                     : done

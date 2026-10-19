@@ -1301,13 +1301,16 @@ export default function SecurityPlanner() {
   useEffect(() => {
     try { localStorage.setItem("scp.cameraViewWidth", String(previewWidth)); } catch { /* ignore */ }
   }, [previewWidth]);
-  const [reviewVisited, setReviewVisited] = useState(false);
+  // Steps the user finished (with "Next", or by downloading the report), remembered per browser.
+  const [completedSteps, setCompletedSteps] = useState<WorkflowStepId[]>(() => {
+    try { return JSON.parse(localStorage.getItem("scp.completedSteps") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.completedSteps", JSON.stringify(completedSteps)); } catch { /* ignore */ }
+  }, [completedSteps]);
   // Which workflow step's panel is showing (null = follow progress: the first unfinished step).
   const [activeStepChoice, setActiveStepChoice] = useState<WorkflowStepId | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  useEffect(() => {
-    if (viewMode !== "plan") setReviewVisited(true);
-  }, [viewMode]);
   // View preference: DORI coverage bands in the 2D cones (remembered per browser).
   const [showDoriZones, setShowDoriZones] = useState(() => {
     try { return localStorage.getItem("scp.showDori") !== "0"; } catch { return true; }
@@ -1820,6 +1823,7 @@ export default function SecurityPlanner() {
     setSceneBackgroundImg(null);
     setBackgroundMode('flat');
     setNvrLayout([]);
+    setCompletedSteps([]);
     setMaximizedCamId(null);
     setViewMode("plan");
     setMode("select");
@@ -2575,6 +2579,7 @@ export default function SecurityPlanner() {
   };
 
   const handleExportReportPdf = async () => {
+    completeStep("report");
     // Open the window synchronously (inside the click) so popup blockers allow it.
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
@@ -3708,12 +3713,16 @@ export default function SecurityPlanner() {
   })();
 
   // Guided workflow (header steps): what's done, and where each step takes you.
+  // A step is ticked when it is really finished: the site is imported, the user moved on with
+  // "Next", every protected spot is covered, or the report was downloaded. Adding one thing
+  // doesn't finish a step.
+  const allSpotsCovered = targetItems.length > 0 && targetItems.every(t => targetResults.get(t.id)?.met);
   const workflowStepsDone: Record<WorkflowStepId, boolean> = {
-    site: !!backgroundImg || !!siteLocation,
-    buildings: items.some(i => i.type === "building"),
-    cameras: items.some(i => i.type === "camera"),
-    review: reviewVisited,
-    report: exportList.length > 0
+    site: !!backgroundImg || !!siteLocation || completedSteps.includes("site"),
+    buildings: completedSteps.includes("buildings"),
+    cameras: completedSteps.includes("cameras") || allSpotsCovered,
+    review: completedSteps.includes("review"),
+    report: completedSteps.includes("report")
   };
   const WORKFLOW_ORDER: WorkflowStepId[] = ["site", "buildings", "cameras", "review", "report"];
   const activeStep: WorkflowStepId = activeStepChoice ?? WORKFLOW_ORDER.find(id => !workflowStepsDone[id]) ?? "report";
@@ -3732,11 +3741,9 @@ export default function SecurityPlanner() {
       case "cameras":
         if (viewMode === "nvr") setViewMode("plan");
         break;
-      case "review":
-        setReviewVisited(true);
-        break;
     }
   };
+  const completeStep = (step: WorkflowStepId) => setCompletedSteps(prev => (prev.includes(step) ? prev : [...prev, step]));
 
   // Changes whenever anything visible in a camera view changes (used to refresh Monitor Wall tiles).
   const nvrSceneKey = useMemo(
@@ -4439,6 +4446,7 @@ export default function SecurityPlanner() {
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
                 onSelect={id => { setSelectedId(id); setMode("select"); }}
                 onStep={handleWorkflowStep}
+                onNext={(from, to) => { completeStep(from); handleWorkflowStep(to); }}
                 onImportSite={openElevationDialog}
                 onUploadBaseMap={() => fileInputRef.current?.click()}
                 onTool={tool => { if (viewMode === "nvr") setViewMode("plan"); setMode(tool); }}
@@ -5026,6 +5034,7 @@ export default function SecurityPlanner() {
               } : null}
               snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList, keep: handleCaptureSnapshot, background: () => bg3dInputRef.current?.click() }}
               onReady={v => { viewRef.current = v; }}
+              rightInset={inspectorVisible ? 320 : 0}
             />
                 {demAlignMode && demPreview && (
                   <div className="absolute top-4 left-4 z-40 w-80 rounded-xl border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
@@ -5161,7 +5170,7 @@ export default function SecurityPlanner() {
             )}
 
             {viewMode !== "nvr" && toolHint && (
-              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+              <div className="absolute bottom-[5.25rem] left-1/2 -translate-x-1/2 z-30 pointer-events-none">
                 <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
                   {toolHint}
                 </div>

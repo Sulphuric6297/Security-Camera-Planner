@@ -40,6 +40,8 @@ type Props = {
   onToggleCones: (show: boolean) => void;
   onSelect: (id: string) => void;
   onStep: (step: WorkflowStepId) => void;
+  /** "Next": finishes this step and opens the next one. */
+  onNext: (from: WorkflowStepId, to: WorkflowStepId) => void;
   onImportSite: () => void;
   onUploadBaseMap: () => void;
   onTool: (tool: "add-building" | "trace-building" | "add-tree" | "add-parking" | "add-camera") => void;
@@ -305,7 +307,7 @@ export function StepPanel(props: Props) {
 
       {info.next && (
         <button
-          onClick={() => props.onStep(info.next!)}
+          onClick={() => props.onNext(props.step, info.next!)}
           className="mt-1 w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold"
         >
           Next: {STEP_INFO[info.next].title} <ArrowRight className="w-4 h-4" />
