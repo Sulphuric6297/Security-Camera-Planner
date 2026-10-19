@@ -218,8 +218,10 @@ preview:
   bar), labelled controls, menus close on Esc or a click elsewhere (Esc never also drops the
   selection), quiet handles that brighten on hover, nothing overlapping the map's corner controls.
 - Driveways, walkways and patios (W): paving draped on the ground (asphalt, concrete, gravel,
-  pavers), reshaped by its corners like a house; a drawn driveway becomes the driveway spot to
-  protect.
+  pavers); a drawn driveway becomes the driveway spot to protect. Driveways and walkways are
+  bendable paths: a line down the middle, made smooth, with an even width and square ends; pull a
+  dot on it to bend it, drag the square on its side for the width. Patios (or any paving switched
+  to "Free shape") are reshaped by their corners like a house.
 
 ### Real vehicles (done)
 

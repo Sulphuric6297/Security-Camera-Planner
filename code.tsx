@@ -65,6 +65,7 @@ import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
 import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, scaledVehicle, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { pathFromShape, pavingFromPath } from "./src/lib/pavingPath";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, SITE_MAX_WIDTH_FT, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
@@ -4371,7 +4372,9 @@ export default function SecurityPlanner() {
         if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
         if (selectedCamera) return "Drag the camera to move it · blue dot aims it · side dots widen · tip sets range · bar above sets height";
         if (selectedItem?.type === "building") return "Drag to move · corners reshape · pull an edge's middle dot to add a corner · bar on top sets height · ↻ rotates";
-        if (selectedItem?.type === "paving") return "Drag to move · corners reshape · pull an edge's middle dot to add a bend · ↻ rotates";
+        if (selectedItem?.type === "paving") return (selectedItem as PavingItem).path
+          ? "Drag to move · pull a dot along its middle to bend it · side square sets the width · ↻ rotates"
+          : "Drag to move · corners reshape · pull an edge's middle dot to add a corner · ↻ rotates";
         if (selectedItem) return "Drag to move it · Delete removes it";
         return "Drag to pan · scroll or pinch to zoom · right-drag or Shift+drag to rotate and tilt";
     }
@@ -6337,7 +6340,64 @@ export default function SecurityPlanner() {
                         ))}
                       </div>
                     </div>
-                    <p className="text-xs text-slate-400">Drag its corners on the map to match the photo. Pull the dot in the middle of an edge to add a bend; double-click a corner to remove it.</p>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Shape</label>
+                      <div className="grid grid-cols-2 gap-1" role="group" aria-label="Paving shape">
+                        <button
+                          aria-pressed={!!pv.path}
+                          title="A strip of even width along a line you can bend (driveways, walkways)"
+                          onClick={() => {
+                            if (pv.path) return;
+                            const { path, width } = pathFromShape(buildingLocalPoints(pv as unknown as BuildingItem));
+                            updateItem(pv.id, pavingFromPath(path, width) as Partial<PavingItem>);
+                            setTimeout(() => saveHistory(), 50);
+                          }}
+                          className={choice(!!pv.path)}
+                        >
+                          Bendable path
+                        </button>
+                        <button
+                          aria-pressed={!pv.path}
+                          title="Any shape, reshaped by its corners (patios, odd-shaped areas)"
+                          onClick={() => {
+                            if (!pv.path) return;
+                            // Keep the outline as it is, now with corners to drag
+                            const pts = buildingLocalPoints(pv as unknown as BuildingItem);
+                            const step = Math.max(1, Math.round(pts.length / 24));
+                            updateItem(pv.id, { path: undefined, pathWidth: undefined, points: pts.filter((_, i) => i % step === 0) } as Partial<PavingItem>);
+                            setTimeout(() => saveHistory(), 50);
+                          }}
+                          className={choice(!pv.path)}
+                        >
+                          Free shape
+                        </button>
+                      </div>
+                    </div>
+                    {pv.path && (() => {
+                      const upf = planGeoRef?.unitsPerFoot ?? 1;
+                      const widthFt = Math.round(((pv.pathWidth ?? 12 * upf) / upf) * 10) / 10;
+                      return (
+                        <div className="space-y-2">
+                          <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between"><span>Width</span><span>{widthFt} ft</span></label>
+                          <input
+                            type="number"
+                            aria-label="Paving width (ft)"
+                            min="2"
+                            max="60"
+                            step="0.5"
+                            value={widthFt}
+                            onChange={e => { const w = parseFloat(e.target.value); if (w >= 2 && w <= 60) updateItem(pv.id, pavingFromPath(pv.path!, w * upf) as Partial<PavingItem>); }}
+                            onBlur={() => setTimeout(() => saveHistory(), 50)}
+                            className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                          />
+                        </div>
+                      );
+                    })()}
+                    <p className="text-xs text-slate-400">
+                      {pv.path
+                        ? "Pull a dot along its middle to bend it; drag the square on its side for the width. Double-click a dot to remove it."
+                        : "Drag its corners on the map to match the photo. Pull the dot in the middle of an edge to add a corner; double-click a corner to remove it."}
+                    </p>
                   </div>
                 );
               })()}

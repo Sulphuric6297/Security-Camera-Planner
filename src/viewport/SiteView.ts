@@ -26,6 +26,7 @@ import {
 } from "../lib/planGeom";
 import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
 import { isOwnBuilding, scaledVehicle } from "../lib/items";
+import { pathPointAt, pavingFromPath } from "../lib/pavingPath";
 import { isDoor, openingPlace, snapToWall, wallPieces } from "../lib/openings";
 import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature, resolveVehicleType } from "../three/models";
@@ -88,6 +89,7 @@ const STYLE = `
 .scp-h[data-handle=height]::before,.scp-h[data-handle=cam-height]::before{content:"";width:12px;height:26px;border-radius:6px;background:#fff;border:2.5px solid #2563eb;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=rotate]{width:24px;height:24px;border-radius:50%;background:#fff;border:2.5px solid #2563eb;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;color:#2563eb;font:900 14px system-ui}
 .scp-h[data-handle=aim]{width:20px;height:20px;border-radius:50%;background:#3b82f6;border:3px solid #fff;cursor:crosshair;box-shadow:0 1px 4px rgba(0,0,0,.55)}
+.scp-h[data-handle=width]{width:13px;height:13px;border-radius:3px;background:#fff;border:2.5px solid #059669;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=fov-l],.scp-h[data-handle=fov-r],.scp-h[data-handle=range],.scp-h[data-handle=radius]{width:15px;height:15px;border-radius:50%;background:var(--c,#3b82f6);border:2.5px solid #fff;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=range]{cursor:ns-resize}
 .scp-h[data-handle=opening-size]{width:11px;height:11px;border-radius:2px;background:#fff;border:2px solid #0ea5e9;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
@@ -1620,7 +1622,7 @@ export class SiteView {
     // but its windows, doors, porches, roof ends and a camera's aim stay editable
     const sel = picked;
     const locked = !!sel?.locked;
-    const key = sel ? `${sel.id}|${sel.type}|${locked}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).map(p => `${p.kind}${p.floor > 0}${p.railing}${p.entries?.length ?? -1}`).join(",")}|${(sel as BuildingItem).openings?.length ?? -1}|${this.tool.opening ?? -1}` : sel.type === "paving" ? buildingLocalPoints(sel as unknown as BuildingItem).length : ""}` : "";
+    const key = sel ? `${sel.id}|${sel.type}|${locked}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).map(p => `${p.kind}${p.floor > 0}${p.railing}${p.entries?.length ?? -1}`).join(",")}|${(sel as BuildingItem).openings?.length ?? -1}|${this.tool.opening ?? -1}` : sel.type === "paving" ? ((sel as PavingItem).path ? `path${(sel as PavingItem).path!.length}` : buildingLocalPoints(sel as unknown as BuildingItem).length) : ""}` : "";
     if (key === this.handleKey) return;
     this.handleKey = key;
     this.handles.forEach(h => h.el.remove());
@@ -1640,7 +1642,10 @@ export class SiteView {
       this.handles.push({ el, kind, index: opts.index, world, start, visible: opts.visible });
     };
     const id = sel.id;
-    if (sel.type === "paving" && !locked) this.buildingHandles(id, add);
+    if (sel.type === "paving" && !locked) {
+      if ((sel as PavingItem).path) this.pathHandles(id, add);
+      else this.buildingHandles(id, add);
+    }
     if (sel.type === "building") {
       this.buildingHandles(id, add, locked);
       this.openPartHandles(id, add);
@@ -1658,6 +1663,106 @@ export class SiteView {
     }
     else if (sel.type === "parking" && !locked) this.vehicleHandles(id, add);
     if (!locked && (sel.type === "building" || sel.type === "parking" || sel.type === "image" || sel.type === "paving")) this.rotateHandle(id, add);
+  }
+
+  /**
+   * A bendable driveway or walkway: a dot on each point of the line along its middle (drag it to
+   * move that point, double-click to remove it), a dot halfway between two to bend it there, and one
+   * on its side for its width.
+   */
+  private pathHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+    const paving = () => this.item(id) as PavingItem | null;
+    const toWorld = (pv: PavingItem, q: P) => { const r = rotatePoint(q, pv.rotation); return { x: pv.x + r.x, y: pv.y + r.y }; };
+    const at = (p: P) => new THREE.Vector3(p.x, this.h(p.x, p.y), p.y);
+    const widthOf = (pv: PavingItem) => pv.pathWidth ?? 12 * this.upf();
+    const pointDrag = (index: number, start: P[]): Drag | null => {
+      const pv0 = paving();
+      if (!pv0) return null;
+      const pose = { x: pv0.x, y: pv0.y, rotation: pv0.rotation };
+      const y = this.h(pv0.x, pv0.y);
+      const path = start.map(p => ({ ...p }));
+      const width = widthOf(pv0);
+      return {
+        move: ev => {
+          const hit = this.planeAt(ev.clientX, ev.clientY, y);
+          if (!hit) return;
+          path[index] = toBuildingLocal(pose, { x: hit.x, y: hit.z });
+          this.cb.onChange(id, pavingFromPath(path, width) as Partial<CanvasItem>);
+        },
+        end: () => this.cb.onCommit()
+      };
+    };
+    const n = paving()?.path?.length ?? 0;
+    for (let i = 0; i < n; i++) {
+      add("corner", () => {
+        const pv = paving();
+        const q = pv?.path?.[i];
+        return pv && q ? at(toWorld(pv, q)) : null;
+      }, e => {
+        const pv = paving();
+        if (!pv?.path) return null;
+        const now = performance.now();
+        const last = this.lastCorner;
+        this.lastCorner = { id, index: i, time: now };
+        if (e.altKey || (last && last.id === id && last.index === i && now - last.time < 400)) {
+          // Double-click (or Alt+click) a point removes it
+          this.lastCorner = null;
+          if (pv.path.length > 2) {
+            this.cb.onChange(id, pavingFromPath(pv.path.filter((_, k) => k !== i), widthOf(pv)) as Partial<CanvasItem>);
+            this.cb.onCommit();
+          }
+          return null;
+        }
+        return pointDrag(i, pv.path);
+      }, { index: i, title: "Drag to move this point · double-click to remove it" });
+      if (i + 1 >= n) continue;
+      add("mid", () => {
+        const pv = paving();
+        if (!pv?.path || pv.path.length <= i + 1) return null;
+        return at(toWorld(pv, pathPointAt(pv.path, i, 0.5)));
+      }, () => {
+        // Pulling it adds a point there (on the curve, so nothing jumps) and bends the path
+        const pv = paving();
+        if (!pv?.path) return null;
+        const next = [...pv.path.slice(0, i + 1), pathPointAt(pv.path, i, 0.5), ...pv.path.slice(i + 1)];
+        this.cb.onChange(id, pavingFromPath(next, widthOf(pv)) as Partial<CanvasItem>);
+        return pointDrag(i + 1, next);
+      }, {
+        index: i,
+        title: "Drag to bend it here",
+        visible: () => {
+          const pv = paving();
+          if (!pv?.path || pv.path.length <= i + 1) return false;
+          const a = this.project(at(toWorld(pv, pv.path[i]))), b = this.project(at(toWorld(pv, pv.path[i + 1])));
+          return !!a && !!b && Math.hypot(a.x - b.x, a.y - b.y) > 40;
+        }
+      });
+    }
+    // Its width: a dot on the side at its first point
+    const side = (pv: PavingItem) => {
+      const path = pv.path!;
+      const a = path[0], b = pathPointAt(path, 0, 0.05);
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      return { a, n: { x: -(b.y - a.y) / len, y: (b.x - a.x) / len } };
+    };
+    add("width", () => {
+      const pv = paving();
+      if (!pv?.path || pv.path.length < 2) return null;
+      const { a, n: nn } = side(pv);
+      const w = widthOf(pv) / 2;
+      return at(toWorld(pv, { x: a.x + nn.x * w, y: a.y + nn.y * w }));
+    }, e => {
+      const pv0 = paving();
+      if (!pv0?.path) return null;
+      const pose = { x: pv0.x, y: pv0.y, rotation: pv0.rotation };
+      const path = pv0.path.map(p => ({ ...p }));
+      const { a, n: nn } = side(pv0);
+      return this.planeDrag(e, id, p => {
+        const q = toBuildingLocal(pose, p);
+        const w = clamp(2 * Math.abs((q.x - a.x) * nn.x + (q.y - a.y) * nn.y), 2 * this.upf(), 60 * this.upf());
+        return pavingFromPath(path, Math.round(w / (0.5 * this.upf())) * 0.5 * this.upf()) as Partial<CanvasItem>;
+      });
+    }, { title: "Drag to make it wider or narrower" });
   }
 
   /** A vehicle's corners: drag one to make the whole vehicle bigger or smaller (it keeps its proportions). */

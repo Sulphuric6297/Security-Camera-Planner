@@ -229,10 +229,15 @@ export interface PavingItem extends BaseItem {
   kind: PavingKind;
   surface: PavingSurface;
   label: string;
-  /** Size of its starting rectangle; its shape is `points` (corners in its own frame, plan units). */
+  /** Size of the box around it; its shape is `points` (corners in its own frame, plan units). */
   width: number;
   height: number;
   points?: { x: number; y: number }[];
+  /** A bendable driveway or walkway: the line along its middle (own frame, plan units) and its
+   * width; `points` is then the smooth outline made from them (lib/pavingPath). Without it, a
+   * free shape reshaped by its corners. */
+  path?: { x: number; y: number }[];
+  pathWidth?: number;
 }
 
 /** A spot the user wants covered (a door, gate, driveway...) and how much detail they need there. */

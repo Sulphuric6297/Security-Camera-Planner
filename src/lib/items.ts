@@ -12,6 +12,7 @@ import {
 import { rectanglePoints } from "./geometry";
 import { vFovFromH } from "./camera";
 import type { CanvasItem, ParkingItem, PavingKind, PavingSurface, TargetItem, TargetKind } from "../types";
+import { pavingFromPath } from "./pavingPath";
 
 export type VehicleType = NonNullable<ParkingItem["vehicleType"]>;
 
@@ -181,8 +182,10 @@ export const createItem = (
     case "paving": {
       const kind = opts.pavingKind ?? "driveway";
       const k = PAVING_KINDS[kind];
-      // Lengthwise along the plan's y, like a driveway running from the street to the house
+      // Lengthwise along the plan's y, like a driveway running from the street to the house.
+      // Driveways and walkways bend (a path down their middle); a patio is a free shape.
       const w = k.width * u, d = k.length * u;
+      if (kind !== "patio") return { ...common, type: "paving", kind, surface: k.surface, label: k.label, ...pavingFromPath([{ x: 0, y: -d / 2 }, { x: 0, y: d / 2 }], w) } as CanvasItem;
       return { ...common, type: "paving", kind, surface: k.surface, label: k.label, width: w, height: d, points: rectanglePoints(w, d) } as CanvasItem;
     }
   }
