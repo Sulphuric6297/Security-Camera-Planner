@@ -66,6 +66,7 @@ import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/li
 import { shiftGeoPoints } from "./src/lib/geo/align";
 import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, scaledVehicle, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { pathFromShape, pavingFromPath } from "./src/lib/pavingPath";
+import { GROUND_MATERIALS, paintStroke } from "./src/lib/groundPaint";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, SITE_MAX_WIDTH_FT, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
@@ -98,6 +99,7 @@ export default function SecurityPlanner() {
 
   // Terrain State (Moved up for scope access)
   const [terrainHeights, setTerrainHeights] = useProjectField("terrainHeights");
+  const [groundPaint, setGroundPaint] = useProjectField("groundPaint");
   const [isTerrainMode, setIsTerrainMode] = useState(false);
   const [terrainTool, setTerrainTool] = useState<TerrainTool>("sculpt");
   // Woods brush: which trees it plants.
@@ -280,6 +282,7 @@ export default function SecurityPlanner() {
   // State Refs for History (Ensures we save latest state in async callbacks)
   const currentItemsRef = projectRef("items");
   const terrainHeightsRef = projectRef("terrainHeights");
+  const groundPaintRef = projectRef("groundPaint");
   const buildingLabelDefaultsRef = projectRef("buildingLabelDefaults");
   const backgroundImgRef = projectRef("backgroundImg");
   const bgSettingsRef = projectRef("bgSettings");
@@ -327,6 +330,7 @@ export default function SecurityPlanner() {
     const state: HistoryState = {
       items: structuredClone(itemsOverride || currentItemsRef.current),
       terrainHeights: terrainHeightsOverride || terrainHeightsRef.current,
+      groundPaint: groundPaintRef.current,
       buildingLabelDefaults: buildingLabelDefaultsRef.current,
       backgroundImg: backgroundImgRef.current,
       bgSettings: bgSettingsRef.current,
@@ -381,6 +385,7 @@ export default function SecurityPlanner() {
     if (!state || typeof state !== "object") return;
     if (Array.isArray(state.items)) setItems(state.items);
     if (state.terrainHeights && typeof state.terrainHeights === "object") setTerrainHeights(state.terrainHeights);
+    setGroundPaint(state.groundPaint && typeof state.groundPaint === "object" ? state.groundPaint : {});
     if (state.buildingLabelDefaults) {
       setBuildingLabelDefaults({ ...DEFAULT_BUILDING_LABEL, ...state.buildingLabelDefaults });
     } else {
@@ -1355,6 +1360,14 @@ export default function SecurityPlanner() {
   const demDataRef = projectRef("demData");
   const demPreviewRef = useRef(demPreview);
   useEffect(() => { terrainToolRef.current = terrainTool; }, [terrainTool]);
+  // Painting the ground: which material (1-based, lib/groundPaint) and how wide the brush is (ft)
+  const [paintMaterial, setPaintMaterial] = useState(1);
+  const paintMaterialRef = useRef(paintMaterial);
+  useEffect(() => { paintMaterialRef.current = paintMaterial; }, [paintMaterial]);
+  const [paintBrushFt, setPaintBrushFt] = useState(4);
+  const paintBrushFtRef = useRef(paintBrushFt);
+  const paintLastRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => { paintBrushFtRef.current = paintBrushFt; }, [paintBrushFt]);
   useEffect(() => { terrainBrushSizeRef.current = terrainBrushSize; }, [terrainBrushSize]);
   useEffect(() => { terrainBrushStrengthRef.current = terrainBrushStrength; }, [terrainBrushStrength]);
   useEffect(() => { terrainBrushFalloffRef.current = terrainBrushFalloff; }, [terrainBrushFalloff]);
@@ -1528,7 +1541,7 @@ export default function SecurityPlanner() {
 
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, planId, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, snapToGrid, siteLocation, siteBounds, planGeoRef, elevationOverlay, buildingLabelDefaults, demData, demScale, demOffset, demTransform]);
+  }, [items, planId, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, groundPaint, gridSize, showGrid, snapToGrid, siteLocation, siteBounds, planGeoRef, elevationOverlay, buildingLabelDefaults, demData, demScale, demOffset, demTransform]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -2550,6 +2563,7 @@ export default function SecurityPlanner() {
     setSelectedId(null);
     setMode("select");
     setTerrainHeights(projectData.terrainHeights && typeof projectData.terrainHeights === "object" ? projectData.terrainHeights : {});
+    setGroundPaint(projectData.groundPaint && typeof projectData.groundPaint === "object" ? projectData.groundPaint : {});
     setBackgroundImg(projectData.backgroundImg || null);
     setDemData(null);
     setDemPreview(null);
@@ -2596,6 +2610,7 @@ export default function SecurityPlanner() {
       : hasTerrain
         ? { terrainExternal: true, terrainCount: Object.keys(terrainHeights).length }
         : {}),
+    ...(Object.keys(groundPaint).length ? { groundPaint } : {}),
     backgroundImg,
     bgSettings,
     canvasSize,
@@ -3704,10 +3719,11 @@ export default function SecurityPlanner() {
     blindSpots: blindSpots ? { runs: blindSpots.runs, area: blindSpots.area } : null,
     roofPhoto,
     groundDetail,
+    groundPaint,
     geo: !!planGeoRef,
     sun: sunNow
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto, groundDetail, sunNow]);
+  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto, groundDetail, groundPaint, sunNow]);
 
   // A sample of what a click would place, for the preview under the cursor.
   const placePreview = useMemo(() => {
@@ -3759,7 +3775,7 @@ export default function SecurityPlanner() {
     mode,
     terrain: isTerrainMode,
     terrainTool,
-    brushRadius: Math.max(gridSize, clamp(terrainBrushSize, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * gridSize),
+    brushRadius: terrainTool === "paint" ? paintBrushFt * (planGeoRef?.unitsPerFoot ?? 1) : Math.max(gridSize, clamp(terrainBrushSize, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * gridSize),
     aimingCameraId,
     vertexInsert: vertexInsertMode,
     mapMove: mapMoveMode && !!backgroundImg,
@@ -4304,6 +4320,20 @@ export default function SecurityPlanner() {
     },
     onTerrainBrush: (p, dt, lower, phase) => {
       const tool = terrainToolRef.current;
+      if (tool === "paint") {
+        // Saved at once, so an Undo straight after the stroke takes the whole stroke back.
+        if (phase === "end") {
+          paintLastRef.current = null;
+          saveHistory();
+          return;
+        }
+        // Painted along the way from where the brush was, so a quick stroke is one solid band
+        const upf = planGeoRef?.unitsPerFoot ?? 1;
+        const from = phase === "start" ? p : paintLastRef.current ?? p;
+        groundPaintRef.current = paintStroke(groundPaintRef.current, from, p, paintBrushFtRef.current * upf, lower ? 0 : paintMaterialRef.current, upf);
+        paintLastRef.current = p;
+        return;
+      }
       if (tool === "woods") {
         // Saved at once, so an Undo straight after the stroke takes the whole stroke back.
         if (phase === "end") saveHistory();
@@ -4355,6 +4385,7 @@ export default function SecurityPlanner() {
     if (mode === "add-opening") return `Click a wall to put a ${OPENING_DEFAULTS[openingKind].label.toLowerCase()} there · Esc to stop`;
     if (mode === "add-open-part") return `Click just outside a wall to attach a ${OPEN_PART_DEFAULTS[openPartKind].label.toLowerCase()} to it, just inside to set one into the house, or drag its shape · Esc to cancel`;
     if (isTerrainMode && terrainTool === "woods") return "Woods: click and hold (or drag) to plant trees · Shift to clear them · Strength sets how dense";
+    if (isTerrainMode && terrainTool === "paint") return "Paint ground: drag over the map to paint it · Shift to take the paint off";
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
     if (vertexInsertMode) return "Click on an edge to add a corner";
     switch (mode) {
@@ -5414,6 +5445,60 @@ export default function SecurityPlanner() {
                           Woods
                         </button>
                       </div>
+                      <button
+                        onClick={() => setTerrainTool("paint")}
+                        aria-pressed={terrainTool === "paint"}
+                        className={`w-full py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "paint"
+                          ? "bg-lime-500/20 border-lime-400/40 text-lime-200"
+                          : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                          }`}
+                        title="Paint grass, dirt, gravel, mulch, concrete or asphalt on the ground (Shift: takes it off)"
+                      >
+                        Paint ground
+                      </button>
+                      {terrainTool === "paint" && (
+                        <div className="pt-1 space-y-2">
+                          <div className="grid grid-cols-3 gap-1" role="group" aria-label="Ground material">
+                            {GROUND_MATERIALS.map((m, i) => (
+                              <button
+                                key={m.id}
+                                onClick={() => setPaintMaterial(i + 1)}
+                                aria-pressed={paintMaterial === i + 1}
+                                className={`flex items-center gap-1.5 px-1.5 py-1 rounded text-[10px] font-semibold border ${paintMaterial === i + 1 ? "bg-lime-500/20 border-lime-400/40 text-lime-100" : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"}`}
+                              >
+                                <span className="w-3 h-3 rounded-sm shrink-0 border border-black/30" style={{ background: m.color }} />
+                                {m.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
+                              <span>Brush size</span>
+                              <span className="text-emerald-400">{paintBrushFt} ft</span>
+                            </div>
+                            <input
+                              type="range"
+                              aria-label="Paint brush size"
+                              min={1}
+                              max={25}
+                              step={1}
+                              value={paintBrushFt}
+                              className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-lime-500"
+                              onChange={e => setPaintBrushFt(parseInt(e.target.value))}
+                              onPointerDown={e => e.stopPropagation()}
+                            />
+                          </div>
+                          <p className="text-[10px] text-slate-500">Drag over the map to paint; Shift takes the paint off (back to the photo).</p>
+                          {Object.keys(groundPaint).length > 0 && (
+                            <button
+                              onClick={() => { setGroundPaint({}); setTimeout(() => saveHistory(), 50); }}
+                              className="w-full py-1 rounded text-[10px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                            >
+                              Clear all painted ground
+                            </button>
+                          )}
+                        </div>
+                      )}
                       {terrainTool === "woods" && (
                         <div className="pt-1 space-y-1">
                           <div className="grid grid-cols-3 gap-1" role="group" aria-label="Kind of woods">
@@ -5433,6 +5518,7 @@ export default function SecurityPlanner() {
                       )}
                     </div>
 
+                    {terrainTool !== "paint" && (<>
                     <div className="space-y-1">
                       <div className="flex justify-between text-[10px] uppercase font-bold text-slate-400">
                         <span>Brush Size</span>
@@ -5483,6 +5569,7 @@ export default function SecurityPlanner() {
                         onPointerDown={(e) => e.stopPropagation()}
                       />
                     </div>
+                    </>)}
 
                     {terrainTool === "flatten" && (
                       <div className="space-y-2 pt-2 border-t border-white/5">

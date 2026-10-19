@@ -26,6 +26,8 @@ export type ViewDoc = {
   roofPhoto: boolean;
   /** Real-scale grass, paving and soil texture over the aerial photo, where the photo shows them. */
   groundDetail: boolean;
+  /** Painted ground: a material (1-based, lib/groundPaint) per painted square foot, keyed "i,j". */
+  groundPaint: Record<string, number>;
   /** North arrow shown when the plan is georeferenced. */
   geo: boolean;
   /** Where the sun is for the chosen date and time at the site (degrees: azimuth clockwise from

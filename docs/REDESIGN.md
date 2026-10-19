@@ -242,7 +242,11 @@ preview:
 - Real-scale texture of each (grass blades and tufts, concrete grain and hairline cracks, asphalt
   stones, pebbles) is laid over the photo. Only light and dark detail is added, so the photo's
   real colors stay; far away the texture fades out by itself and the photo looks as it is.
-- A "Ground texture" switch beside the sun button (on by default, remembered).
+- A "Ground texture" switch beside the sun button (on by default, remembered). The texture is
+  only drawn when the view is close enough to show it (less work for slow devices).
+- Paint ground (Terrain panel): grass, dirt, gravel, mulch, concrete or asphalt brushed onto the
+  map, over the photo or on a plan without one; Shift takes it off. Saved with the plan (one
+  material per square foot), one Undo step per stroke, ragged natural edges up close.
 - Possible next step: OpenStreetMap roads, sidewalks and parking areas (with their surface tags)
   as extra hints where the photo is unclear.
 

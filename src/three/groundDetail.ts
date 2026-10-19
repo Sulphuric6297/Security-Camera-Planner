@@ -233,9 +233,29 @@ export type GroundDetailUniforms = {
   detailMap: { value: THREE.Texture | null };
   groundDetail: { value: number };
   groundFeet: { value: number };
+  /** Painted ground (see lib/groundPaint): its color (premultiplied, alpha = painted) and which
+   * texture pattern it takes, over `paintRect` (x, y, width, height in plan units). */
+  paintColorMap: { value: THREE.Texture | null };
+  paintCoverMap: { value: THREE.Texture | null };
+  paintRect: { value: THREE.Vector4 };
+  paintOn: { value: number };
 };
 
-/** Adds the ground texture to the photo's material (a map material: Lambert or Standard). */
+export const groundDetailUniforms = (): GroundDetailUniforms => ({
+  coverMap: { value: null },
+  detailMap: { value: null },
+  groundDetail: { value: 0 },
+  groundFeet: { value: 1 },
+  paintColorMap: { value: null },
+  paintCoverMap: { value: null },
+  paintRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+  paintOn: { value: 0 }
+});
+
+/**
+ * Adds painted ground and the ground texture to a ground material: the photo's (a map material,
+ * where the cover mask lines up with the photo) or the bare terrain's (painted ground only).
+ */
 export const addGroundDetail = (m: THREE.Material, u: GroundDetailUniforms) => {
   m.onBeforeCompile = shader => {
     Object.assign(shader.uniforms, u);
@@ -243,22 +263,47 @@ export const addGroundDetail = (m: THREE.Material, u: GroundDetailUniforms) => {
       .replace("#include <common>", "#include <common>\nvarying vec2 vGroundXZ;")
       .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGroundXZ = (modelMatrix * vec4(transformed, 1.0)).xz;");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec2 vGroundXZ;\nuniform sampler2D coverMap;\nuniform sampler2D detailMap;\nuniform float groundDetail;\nuniform float groundFeet;")
-      .replace("#include <map_fragment>", `#include <map_fragment>
-        #ifdef USE_MAP
-        if ( groundDetail > 0.0 ) {
-          vec4 cover = texture2D( coverMap, vMapUv );
-          if ( cover.r + cover.g + cover.b + cover.a > 0.004 ) {
-            vec2 f = vGroundXZ * groundFeet;
+      .replace("#include <common>", "#include <common>\nvarying vec2 vGroundXZ;\nuniform sampler2D coverMap;\nuniform sampler2D detailMap;\nuniform float groundDetail;\nuniform float groundFeet;\nuniform sampler2D paintColorMap;\nuniform sampler2D paintCoverMap;\nuniform vec4 paintRect;\nuniform float paintOn;")
+      .replace("#include <color_fragment>", `#include <color_fragment>
+        {
+          vec4 cover = vec4( 0.0 );
+          vec2 f = vGroundXZ * groundFeet;
+          #ifdef USE_MAP
+          if ( groundDetail > 0.0 ) cover = texture2D( coverMap, vMapUv );
+          #endif
+          if ( paintOn > 0.0 ) {
+            vec2 puv = ( vGroundXZ - paintRect.xy ) / paintRect.zw;
+            if ( puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0 ) {
+              vec4 pc = texture2D( paintColorMap, puv );
+              if ( pc.a > 0.003 ) {
+                vec4 pcov = texture2D( paintCoverMap, puv ) / pc.a;
+                float a = pc.a;
+                // Along an edge, softened over the next squares too: round, not stepped
+                if ( a < 0.999 ) {
+                  vec2 ts = 0.75 / vec2( textureSize( paintColorMap, 0 ) );
+                  a = ( a * 2.0 + texture2D( paintColorMap, puv + vec2( ts.x, ts.y ) ).a + texture2D( paintColorMap, puv + vec2( -ts.x, ts.y ) ).a
+                    + texture2D( paintColorMap, puv + vec2( ts.x, -ts.y ) ).a + texture2D( paintColorMap, puv + vec2( -ts.x, -ts.y ) ).a ) / 6.0;
+                }
+                // Up close, a ragged edge (the material's own texture breaks it up) instead of
+                // square feet
+                if ( groundDetail > 0.0 && a < 0.999 ) {
+                  float n = dot( texture2D( detailMap, f / 1.7 + vec2( 0.11, 0.53 ) ), pcov );
+                  a = clamp( ( a - 0.5 ) * 2.6 + ( n - 0.5 ) * 1.4 + 0.5, 0.0, 1.0 );
+                }
+                diffuseColor.rgb = mix( diffuseColor.rgb, pc.rgb / pc.a, a * 0.92 );
+                cover = cover * ( 1.0 - a ) + pcov * a;
+              }
+            }
+          }
+          if ( groundDetail > 0.0 && cover.r + cover.g + cover.b + cover.a > 0.004 ) {
             // Two samplings at unrelated scales and angles: no visible repeats
             vec4 a = texture2D( detailMap, f / ${TILE_FT.toFixed(1)} );
             vec4 b = texture2D( detailMap, mat2( 0.8, -0.6, 0.6, 0.8 ) * f / ${(TILE_FT * 1.63).toFixed(2)} + vec2( 0.37, 0.61 ) );
             vec4 d = ( a + b - 1.0 ) * 0.72;
             float k = dot( cover, d * vec4( 1.3, 0.55, 0.8, 1.15 ) );
-            diffuseColor.rgb *= clamp( 1.0 + groundDetail * 1.6 * k, 0.25, 1.9 );
+            diffuseColor.rgb *= clamp( 1.0 + 1.6 * k, 0.25, 1.9 );
           }
-        }
-        #endif`);
+        }`);
   };
   m.customProgramCacheKey = () => "scp-ground-detail";
 };

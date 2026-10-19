@@ -2,8 +2,9 @@
 // worked out from its colors and graininess, and real-scale texture of each is laid over it.
 import { readFileSync } from "fs";
 import { decode } from "fast-png";
-import { test, expect, importSite } from "./fixtures";
+import { test, expect, importSite, planPoint } from "./fixtures";
 import { classifyCover, coverAt, coverOfColor } from "../../src/lib/geo/landCover";
+import { paintAt, paintCircle, paintStroke } from "../../src/lib/groundPaint";
 
 const top = (w: ReturnType<typeof coverOfColor>) =>
   (["grass", "concrete", "asphalt", "soil", "none"] as const).reduce((a, b) => (w[b] > w[a] ? b : a));
@@ -79,9 +80,77 @@ test.describe("ground cover from the photo (pure logic)", () => {
   });
 });
 
+test.describe("painting the ground (pure logic)", () => {
+  test("a dab paints every square foot inside the brush, and takes paint off again", () => {
+    const one = paintCircle({}, { x: 10, y: 10 }, 3, 2);
+    // About the circle's area in square feet
+    expect(Object.keys(one).length).toBeGreaterThan(24);
+    expect(Object.keys(one).length).toBeLessThan(33);
+    expect(paintAt(one, { x: 10, y: 10 })?.id).toBe("dirt");
+    expect(paintAt(one, { x: 14, y: 10 })).toBeNull();
+    // Over it with grass: only the overlap changes
+    const two = paintCircle(one, { x: 12, y: 10 }, 1, 1);
+    expect(paintAt(two, { x: 12, y: 10 })?.id).toBe("grass");
+    expect(paintAt(two, { x: 8, y: 10 })?.id).toBe("dirt");
+    // Taking it off
+    const off = paintCircle(two, { x: 10, y: 10 }, 5, 0);
+    expect(Object.keys(off)).toHaveLength(0);
+    // Nothing to change: the same object back (nothing redraws)
+    expect(paintCircle(off, { x: 10, y: 10 }, 5, 0)).toBe(off);
+    // A quick stroke (the pointer jumped 40 ft between two frames) is one solid band
+    const band = paintStroke({}, { x: 0, y: 0 }, { x: 40, y: 0 }, 2, 1);
+    for (let x = 0; x <= 40; x += 0.5) expect(paintAt(band, { x, y: 0.5 })?.id, `at ${x} ft`).toBe("grass");
+    // and the paint it started from is left as it was
+    const before = { ...one };
+    paintStroke(one, { x: 0, y: 0 }, { x: 20, y: 0 }, 2, 1);
+    expect(one).toEqual(before);
+    // In plan units: on a map at 2 units per foot the same dab covers the same ground
+    expect(paintAt(paintCircle({}, { x: 20, y: 20 }, 6, 3, 2), { x: 20, y: 20 }, 2)?.id).toBe("gravel");
+  });
+});
+
 test.describe("ground texture in the map", () => {
-  test("after an import the photo gets its ground texture; the switch turns it off and on, and is remembered", async ({ page }) => {
+  test("painting dirt on the ground, Shift takes it off, Undo, and it is kept after a reload", async ({ page }) => {
+    await page.getByRole("toolbar", { name: "Tools" }).getByRole("button", { name: "Terrain" }).click();
+    await page.getByRole("button", { name: "Paint ground" }).click();
+    await page.getByRole("group", { name: "Ground material" }).getByRole("button", { name: "Dirt" }).click();
+    const a = await planPoint(page, 0.3, 0.5), b = await planPoint(page, 0.6, 0.5), m = await planPoint(page, 0.45, 0.5);
+    const brush = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 12 });
+      await page.waitForTimeout(200);
+      await page.mouse.up();
+    };
+    await brush(a, b);
+    const painted: Record<string, number> = await page.evaluate(() => (window as any).__scpProject().groundPaint);
+    const count = Object.keys(painted).length;
+    expect(count).toBeGreaterThan(20);
+    expect(Object.values(painted).every(v => v === 2)).toBe(true);
+    // Drawn on the ground (no photo needed)
+    expect(await page.evaluate(() => { const d = (window as any).__scpView.ground.detail; return d.paintOn.value === 1 && !!d.paintColorMap.value; })).toBe(true);
+    // Shift takes it off where it brushes
+    await page.keyboard.down("Shift");
+    await brush(m, b);
+    await page.keyboard.up("Shift");
+    const left = Object.keys(await page.evaluate(() => (window as any).__scpProject().groundPaint)).length;
+    expect(left).toBeLessThan(count * 0.75);
+    expect(left).toBeGreaterThan(0);
+    // Undo puts it back
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => Object.keys(await page.evaluate(() => (window as any).__scpProject().groundPaint)).length).toBe(count);
+    // Kept with the plan
+    await page.waitForTimeout(1500);
+    await page.reload();
+    await expect.poll(async () => Object.keys(await page.evaluate(() => (window as any).__scpProject().groundPaint ?? {})).length).toBe(count);
+  });
+
+  test("after an import the photo gets its ground texture up close; the switch turns it off and on, and is remembered", async ({ page }) => {
     await importSite(page);
+    // Close up (far away it is skipped: it would not show)
+    const [house] = await page.evaluate(() => (window as any).__scpProject().items.filter((i: any) => i.type === "building"));
+    await page.evaluate(h => (window as any).__scpView.fitBounds({ minX: h.x - 30, maxX: h.x + 30, minY: h.y - 20, maxY: h.y + 20 }, { animate: false }), house);
     const state = () => page.evaluate(() => {
       const d = (window as any).__scpView.ground.detail;
       const c = d.coverMap.value;

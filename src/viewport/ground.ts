@@ -5,7 +5,8 @@ import { MAP_OVERLAY_OFFSET } from "../constants";
 import { heightAt } from "../lib/planGeom";
 import { elevationColor } from "../lib/terrain";
 import { disposeObjectDeep } from "../three/dispose";
-import { addGroundDetail, coverTexture, groundDetailTexture, type GroundDetailUniforms } from "../three/groundDetail";
+import { GROUND_MATERIALS, PAINT_CELL_FT } from "../lib/groundPaint";
+import { addGroundDetail, coverTexture, groundDetailTexture, groundDetailUniforms } from "../three/groundDetail";
 import type { ViewDoc } from "./types";
 
 const noRaycast = (o: THREE.Object3D) => { o.raycast = () => {}; return o; };
@@ -22,10 +23,14 @@ export class Ground {
   private key = "";
   private heightsRef: Record<string, number> | null = null;
   private overlayKey = "";
-  /** Real-scale grass, concrete, asphalt and soil texture over the photo (see three/groundDetail). */
-  readonly detail: GroundDetailUniforms = { coverMap: { value: null }, detailMap: { value: null }, groundDetail: { value: 0 }, groundFeet: { value: 1 } };
+  /** Real-scale grass, concrete, asphalt and soil texture over the photo, and painted ground (see three/groundDetail). */
+  readonly detail = groundDetailUniforms();
   private photoFt = 0;
   private wantDetail = true;
+  private close = true;
+  /** Painted ground as drawn so far, and the textures it is drawn into (one texel per painted square). */
+  private paint: Record<string, number> = {};
+  private paintGrid: { cols: number; rows: number; per: number; cell: number; color: Uint8Array; cover: Uint8Array } | null = null;
 
   constructor(private renderer: THREE.WebGLRenderer, private onChanged: () => void) {
     this.group.name = "ground";
@@ -45,9 +50,10 @@ export class Ground {
     this.detail.groundFeet.value = 1 / (doc.unitsPerFoot || 1);
     if (this.wantDetail !== doc.groundDetail) {
       this.wantDetail = doc.groundDetail;
-      this.detail.groundDetail.value = doc.groundDetail && this.detail.coverMap.value && this.detail.detailMap.value ? 1 : 0;
+      this.detailActive(this.close);
       changed = true;
     }
+    if (this.updatePaint(doc)) changed = true;
     if (key !== this.key || !this.terrain) {
       this.key = key;
       this.rebuild(doc);
@@ -104,14 +110,94 @@ export class Ground {
   private setCover(cover: THREE.DataTexture | null) {
     this.detail.coverMap.value?.dispose();
     this.detail.coverMap.value = cover;
-    this.detail.groundDetail.value = 0;
-    if (!cover) return;
+    if (cover) this.loadDetail();
+  }
+
+  /**
+   * Whether the view is close enough for the ground texture to show (far away it averages out to
+   * nothing, so it is skipped: less work for each frame, which matters on a slow device).
+   */
+  detailActive(close: boolean) {
+    this.close = close;
+    this.detail.groundDetail.value = close && this.wantDetail && this.detail.detailMap.value ? 1 : 0;
+  }
+
+  /** The texture patterns, once there is a photo's cover or painted ground to use them. */
+  private loadDetail() {
+    if (this.detail.detailMap.value) return;
     void groundDetailTexture().then(tex => {
-      if (!tex || this.detail.coverMap.value !== cover) return;
+      if (!tex || this.detail.detailMap.value) return;
       this.detail.detailMap.value = tex;
-      this.detail.groundDetail.value = this.wantDetail ? 1 : 0;
+      this.detailActive(this.close);
       this.onChanged();
     });
+  }
+
+  /**
+   * Painted ground into its two textures (color, and which pattern), over the whole plan. Only the
+   * squares that changed since last time are rewritten, so brushing stays quick.
+   */
+  private updatePaint(doc: ViewDoc) {
+    const paint = doc.groundPaint ?? {};
+    const upf = doc.unitsPerFoot || 1;
+    const cell = PAINT_CELL_FT * upf;
+    // At most 2048 texels across (a huge plan groups several squares in one)
+    const per = Math.max(1, Math.ceil(Math.max(doc.canvas.width, doc.canvas.height) / cell / 2048));
+    const cols = Math.max(1, Math.ceil(doc.canvas.width / (cell * per))), rows = Math.max(1, Math.ceil(doc.canvas.height / (cell * per)));
+    let g = this.paintGrid;
+    const fresh = !g || g.cols !== cols || g.rows !== rows || g.per !== per || g.cell !== cell;
+    if (!fresh && paint === this.paint) return false;
+    const empty = !Object.keys(paint).length;
+    if (empty) {
+      this.paint = paint;
+      if (!g) return false;
+      this.detail.paintColorMap.value?.dispose();
+      this.detail.paintCoverMap.value?.dispose();
+      this.detail.paintColorMap.value = this.detail.paintCoverMap.value = null;
+      this.detail.paintOn.value = 0;
+      this.paintGrid = null;
+      return true;
+    }
+    const colors = GROUND_MATERIALS.map(m => new THREE.Color(m.color));
+    const write = (key: string, m: number) => {
+      const [i, j] = key.split(",").map(Number);
+      const ti = Math.floor(i / g!.per), tj = Math.floor(j / g!.per);
+      if (ti < 0 || tj < 0 || ti >= g!.cols || tj >= g!.rows) return;
+      const k = (tj * g!.cols + ti) * 4;
+      const mat = m ? GROUND_MATERIALS[m - 1] : null;
+      const c = m ? colors[m - 1] : null;
+      g!.color[k] = c ? Math.round(c.r * 255) : 0;
+      g!.color[k + 1] = c ? Math.round(c.g * 255) : 0;
+      g!.color[k + 2] = c ? Math.round(c.b * 255) : 0;
+      g!.color[k + 3] = m ? 255 : 0;
+      for (let ch = 0; ch < 4; ch++) g!.cover[k + ch] = mat && mat.detail === ch ? 255 : 0;
+    };
+    if (fresh) {
+      this.detail.paintColorMap.value?.dispose();
+      this.detail.paintCoverMap.value?.dispose();
+      g = this.paintGrid = { cols, rows, per, cell, color: new Uint8Array(cols * rows * 4), cover: new Uint8Array(cols * rows * 4) };
+      const make = (data: Uint8Array, srgb: boolean) => {
+        const t = new THREE.DataTexture(data, cols, rows, THREE.RGBAFormat);
+        t.magFilter = THREE.LinearFilter;
+        t.minFilter = THREE.LinearFilter;
+        t.generateMipmaps = false;
+        t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        return t;
+      };
+      this.detail.paintColorMap.value = make(g.color, true);
+      this.detail.paintCoverMap.value = make(g.cover, false);
+      for (const key in paint) write(key, paint[key]);
+    } else {
+      for (const key in paint) if (this.paint[key] !== paint[key]) write(key, paint[key]);
+      for (const key in this.paint) if (!(key in paint)) write(key, 0);
+    }
+    this.paint = paint;
+    this.detail.paintColorMap.value!.needsUpdate = true;
+    this.detail.paintCoverMap.value!.needsUpdate = true;
+    this.detail.paintRect.value.set(0, 0, cols * cell * per, rows * cell * per);
+    this.detail.paintOn.value = 1;
+    this.loadDetail();
+    return true;
   }
 
   private draped(doc: ViewDoc, x: number, y: number, w: number, d: number, lift: number) {
@@ -168,6 +254,7 @@ export class Ground {
       this.draped(doc, 0, 0, width, height, 0),
       new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.97, metalness: 0 })
     );
+    addGroundDetail(terrain.material as THREE.Material, this.detail);
     terrain.name = "terrain-mesh";
     terrain.receiveShadow = true;
     this.terrain = terrain;
@@ -311,5 +398,7 @@ export class Ground {
     disposeObjectDeep(this.group);
     this.photo?.dispose();
     this.setCover(null);
+    this.detail.paintColorMap.value?.dispose();
+    this.detail.paintCoverMap.value?.dispose();
   }
 }

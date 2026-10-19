@@ -837,6 +837,8 @@ export class SiteView {
       this.renderer.shadowMap.needsUpdate = true;
       this.shadowsDirty = false;
     }
+    // A camera's picture is from near the ground: the ground texture shows
+    this.ground.detailActive(true);
     const k = lensBarrel(hFov);
     if (k > 0.005) {
       // Wide lenses bend straight lines (barrel distortion): draw the picture off screen, then bend it.
@@ -972,6 +974,8 @@ export class SiteView {
     }
     this.camera.updateMatrixWorld();
     this.fadeTreesInTheWay();
+    // Ground texture only when close enough to see it (within about 250 ft of what you look at)
+    this.ground.detailActive(dist < 250 * this.upf());
     this.renderer.render(this.scene, this.camera);
     this.layout();
     const info = this.viewInfo();
@@ -2912,7 +2916,7 @@ export class SiteView {
     }
     pos.needsUpdate = true;
     const t = this.tool.terrainTool;
-    (this.brush.material as THREE.LineBasicMaterial).color.setHex(t === "sculpt" ? 0xf59e0b : t === "smooth" ? 0x38bdf8 : t === "woods" ? 0x22c55e : 0x818cf8);
+    (this.brush.material as THREE.LineBasicMaterial).color.setHex(t === "sculpt" ? 0xf59e0b : t === "smooth" ? 0x38bdf8 : t === "woods" ? 0x22c55e : t === "paint" ? 0xa3e635 : 0x818cf8);
     this.brush.visible = true;
     this.invalidate();
   }

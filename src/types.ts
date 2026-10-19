@@ -8,7 +8,7 @@ export type BuildingLabelDefaults = {
   fontWeight: number;
 };
 export type ViewMode = "plan" | "iso3d" | "nvr";
-export type TerrainTool = "sculpt" | "smooth" | "flatten" | "woods";
+export type TerrainTool = "sculpt" | "smooth" | "flatten" | "woods" | "paint";
 export type DemAlignTool = "move" | "scale" | "rotate" | "pan";
 export type DemData = {
   name: string;
@@ -22,6 +22,7 @@ export type DemData = {
 export type HistoryState = {
   items: CanvasItem[];
   terrainHeights: Record<string, number>;
+  groundPaint?: Record<string, number>;
   buildingLabelDefaults: BuildingLabelDefaults;
   backgroundImg: string | null;
   bgSettings: {

@@ -30,6 +30,8 @@ export type ProjectDoc = {
   projectName: string;
   items: CanvasItem[];
   terrainHeights: Record<string, number>;
+  /** Painted ground (lib/groundPaint): a material per painted square foot, keyed "i,j". */
+  groundPaint: Record<string, number>;
   canvasSize: { width: number; height: number };
   gridSize: number;
   showGrid: boolean;
@@ -60,6 +62,7 @@ export const createEmptyProject = (): ProjectDoc => ({
   projectName: "Security Camera Plan",
   items: [],
   terrainHeights: {},
+  groundPaint: {},
   canvasSize: DEFAULT_CANVAS,
   gridSize: 20,
   showGrid: true,
