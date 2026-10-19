@@ -32,7 +32,7 @@ export type CoverageCamera = {
 };
 
 export type Obstacle =
-  | { kind: "building"; id: string; points: P[]; heightFt: number }
+  | { kind: "building"; id: string; points: P[]; heightFt: number; /** Walls that block, when not the whole outline (open parts). */ walls?: [P, P][] }
   | { kind: "tree"; id: string; x: number; y: number; radius: number; bottomFt: number; topFt: number };
 
 export type SightResult = {
@@ -80,8 +80,9 @@ export const cameraSees = (cam: CoverageCamera, pt: P, obstacles: Obstacle[], un
   const zAt = (t: number) => cam.heightFt + (PERSON_MID_FT - cam.heightFt) * t;
   for (const o of obstacles) {
     if (o.kind === "building") {
-      for (let i = 0; i < o.points.length; i++) {
-        const t = segIntersectT(from, pt, o.points[i], o.points[(i + 1) % o.points.length]);
+      const walls = o.walls ?? o.points.map((p, i) => [p, o.points[(i + 1) % o.points.length]] as [P, P]);
+      for (const [a, b] of walls) {
+        const t = segIntersectT(from, pt, a, b);
         if (t !== null && t > startT && t < 0.999 && zAt(t) < o.heightFt) return { level: null, distanceFt, reason: "blocked", blockedBy: o.id };
       }
     } else {

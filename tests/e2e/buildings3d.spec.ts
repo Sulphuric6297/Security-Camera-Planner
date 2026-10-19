@@ -241,6 +241,46 @@ test.describe("3D building roofs", () => {
     expect(closed.geometry.getAttribute("position").count).toBeGreaterThan(0);
   });
 
+  test("a house with a porch and a carport part: open on those sides, posts there, walls face out", () => {
+    // 40 x 30 house (x -20..20, y -15..15): a porch across the front 8 ft deep, a carport at one end
+    const porch = [{ x: -20, y: 7 }, { x: 20, y: 7 }, { x: 20, y: 15 }, { x: -20, y: 15 }];
+    const carport = [{ x: 8, y: -15 }, { x: 20, y: -15 }, { x: 20, y: 7 }, { x: 8, y: 7 }];
+    const house: any = { id: "h", type: "building", x: 0, y: 0, rotation: 0, width: 40, height: 30, wallHeight: 9, color: "#9ca3af", openParts: [porch, carport] };
+    const model = createBuildingModel(house, 0);
+    const walls = (model.getObjectByName("building-walls") as THREE.Mesh).geometry;
+    const pos = walls.getAttribute("position"), nor = walls.getAttribute("normal"), index = walls.getIndex()!;
+    // No wall along the open front (y = 15) or the carport's outer sides
+    for (let v = 0; v < pos.count; v++) {
+      expect(Math.abs(pos.getZ(v) - 15) < 1e-6 && Math.abs(pos.getZ((v ^ 1)) - 15) < 1e-6).toBe(false);
+    }
+    // Walls: back 28 + left 22 + porch wall 28 + carport wall 22 = 100 ft
+    let len = 0;
+    for (let q = 0; q < pos.count / 4; q++) len += Math.hypot(pos.getX(q * 4 + 1) - pos.getX(q * 4), pos.getZ(q * 4 + 1) - pos.getZ(q * 4));
+    expect(len).toBeCloseTo(100, 3);
+    // Every triangle's front face looks the way its normal says (out of the closed rooms)
+    for (let t = 0; t < index.count; t += 3) {
+      const [a, b, c] = [0, 1, 2].map(k => new THREE.Vector3().fromBufferAttribute(pos, index.getX(t + k)));
+      const n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+      expect(n.dot(new THREE.Vector3().fromBufferAttribute(nor, index.getX(t)))).toBeGreaterThan(0);
+    }
+    // Normals point away from the closed rooms (x -20..8, y -15..7)
+    for (let q = 0; q < pos.count / 4; q++) {
+      const v = q * 4;
+      const mid = { x: (pos.getX(v) + pos.getX(v + 1)) / 2, z: (pos.getZ(v) + pos.getZ(v + 1)) / 2 };
+      expect(nor.getX(v) * (mid.x + 6) + nor.getZ(v) * (mid.z + 4)).toBeGreaterThan(0);
+    }
+    // Posts and beams hold up the roof over the porch and carport, up to the eaves
+    const posts = model.getObjectByName("building-posts") as THREE.Mesh;
+    expect(posts).toBeTruthy();
+    const box = new THREE.Box3().setFromObject(posts);
+    expect(box.max.y).toBeCloseTo(9, 1);
+    expect(box.max.z).toBeGreaterThan(14.5); // along the open front
+    expect(box.min.z).toBeLessThan(-14.5); // and the carport's far end
+    expect(model.getObjectByName("building-roof")).toBeTruthy();
+    // A plain house has no posts
+    expect(createBuildingModel({ ...house, openParts: undefined }, 0).getObjectByName("building-posts")).toBeFalsy();
+  });
+
   test("under the eaves the roof is light trim (soffit), not the dark roof color, for every roof", () => {
     for (const roofType of ["gable", "hip", "flat"]) {
       const house: any = { id: "h", type: "building", x: 0, y: 0, rotation: 0, width: 40, height: 30, wallHeight: 10, color: "#9ca3af", roofType };

@@ -6,7 +6,8 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import { DEFAULT_BUILDING } from "../constants";
 import type { BuildingItem } from "../types";
 import { buildingLocalPoints } from "../lib/planGeom";
-import { FACADE_BAY_FT, FACADE_STOREY_FT, applyPhotoUVs, buildFacadeWalls, buildRoof, chooseRoof, type PhotoRect } from "./buildings";
+import { FACADE_BAY_FT, FACADE_STOREY_FT, applyPhotoUVs, buildFacadeWallPieces, buildFacadeWalls, buildRoof, chooseRoof, type PhotoRect } from "./buildings";
+import { enclosedWalls, openPartPosts, openStretches } from "../lib/openParts";
 
 export type RoofPhoto = { texture: THREE.Texture; rect: PhotoRect } | null;
 
@@ -116,29 +117,37 @@ const roofFacesUp = (geo: THREE.BufferGeometry) => {
   return sum >= 0;
 };
 
-/** Posts and edge beams for an open-sided building (porch, carport), merged into one geometry. */
-const openFrame = (pts: { x: number; y: number }[], height: number, upf: number) => {
+/** Posts (at given points) and beams (along given stretches) at the top, merged into one geometry. */
+const postsAndBeams = (posts: { x: number; y: number }[], beams: { a: { x: number; y: number }; b: { x: number; y: number } }[], height: number, upf: number) => {
   const parts: THREE.BufferGeometry[] = [];
   const post = 0.45 * upf, beamH = 0.8 * upf, beamD = 0.4 * upf;
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i], c = pts[(i + 1) % pts.length];
-    const len = Math.hypot(c.x - a.x, c.y - a.y);
+  for (const p of posts) {
+    const g = new THREE.BoxGeometry(post, height, post);
+    g.translate(p.x, height / 2, p.y);
+    parts.push(g);
+  }
+  for (const { a, b } of beams) {
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
     if (len < 0.01) continue;
-    const n = Math.max(1, Math.ceil(len / (10 * upf)));
-    for (let k = 0; k < n; k++) {
-      const t = k / n;
-      const g = new THREE.BoxGeometry(post, height, post);
-      g.translate(a.x + (c.x - a.x) * t, height / 2, a.y + (c.y - a.y) * t);
-      parts.push(g);
-    }
     const beam = new THREE.BoxGeometry(len, beamH, beamD);
-    beam.rotateY(-Math.atan2(c.y - a.y, c.x - a.x));
-    beam.translate((a.x + c.x) / 2, height - beamH / 2, (a.y + c.y) / 2);
+    beam.rotateY(-Math.atan2(b.y - a.y, b.x - a.x));
+    beam.translate((a.x + b.x) / 2, height - beamH / 2, (a.y + b.y) / 2);
     parts.push(beam);
   }
-  const merged = mergeGeometries(parts.map(g => g.toNonIndexed()), false) ?? new THREE.BufferGeometry();
+  const merged = parts.length ? mergeGeometries(parts.map(g => g.toNonIndexed()), false) : null;
   parts.forEach(g => g.dispose());
-  return merged;
+  return merged ?? new THREE.BufferGeometry();
+};
+
+/** Posts (at the corners and every ~10 ft) and a beam along each edge: an open-sided building. */
+const openFrame = (pts: { x: number; y: number }[], height: number, upf: number) => {
+  const posts: { x: number; y: number }[] = [];
+  pts.forEach((a, i) => {
+    const b = pts[(i + 1) % pts.length];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / (10 * upf)));
+    for (let k = 0; k < n; k++) posts.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+  });
+  return postsAndBeams(posts, pts.map((a, i) => ({ a, b: pts[(i + 1) % pts.length] })), height, upf);
 };
 
 /**
@@ -160,7 +169,12 @@ export const createBuildingModel = (
 
   // A porch or carport: posts (at the corners and every ~10 ft) and a beam along each edge
   // carrying the roof, instead of walls.
-  const wallGeo = b.openSides ? openFrame(pts, wallHeight, upf) : buildFacadeWalls(pts, wallHeight, upf);
+  const openParts = !b.openSides && b.openParts?.length ? b.openParts : null;
+  const wallGeo = b.openSides
+    ? openFrame(pts, wallHeight, upf)
+    : openParts
+      ? buildFacadeWallPieces(enclosedWalls(pts, openParts), wallHeight, upf)
+      : buildFacadeWalls(pts, wallHeight, upf);
   if (!b.openSides) shadeWalls(wallGeo, wallHeight);
   const walls = new THREE.Mesh(wallGeo, b.openSides
     ? new THREE.MeshStandardMaterial({ color: mix(b.color, "#f3f1ec", 0.6), roughness: 0.85, metalness: 0 })
@@ -172,6 +186,18 @@ export const createBuildingModel = (
   group.add(walls);
 
   if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
+  // Open parts (porch, carport): posts and beams carry the roof where the outer walls are left out.
+  if (openParts) {
+    const frame = new THREE.Mesh(
+      postsAndBeams(openPartPosts(pts, openParts, 10 * upf), openStretches(pts, openParts), wallHeight, upf),
+      new THREE.MeshStandardMaterial({ color: mix(b.color, "#f3f1ec", 0.6), roughness: 0.85, metalness: 0 })
+    );
+    frame.name = "building-posts";
+    frame.castShadow = true;
+    frame.receiveShadow = true;
+    frame.userData.itemId = b.id;
+    group.add(frame);
+  }
 
   const kind = buildingRoofKind(b, upf);
   const parts = buildRoof(pts, kind, { pitch: 0.45, eave: 1.5 * upf, maxRise: Math.min(12 * upf, wallHeight * 0.6) });

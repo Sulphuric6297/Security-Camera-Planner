@@ -1,4 +1,4 @@
-import { test, expect, itemsOfType, placeWithKey, planPoint } from "./fixtures";
+import { test, expect, drag, itemsOfType, placeWithKey, planPoint, screenOf } from "./fixtures";
 
 // The empty plan is 1000 x 700 ft. These helpers place things by fraction of the plan's box.
 const markSpot = async (page: any, fx: number, fy: number) => {
@@ -120,9 +120,62 @@ test.describe("what to protect and coverage", () => {
     // Made a carport (roof on posts): the camera sees through it
     const [b] = await itemsOfType(page, "building");
     await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-    await page.getByLabel("Inspector").getByLabel("Open sides (porch, carport)").check();
+    await page.getByLabel("Inspector").getByLabel("Whole building is open (carport, pavilion)").check();
     expect((await itemsOfType(page, "building"))[0].openSides).toBe(true);
     await expect.poll(() => status(page)).not.toBe("none");
+  });
+
+  test("draw porch and carport parts of a house: a camera sees under the porch; each part can be removed", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    const [b] = await itemsOfType(page, "building");
+    const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
+    const front = b.y + b.height / 2; // the south wall
+    // A door just inside the south wall, a camera 25 ft south of the house looking at it
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    const spot = await screenOf(page, b.x, front - 2 * upf);
+    await page.mouse.click(spot.x, spot.y);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("c");
+    const cam = await screenOf(page, b.x, front + 25 * upf);
+    await page.mouse.click(cam.x, cam.y);
+    await page.getByRole("button", { name: /→ Door 1/ }).click();
+    await page.keyboard.press("Escape");
+    await expect.poll(() => status(page)).toBe("none"); // the south wall is in the way
+    // Zoom in on the house so the parts are drawn at a useful size
+    await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 5 * upf, maxX: b.x + b.width / 2 + 5 * upf, minY: b.y - b.height / 2 - 5 * upf, maxY: b.y + b.height / 2 + 30 * upf }, { animate: false }), [b, upf] as const);
+    await page.waitForTimeout(300);
+
+    const inspector = page.getByLabel("Inspector");
+    const drawPart = async (x0: number, y0: number, x1: number, y1: number) => {
+      await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+      await inspector.getByRole("button", { name: /Draw a porch or carport part/ }).click();
+      await drag(page, await screenOf(page, x0, y0), await screenOf(page, x1, y1));
+    };
+    // Esc leaves the drawing tool without adding anything
+    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+    await inspector.getByRole("button", { name: /Draw a porch or carport part/ }).click();
+    await expect(inspector.getByRole("button", { name: /Drag over the porch or carport/ })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(inspector.getByRole("button", { name: /Draw a porch or carport part/ })).toBeVisible();
+    expect((await itemsOfType(page, "building"))[0].openParts ?? []).toHaveLength(0);
+
+    // A porch across the front, 6 ft deep: the camera now sees the door under it; the house stays closed
+    await drawPart(b.x - b.width / 2 - 2 * upf, front - 6 * upf, b.x + b.width / 2 + 2 * upf, front + 2 * upf);
+    await expect.poll(async () => ((await itemsOfType(page, "building"))[0].openParts ?? []).length).toBe(1);
+    expect((await itemsOfType(page, "building"))[0].openSides).toBeFalsy();
+    await expect.poll(() => status(page)).not.toBe("none");
+    // A second part (a carport at the back)
+    const back = b.y - b.height / 2;
+    await drawPart(b.x - b.width / 2 - 2 * upf, back - 2 * upf, b.x, back + 8 * upf);
+    await expect.poll(async () => ((await itemsOfType(page, "building"))[0].openParts ?? []).length).toBe(2);
+    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+    await expect(inspector.getByTestId("open-parts")).toContainText("Open part 2");
+    // Remove the porch: the wall is back in the way; the carport stays
+    await inspector.getByRole("button", { name: "Remove open part 1" }).click();
+    await expect.poll(async () => ((await itemsOfType(page, "building"))[0].openParts ?? []).length).toBe(1);
+    await expect.poll(() => status(page)).toBe("none");
   });
 
   test("aim a camera by clicking a spot on the map", async ({ page }) => {

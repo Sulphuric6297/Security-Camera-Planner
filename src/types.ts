@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder" | "add-open-part";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
@@ -101,6 +101,9 @@ export interface BuildingItem extends BaseItem {
   mine?: boolean;
   /** Porch, carport or pavilion: a roof on posts, no walls (cameras see through and under it). */
   openSides?: boolean;
+  /** Open parts under the roof (a porch, a carport): rectangles in the building's own frame with no
+   * outer walls, posts instead, and a wall where they meet the house. */
+  openParts?: { x: number; y: number }[][];
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)

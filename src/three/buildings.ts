@@ -395,6 +395,39 @@ export const buildFacadeWalls = (pts: P[], height: number, unitsPerFoot = 1) => 
 };
 
 /**
+ * Walls from separate pieces (a building with open parts), textured in facade bays like
+ * buildFacadeWalls. Each piece faces its `out` side.
+ */
+export const buildFacadeWallPieces = (pieces: { a: P; b: P; out: P }[], height: number, unitsPerFoot = 1) => {
+  const storeys = Math.max(1, Math.round(height / unitsPerFoot / FACADE_STOREY_FT));
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const uv: number[] = [];
+  const index: number[] = [];
+  for (const { a, b, out } of pieces) {
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 1e-6) continue;
+    const bays = Math.round(len / unitsPerFoot / FACADE_BAY_FT);
+    const u1 = bays > 0 ? bays : Math.max(0.1, len / unitsPerFoot / FACADE_BAY_FT);
+    const base = pos.length / 3;
+    pos.push(a.x, 0, a.y, b.x, 0, b.y, b.x, height, b.y, a.x, height, a.y);
+    for (let k = 0; k < 4; k++) nor.push(out.x, 0, out.y);
+    uv.push(0, 0, u1, 0, u1, storeys, 0, storeys);
+    // Wind so the front face looks toward `out`: the face normal of (a, b, top) is (b - a) x up.
+    const ex = b.x - a.x, ez = b.y - a.y;
+    const facing = -ez * out.x + ex * out.y; // y-component sign of the cross product, as seen in plan
+    if (facing < 0) index.push(base, base + 2, base + 1, base, base + 3, base + 2);
+    else index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(index);
+  return g;
+};
+
+/**
  * Doors where the user marked a door next to a wall: the point on the nearest wall (within
  * `maxFt`), and the wall's outward direction there. Local building coordinates.
  */

@@ -18,23 +18,23 @@ Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no ba
 
 ## The testing rule
 
-**Before committing or pushing, the whole batch must pass the full check:**
+Every change is tested, **once** in full: by CI on its pull request. Don't repeat the full suite.
 
-```bash
-npm run check   # typecheck + production build + full end-to-end suite (all app areas)
-```
-
-- Run the **whole** suite, not just the tests for the part you edited. The app is one large
-  component (`code.tsx`) sharing one store, so an edit to one area often breaks another
-  (for example, a change to building labels broke building dragging, and a change to the NVR
-  layout broke undo).
-- **Never commit or push with a failing check.** If a test fails, fix the app, not the test.
-  Change a test only when the intended behaviour changed, and say so in the commit message.
+- **While working and before pushing:** `npm run typecheck`, `npm run build`, and the spec files
+  for the areas you changed (`npx playwright test tests/e2e/<area>.spec.ts`, see the table
+  below). Not the whole suite: CI runs that.
+- **The pull request's CI run is the gate:** the full suite (`npm run check`) runs there. If it
+  fails, fix it and push; re-run locally only the failing spec files, never everything again.
+- **Never merge with a failing CI run.** If a test fails, fix the app, not the test. Change a
+  test only when the intended behaviour changed, and say so in the commit message.
 - **Every bug fix adds a test that fails without the fix. Every new feature adds a test for
-  it.** Put it in the spec for that area (see the table below).
-- For larger batches, also check for flakiness: `npx playwright test --repeat-each=3`.
-- CI runs the same `npm run check` on every push and pull request. Deploy to GitHub Pages
-  runs only if it passes.
+  it.** Put it in the spec for that area (see the table below). The app is one large component
+  (`code.tsx`) sharing one store, so an edit to one area can break another: that's what the
+  full CI run is for.
+- **When the owner says publish, publish:** merge as soon as the pull request is green (or, if
+  they ask for it now, deploy the build to `gh-pages` straight away) and don't wait on any
+  further runs.
+- Check a new or changed test for flakiness on its own: `npx playwright test <spec> --repeat-each=3`.
 
 First-time setup: `npm ci`. Chromium is already installed in Claude Code cloud sessions.
 Elsewhere, run `npx playwright install chromium`.
@@ -62,13 +62,13 @@ Useful commands:
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip, Recent plans (New keeps the plan, Undo, reopen, delete, duplicate) |
 | `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, walls with siding/windows and doors at marked door spots, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
 | `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens, picking from a side list brings the item into view |
-| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), Fix a spot (aim + zoom the best camera, or turn an idle one), spots renamed for their kind, buildings in the camera plan, open-sided buildings don't block, night/infrared check |
+| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), Fix a spot (aim + zoom the best camera, or turn an idle one), spots renamed for their kind, buildings in the camera plan, open-sided buildings don't block, drawing porch/carport parts of a house (cameras see under them, Esc, remove one), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid, wide-lens curve (pure logic) |
 | `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions, recorder storage estimate (pure logic) |
 | `suggest.spec.ts` | "Suggest cameras": wall mounts that meet each spot's goal, one camera angled to take in several spots, nothing for covered spots, pole fallback (pure logic) |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
-| `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site; wall cameras stay outside L-shaped houses (pure logic) |
-| `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height, facade window bays, doors on walls, light soffits under eaves, open-sided buildings (porch, carport) (pure logic) |
+| `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site; wall cameras stay outside L-shaped houses, walls left around porch/carport parts (pure logic) |
+| `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height, facade window bays, doors on walls, light soffits under eaves, open-sided buildings (porch, carport), houses with porch/carport parts (no walls there, posts, walls face out) (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, the 3D car exactly its stated length, old-save migration (pure logic) |
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view, the picture fills the window with Settings beside it, closing with its X/tabs/steps; camera pictures rendered from the 3D scene |
 | `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |

@@ -4,6 +4,7 @@
 import { CAMERA_WALL_SNAP_FT, OBJECT_ELEVATION_OFFSET, clamp } from "../constants";
 import type { BuildingItem, CameraItem, CanvasItem, TreeItem } from "../types";
 import { getEdgeOutwardNormal, pointInPolygonXY, rectanglePoints } from "./geometry";
+import { enclosedWalls } from "./openParts";
 
 type P = { x: number; y: number };
 
@@ -39,6 +40,18 @@ export const buildingWorldPoints = (b: BuildingItem) =>
     const r = rotatePoint(p, b.rotation);
     return { x: b.x + r.x, y: b.y + r.y };
   });
+
+/**
+ * The walls that block a view, as world segments: the outline's edges, or with open parts (a
+ * porch, a carport) the walls left around them. None for an open-sided building.
+ */
+export const buildingWallSegments = (b: BuildingItem): [P, P][] => {
+  if (b.openSides) return [];
+  const toWorld = (p: P) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
+  const local = buildingLocalPoints(b);
+  if (b.openParts?.length) return enclosedWalls(local, b.openParts).map(w => [toWorld(w.a), toWorld(w.b)] as [P, P]);
+  return local.map((p, i) => [toWorld(p), toWorld(local[(i + 1) % local.length])] as [P, P]);
+};
 
 /** Plan point -> the building's local frame. */
 export const toBuildingLocal = (b: { x: number; y: number; rotation: number }, p: P) =>
@@ -143,10 +156,16 @@ export const visibilityPolygon = (origin: P, range: number, fovDeg: number, rota
   const segments: [P, P][] = [];
   for (const item of obstacles) {
     let pts: P[] = [];
-    // A porch or carport (roof on posts) doesn't block the view.
-    if (item.type === "building" && item.openSides) continue;
-    if (item.type === "building") pts = buildingWorldPoints(item);
-    else {
+    // Walls block the view; a porch or carport (roof on posts) doesn't.
+    const near = (a: P, b: P) => {
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const t = clamp(((origin.x - a.x) * abx + (origin.y - a.y) * aby) / (abx * abx + aby * aby || 1), 0, 1);
+      return Math.hypot(a.x + abx * t - origin.x, a.y + aby * t - origin.y) <= range;
+    };
+    if (item.type === "building") {
+      buildingWallSegments(item).forEach(([a, c]) => { if (near(a, c)) segments.push([a, c]); });
+      continue;
+    } else {
       const r = item.radius * (item.width ?? 1);
       for (let i = 0; i < 8; i++) {
         const a = (i / 8) * Math.PI * 2;

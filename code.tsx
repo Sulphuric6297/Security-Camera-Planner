@@ -69,6 +69,7 @@ import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
+import { partFromCorners } from "./src/lib/openParts";
 import { getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, type PlanMeta, idbGet, idbSet, listPlans, loadPlan, removePlan, storePlan } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
@@ -77,7 +78,7 @@ import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
-import { buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
+import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall, toBuildingLocal } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
 import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
@@ -2880,8 +2881,9 @@ export default function SecurityPlanner() {
   };
 
   // Choosing a placing tool clears the selection, so the right panel shows that tool (not the old item).
+  // Drawing a porch or carport part works on the selected building, so that one keeps it.
   useEffect(() => {
-    if (mode !== "select") setSelectedId(null);
+    if (mode !== "select" && mode !== "add-open-part") setSelectedId(null);
   }, [mode]);
   // Selecting something shows it in the inspector (even if plan settings were open).
   useEffect(() => {
@@ -3071,6 +3073,11 @@ export default function SecurityPlanner() {
           setAimingCameraId(null);
           return;
         }
+        // Esc while drawing a porch or carport part only stops drawing (the building stays selected).
+        if (mode === "add-open-part") {
+          setMode("select");
+          return;
+        }
         setSelectedId(null);
         setMode("select");
         setVertexInsertMode(false);
@@ -3079,7 +3086,7 @@ export default function SecurityPlanner() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId]);
+  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId, mode]);
 
 
   // Refs to track current items and mode in 3D event handlers
@@ -3311,7 +3318,7 @@ export default function SecurityPlanner() {
         const b = item as BuildingItem;
         // A porch or carport (roof on posts): people under it and the view through it are clear.
         if (b.openSides) return;
-        obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf });
+        obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf, ...(b.openParts?.length ? { walls: buildingWallSegments(b) } : {}) });
       } else if (item.type === "tree") {
         const t = item as TreeItem;
         const h = (t.height ?? 30) / upf;
@@ -3651,6 +3658,20 @@ export default function SecurityPlanner() {
       if (placeNewItemAt(tool, p.x, p.y)) setTimeout(() => saveHistory(), 50);
     },
     onTrace: p => traceRoofAt(p),
+    onOpenPart: (id, a, c) => {
+      setMode("select");
+      const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+      if (!b) return;
+      const la = toBuildingLocal(b, a), lc = toBuildingLocal(b, c);
+      const upf = planGeoRef?.unitsPerFoot ?? 1;
+      // Too small to be a porch: a slip of the mouse
+      if (Math.abs(lc.x - la.x) < 3 * upf || Math.abs(lc.y - la.y) < 3 * upf) {
+        showExportNotice("Drag a bigger rectangle over the porch or carport (at least 3 ft each way).", "info");
+        return;
+      }
+      updateItem(id, { openParts: [...(b.openParts ?? []), partFromCorners(la, lc)] } as Partial<BuildingItem>);
+      setTimeout(() => saveHistory(), 50);
+    },
     onAim: p => {
       if (!aimingCameraId) return;
       aimCameraAt(aimingCameraId, p);
@@ -3712,6 +3733,7 @@ export default function SecurityPlanner() {
 
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
+    if (mode === "add-open-part") return "Drag a rectangle over the part of the building that is open (porch, carport) · Esc to cancel";
     if (isTerrainMode && terrainTool === "woods") return "Woods: click and hold (or drag) to plant trees · Shift to clear them · Strength sets how dense";
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
     if (vertexInsertMode) return "Click on an edge to add a corner";
@@ -4624,7 +4646,7 @@ export default function SecurityPlanner() {
 
       <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen && !povCamId ? 352 : 0, right: 0 }}>
         {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
-        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure")) && (
+        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure" && mode !== "add-open-part")) && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
               {isTerrainMode ? (
                 <div className="flex flex-col gap-4" data-testid="terrain-panel">
@@ -5691,13 +5713,47 @@ export default function SecurityPlanner() {
                       checked={!!(selectedItem as BuildingItem).openSides}
                       onChange={e => { updateItem(selectedItem.id, { openSides: e.target.checked }); setTimeout(() => saveHistory(), 50); }}
                       className="accent-emerald-500 mt-0.5"
-                      aria-label="Open sides (porch, carport)"
+                      aria-label="Whole building is open (carport, pavilion)"
                     />
                     <span>
-                      <span className="block text-sm font-semibold text-slate-100">Open sides (porch, carport)</span>
-                      <span className="block text-[11px] text-slate-400">A roof on posts with no walls: cameras see under and through it. For a porch on the house, pull the house's outline back and draw the porch as its own building.</span>
+                      <span className="block text-sm font-semibold text-slate-100">Whole building is open (carport, pavilion)</span>
+                      <span className="block text-[11px] text-slate-400">A roof on posts with no walls at all. For a porch or carport that's part of a house, draw it below instead.</span>
                     </span>
                   </label>
+                  {!(selectedItem as BuildingItem).openSides && (
+                    <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-1.5" data-testid="open-parts">
+                      <div className="text-sm font-semibold text-slate-100">Porches and carports</div>
+                      <p className="text-[11px] text-slate-400">Parts under this roof with no outer walls: posts instead, and cameras see under them.</p>
+                      {((selectedItem as BuildingItem).openParts ?? []).map((part, i) => {
+                        const w = Math.round(Math.abs(part[1].x - part[0].x) / (planGeoRef?.unitsPerFoot ?? 1));
+                        const d = Math.round(Math.abs(part[2].y - part[1].y) / (planGeoRef?.unitsPerFoot ?? 1));
+                        return (
+                          <div key={i} className="flex items-center justify-between text-xs text-slate-200">
+                            <span>Open part {i + 1} · {w} × {d} ft</span>
+                            <button
+                              onClick={() => {
+                                const parts = ((selectedItem as BuildingItem).openParts ?? []).filter((_, k) => k !== i);
+                                updateItem(selectedItem.id, { openParts: parts.length ? parts : undefined } as Partial<BuildingItem>);
+                                setTimeout(() => saveHistory(), 50);
+                              }}
+                              className="p-1 text-slate-400 hover:text-red-400"
+                              aria-label={`Remove open part ${i + 1}`}
+                              title="Make it walls again"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      <button
+                        onClick={() => setMode(mode === "add-open-part" ? "select" : "add-open-part")}
+                        aria-pressed={mode === "add-open-part"}
+                        className={`w-full py-1.5 rounded-md text-xs font-semibold border ${mode === "add-open-part" ? "bg-amber-500/20 border-amber-400/40 text-amber-200" : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/10"}`}
+                      >
+                        {mode === "add-open-part" ? "Drag over the porch or carport on the map…" : "+ Draw a porch or carport part"}
+                      </button>
+                    </div>
+                  )}
                   {backgroundImg && (
                     <button
                       onClick={() => fitBuildingToPhoto(selectedItem.id)}

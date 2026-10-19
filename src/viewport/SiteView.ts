@@ -24,6 +24,7 @@ import {
   wallSnapDistance
 } from "../lib/planGeom";
 import { pointInPolygonXY } from "../lib/geometry";
+import { openPartEdges } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
 import { createBuildingModel } from "../three/buildingMesh";
 import { doorsOnWalls } from "../three/buildings";
@@ -957,7 +958,7 @@ export class SiteView {
       case "building": {
         const b = item as BuildingItem;
         const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
@@ -1225,6 +1226,21 @@ export class SiteView {
       const v = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(verts), mat);
       v.renderOrder = 12;
       group.add(v);
+      // Porch and carport parts: dashed amber, at the ground and under the eaves
+      if (!b.openSides && b.openParts?.length) {
+        const local = buildingLocalPoints(b);
+        const world = (p: { x: number; y: number }) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
+        const seg: THREE.Vector3[] = [];
+        for (const e of openPartEdges(local, b.openParts)) {
+          const a = world(e.a), c = world(e.b);
+          for (const y of [base + 0.2, base + wall]) seg.push(new THREE.Vector3(a.x, y, a.y), new THREE.Vector3(c.x, y, c.y));
+        }
+        const parts = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg), new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 1.5 * this.upf(), gapSize: 1 * this.upf(), depthTest: false, transparent: true, opacity }));
+        parts.computeLineDistances();
+        parts.renderOrder = 13;
+        parts.name = "open-part-outline";
+        group.add(parts);
+      }
     } else if (item.type !== "label") {
       const p = itemPoint(item, doc.items);
       const r = item.type === "tree" ? (item as TreeItem).radius * ((item as TreeItem).width ?? 1)
@@ -1999,6 +2015,12 @@ export class SiteView {
       this.gesture(e, { click: groundClick(p => this.cb.onTrace(p)), drag: panOrNothing });
       return;
     }
+    if (tool.mode === "add-open-part") {
+      stop();
+      const b = this.item(this.selectedId);
+      if (b?.type === "building") this.gesture(e, { drag: start => this.openPartDrag(start, b as BuildingItem), click: () => {} });
+      return;
+    }
     if (tool.mode === "measure") {
       stop();
       this.gesture(e, {
@@ -2050,6 +2072,43 @@ export class SiteView {
     e.stopPropagation();
     if (hit !== this.selectedId) this.cb.onSelect(hit);
     this.gesture(e, { drag: s => this.itemDrag(s, hit) });
+  }
+
+  // Dragging out a porch or carport part over a building: a rectangle square to the building.
+  private openPartDrag(start: PointerEvent, b: BuildingItem): Drag | null {
+    const g0 = this.groundAt(start.clientX, start.clientY);
+    if (!g0) return null;
+    const a = { x: g0.x, y: g0.z };
+    const mat = new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 1.5 * this.upf(), gapSize: 1 * this.upf(), depthTest: false });
+    const line = new THREE.LineLoop(new THREE.BufferGeometry(), mat);
+    line.renderOrder = 20;
+    this.fx.add(line);
+    let c = a;
+    const draw = () => {
+      const la = toBuildingLocal(b, a), lc = toBuildingLocal(b, c);
+      const corners = [[la.x, la.y], [lc.x, la.y], [lc.x, lc.y], [la.x, lc.y]].map(([x, y]) => {
+        const r = rotatePoint({ x, y }, b.rotation);
+        const wx = b.x + r.x, wz = b.y + r.y;
+        return new THREE.Vector3(wx, this.h(wx, wz) + 0.4 * this.upf(), wz);
+      });
+      line.geometry.setFromPoints(corners);
+      line.computeLineDistances();
+      this.invalidate();
+    };
+    return {
+      move: ev => {
+        const g = this.groundAt(ev.clientX, ev.clientY);
+        if (!g) return;
+        c = { x: g.x, y: g.z };
+        draw();
+      },
+      end: () => {
+        this.fx.remove(line);
+        line.geometry.dispose();
+        mat.dispose();
+        this.cb.onOpenPart(b.id, a, c);
+      }
+    };
   }
 
   private terrainStroke(e: PointerEvent) {

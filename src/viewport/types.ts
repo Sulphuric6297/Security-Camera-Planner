@@ -58,6 +58,8 @@ export type ViewCallbacks = {
   onPlace: (mode: ToolMode, p: P) => void;
   onTrace: (p: P) => void;
   onAim: (p: P) => void;
+  /** A porch or carport part dragged out over the selected building (two opposite corners, plan). */
+  onOpenPart: (buildingId: string, a: P, b: P) => void;
   /** Live edits while dragging (no undo step); onCommit ends the gesture. */
   onChange: (id: string, patch: Partial<CanvasItem>) => void;
   onCommit: () => void;
