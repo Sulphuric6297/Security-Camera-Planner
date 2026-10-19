@@ -13,7 +13,7 @@ import {
   vFovFromH,
   getCameraAspectValue
 } from "../lib/camera";
-import { DEFAULT_CAMERA_PITCH } from "../constants";
+import { DEFAULT_CAMERA_PITCH, DEFAULT_IR_RANGE_FT } from "../constants";
 
 type Props = {
   camera: CameraItem;
@@ -227,6 +227,17 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
         <div className="flex justify-between text-[11px] text-slate-400">
           <span>Blind spot: <span className="text-slate-200 font-semibold">{fmtFt(ground.near)}</span></span>
           <span>Sees ground to: <span className="text-slate-200 font-semibold">{Number.isFinite(ground.far) ? fmtFt(ground.far) : "horizon"}</span></span>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[10px] uppercase font-bold text-slate-400">Night vision (infrared) reach</div>
+        <div className="grid grid-cols-4 gap-1.5" role="group" aria-label="Night vision reach">
+          {[50, 100, 165, 260].map(ft => (
+            <button key={ft} onClick={() => onChange({ irRangeFt: ft })} className={chip((camera.irRangeFt ?? DEFAULT_IR_RANGE_FT) === ft)} title={`${Math.round(ft / 3.28)} m on the spec sheet`}>
+              {ft} ft
+            </button>
+          ))}
         </div>
       </div>
 

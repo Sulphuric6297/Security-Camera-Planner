@@ -60,10 +60,12 @@ import { StepPanel } from "./src/components/StepPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
 import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
+import { suggestCameras } from "./src/lib/suggest";
+import { estimateStorage } from "./src/lib/recording";
 import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
-import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
+import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
@@ -175,6 +177,11 @@ export default function SecurityPlanner() {
   // Coverage: blind-spot overlay and "aim this camera at the next click".
   const [showBlindSpots, setShowBlindSpots] = useState(false);
   const [aimingCameraId, setAimingCameraId] = useState<string | null>(null);
+  // Coverage at night: every camera limited to its infrared reach.
+  const [nightCoverage, setNightCoverage] = useState(false);
+  // Recorder storage estimate (Report step and the PDF).
+  const [recordDays, setRecordDays] = useState(30);
+  const [recordMode, setRecordMode] = useState<"continuous" | "motion">("continuous");
   // Set when a press already did its job (aimed a camera, placed an item on top of another), so the
   // click that follows doesn't also deselect or place again.
   const consumedClickRef = useRef(false);
@@ -2665,6 +2672,7 @@ export default function SecurityPlanner() {
         recognizeFt: dori[1].distance,
         detectFt: dori[3].distance,
         blindSpotFt: Number.isFinite(ground.near) ? ground.near : null,
+        irRangeFt: cam.irRangeFt ?? DEFAULT_IR_RANGE_FT,
         notes: cam.description || "",
         covers: targetItems
           .filter(t => targetResults.get(t.id)?.best?.cameraId === cam.id)
@@ -2727,7 +2735,13 @@ export default function SecurityPlanner() {
         pickedViews: picked,
         cameras: buildReportCameras(picked.length === 0),
         spots: buildReportSpots(),
-        counts: { buildings: items.filter(i => i.type === "building").length }
+        counts: { buildings: items.filter(i => i.type === "building").length },
+        storage: (() => {
+          const widths = (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH);
+          if (!widths.length) return undefined;
+          const e = estimateStorage(widths, recordDays, recordMode);
+          return { days: recordDays, mode: recordMode, tb: e.tb, driveTb: e.driveTb };
+        })()
       },
       { autoPrint: true }
     );
@@ -6083,7 +6097,9 @@ export default function SecurityPlanner() {
 
   // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
   // regardless of how many feet the site spans or how far you zoom.
-  const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
+  // Bigger handles on touch screens (fingers need ~44 px targets).
+  const coarsePointer = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
+  const planUi = (Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom) * (coarsePointer ? 1.5 : 1);
 
   // Building inspector order: the everyday settings first, the rest folded under "More options".
   // (Other item types keep their natural order.)
@@ -6111,7 +6127,7 @@ export default function SecurityPlanner() {
         vFov: cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam)),
         pitch: cam.pitch ?? DEFAULT_CAMERA_PITCH,
         heightFt: (cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT),
-        range: cam.range,
+        range: nightCoverage ? Math.min(cam.range, (cam.irRangeFt ?? DEFAULT_IR_RANGE_FT) * upf) : cam.range,
         camera: cam
       };
     });
@@ -6128,7 +6144,55 @@ export default function SecurityPlanner() {
     });
     return { cameras, obstacles, upf };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, planGeoRef]);
+  }, [items, planGeoRef, nightCoverage]);
+
+  // "Suggest cameras": add wall/pole cameras that cover the spots that aren't covered yet.
+  const handleSuggestCameras = () => {
+    const upf = coverageModel.upf;
+    const buildings = (items.filter(i => i.type === "building") as BuildingItem[]).map(b => ({
+      id: b.id,
+      points: getBuildingEdgePointsWorld(b),
+      heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf,
+      mountHeightFt: mountHeightForBuilding(b)
+    }));
+    const suggestions = suggestCameras({
+      targets: targetItems.map(t => ({ id: t.id, x: t.x, y: t.y, goal: t.goal })),
+      buildings,
+      obstacles: coverageModel.obstacles,
+      existing: coverageModel.cameras,
+      unitsPerFoot: upf
+    });
+    if (suggestions.length === 0) {
+      showExportNotice("Couldn't find a camera spot for the rest. Try a pole camera closer to them, or lower the detail needed.", "info");
+      return;
+    }
+    const startIndex = items.filter(i => i.type === "camera").length;
+    const added = suggestions.map((sug, i) => {
+      const base = createItem("camera", sug.x, sug.y, { unitsPerFoot: upf, cameraIndex: startIndex + i }) as CameraItem;
+      const covers = targetItems.filter(t => sug.covers.includes(t.id)).map(t => t.label);
+      return {
+        ...base,
+        rotation: sug.rotation,
+        pitch: sug.pitch,
+        hFov: sug.hFov,
+        fov: sug.hFov,
+        vFov: vFovFromH(sug.hFov, 16 / 9),
+        lensPreset: sug.lensId,
+        resolutionWidth: sug.resolutionWidth,
+        range: sug.range,
+        height: sug.heightFt,
+        mount: sug.mount
+          ? { type: "building" as const, buildingId: sug.mount.buildingId, edgeIndex: sug.mount.edgeIndex, edgeT: sug.mount.edgeT, height: sug.heightFt }
+          : { type: "free" as const, edgeT: 0.5, height: sug.heightFt },
+        description: `Suggested to cover ${covers.join(", ")}`
+      } as CameraItem;
+    });
+    const nextItems = [...items, ...added];
+    setItems(nextItems);
+    saveHistory(nextItems);
+    setSelectedId(null);
+    showExportNotice(`Added ${added.length} camera${added.length === 1 ? "" : "s"}. Adjust them as you like.`, "success", { label: "Undo", run: handleUndo });
+  };
   const targetItems = items.filter(i => i.type === "target") as TargetItem[];
   const targetResults = useMemo(
     () => new Map(evaluateTargets(coverageModel.cameras, targetItems, coverageModel.obstacles, coverageModel.upf).map(r => [r.targetId, r])),
@@ -9945,6 +10009,13 @@ export default function SecurityPlanner() {
                 onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
                 onMoreReportOptions={() => setShowExportPanel(true)}
                 onCamerasCsv={handleDownloadCamerasCsv}
+                storage={{
+                  widths: (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH),
+                  days: recordDays,
+                  mode: recordMode,
+                  onDays: setRecordDays,
+                  onMode: setRecordMode
+                }}
                 coverage={
                   <CoveragePanel
                     targets={targetItems}
@@ -9957,6 +10028,9 @@ export default function SecurityPlanner() {
                     showBlindSpots={showBlindSpots}
                     onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
                     coveredFraction={blindSpots?.coveredFraction ?? null}
+                    onSuggest={handleSuggestCameras}
+                    night={nightCoverage}
+                    onToggleNight={setNightCoverage}
                   />
                 }
               />

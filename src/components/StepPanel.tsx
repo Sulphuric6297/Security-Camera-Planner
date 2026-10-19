@@ -21,6 +21,7 @@ import type { BuildingItem, CameraItem, CanvasItem } from "../types";
 import type { WorkflowStepId } from "./AppHeader";
 import { getDoriDistances, getGroundCoverage } from "../lib/camera";
 import { DEFAULT_CAMERA_PITCH } from "../constants";
+import { estimateStorage } from "../lib/recording";
 
 export const STEP_INFO: Record<WorkflowStepId, { n: number; title: string; blurb: string; next?: WorkflowStepId }> = {
   site: { n: 1, title: "Your site", blurb: "The satellite map, elevation and buildings for your property.", next: "buildings" },
@@ -48,6 +49,13 @@ type Props = {
   onAddViewToReport: () => void;
   onMoreReportOptions: () => void;
   onCamerasCsv: () => void;
+  storage: {
+    widths: number[];
+    days: number;
+    mode: "continuous" | "motion";
+    onDays: (days: number) => void;
+    onMode: (mode: "continuous" | "motion") => void;
+  };
   /** The "What to protect" checklist (shown in the Cameras and Review steps). */
   coverage?: React.ReactNode;
 };
@@ -261,6 +269,37 @@ export function StepPanel(props: Props) {
               <Download className="w-4 h-4 text-slate-400" /> More report options…
             </button>
           </div>
+          {props.storage.widths.length > 0 && (() => {
+            const e = estimateStorage(props.storage.widths, props.storage.days, props.storage.mode);
+            return (
+              <div className={card} data-testid="storage-estimate">
+                <div className="text-[10px] uppercase font-bold text-slate-400 mb-1.5">Recorder storage</div>
+                <div className="flex gap-1.5 mb-2">
+                  <select
+                    aria-label="Days to keep"
+                    value={props.storage.days}
+                    onChange={e => props.storage.onDays(Number(e.target.value))}
+                    className="bg-zinc-900 border border-white/10 rounded px-1.5 py-1 text-xs text-slate-200"
+                  >
+                    {[7, 14, 30, 60, 90].map(d => <option key={d} value={d}>{d} days</option>)}
+                  </select>
+                  <select
+                    aria-label="Recording mode"
+                    value={props.storage.mode}
+                    onChange={e => props.storage.onMode(e.target.value as "continuous" | "motion")}
+                    className="flex-1 bg-zinc-900 border border-white/10 rounded px-1.5 py-1 text-xs text-slate-200"
+                  >
+                    <option value="continuous">Record all the time</option>
+                    <option value="motion">Record on motion</option>
+                  </select>
+                </div>
+                <div className="text-sm text-slate-100">
+                  About <b>{e.tb < 1 ? e.tb.toFixed(1) : Math.round(e.tb * 10) / 10} TB</b>: get a <b>{e.driveTb} TB</b> drive
+                </div>
+                <div className="text-[11px] text-slate-500">{props.storage.widths.length} camera{props.storage.widths.length === 1 ? "" : "s"} · ~{e.mbps} Mbps total (H.265). An estimate; night and busy scenes use more.</div>
+              </div>
+            );
+          })()}
         </>
       )}
 

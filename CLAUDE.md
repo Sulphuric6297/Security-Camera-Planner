@@ -46,10 +46,11 @@ Useful commands:
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
 | `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), photo-textured roofs + roof picker, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
-| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu |
-| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall |
+| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens |
+| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid (pure logic) |
-| `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions (pure logic) |
+| `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions, recorder storage estimate (pure logic) |
+| `suggest.spec.ts` | "Suggest cameras": wall mounts that meet each spot's goal, one camera for nearby spots, nothing for covered spots, pole fallback (pure logic) |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
 | `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |

@@ -17,6 +17,7 @@ const cam = (over: Partial<ReportCamera> = {}): ReportCamera => ({
   recognizeFt: 36.8,
   detectFt: 184,
   blindSpotFt: 6.2,
+  irRangeFt: 100,
   covers: ["Door 1 (faces)"],
   ...over
 });
@@ -66,5 +67,22 @@ test.describe("report", () => {
     for (const id of ["coverage-checklist", "camera-schedule", "parts-list"]) expect(html).toContain(`id="${id}"`);
     expect(html.match(/<img /g)).toHaveLength(2); // plan + camera view
     expect(html).toContain("estimates");
+  });
+});
+
+import { estimateStorage, bitrateFor } from "../../src/lib/recording";
+
+test.describe("recording storage", () => {
+  test("adds up bitrates and sizes a drive", () => {
+    expect(bitrateFor(1920)).toBe(2);
+    expect(bitrateFor(2688)).toBe(3);
+    expect(bitrateFor(3840)).toBe(6);
+    // Two 4 MP cameras, 30 days continuous: 6 Mbps -> 6e6/8 * 86400 * 30 = 1.944 TB
+    const e = estimateStorage([2688, 2688], 30, "continuous");
+    expect(e.mbps).toBe(6);
+    expect(e.tb).toBeCloseTo(1.944, 3);
+    expect(e.driveTb).toBe(4);
+    // Motion-only records ~30% of the time
+    expect(estimateStorage([2688, 2688], 30, "motion").tb).toBeCloseTo(1.944 * 0.3, 3);
   });
 });

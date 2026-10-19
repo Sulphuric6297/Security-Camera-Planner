@@ -65,7 +65,7 @@ and previews that look exact without saying they are estimates.
   from far away.
 - Tests: roof meshes get the photo texture, roof type switch, model sizes sane, no WebGL errors.
 
-### Phase 2: a simpler, step-driven interface (done, except touch-size handles)
+### Phase 2: a simpler, step-driven interface (done)
 - **The steps drive the side panel.** Site = import/re-import, map, elevation. Buildings = list,
   trace a roof, add or draw. Cameras = camera list, add, outcome presets. Review = coverage
   checklist and blind spots (phase 3). Report = the report builder (phase 4). Remove the duplicate
@@ -99,7 +99,10 @@ and previews that look exact without saying they are estimates.
   dark style.
 - Tests: the PDF contains every section; the CSV lists each camera.
 
-### Phase 5: smart helpers
+### Phase 5: smart helpers (done: suggest cameras, night/IR check, storage estimate, touch-size handles)
+
+Not done: suggesting doors automatically. Building footprints don't say where doors are, so guesses
+would mostly be wrong. Marking them takes one click each.
 - **Suggest cameras:** a greedy layout that covers every target from eave corners, then the user
   edits it.
 - Night/IR range, storage estimate (days × bitrate), measure tool.

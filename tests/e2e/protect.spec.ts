@@ -91,4 +91,39 @@ test.describe("what to protect and coverage", () => {
     expect(cam.mount.type).toBe("building");
     expect(await itemsOfType(page, "building")).toHaveLength(1);
   });
+
+  test("Suggest cameras covers the spots that aren't covered yet", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5); // a 50 x 36 ft house
+    await page.keyboard.press("Escape");
+    await markSpot(page, 0.5, 0.57); // ~40 ft south of the house center (a door area)
+    await markSpot(page, 0.5, 0.43); // north side
+    await expect(page.getByTestId("coverage-score")).toHaveText("0 of 2 covered");
+    await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
+    await expect(page.getByTestId("coverage-score")).toHaveText("2 of 2 covered");
+    const cams = await itemsOfType(page, "camera");
+    expect(cams.length).toBeGreaterThanOrEqual(1);
+    expect(cams.every((c: any) => c.mount.type === "building")).toBe(true);
+    // One undo removes them all
+    await page.keyboard.press("Control+z");
+    expect(await itemsOfType(page, "camera")).toHaveLength(0);
+  });
+
+  test("night check limits cameras to their infrared reach", async ({ page }) => {
+    await markSpot(page, 0.5, 0.5);
+    await placeWithKey(page, "c", 0.5, 0.58); // ~67 ft away
+    await page.getByRole("group", { name: "Night vision reach" }).getByRole("button", { name: "50 ft" }).click();
+    await page.getByRole("button", { name: /→ Door 1/ }).click();
+    await page.keyboard.press("Escape");
+    // Door 1 only needs "notice someone": covered by day...
+    const pin = page.getByTestId("target-pin").first().locator("circle").nth(1);
+    const box = (await pin.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.getByRole("button", { name: "Notice someone" }).click();
+    await page.keyboard.press("Escape");
+    await expect.poll(() => status(page)).toBe("met");
+    // ...but not at night with a 50 ft infrared reach
+    await page.getByLabel("Check at night").check();
+    await expect.poll(() => status(page)).toBe("none");
+  });
 });
+

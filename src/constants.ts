@@ -17,6 +17,8 @@ export const COLORS = {
 export const DEFAULT_CANVAS = { width: 1000, height: 700 };
 // Realistic defaults (plan units are feet): a typical outdoor camera on a wall/eave with a ~4 mm lens.
 export const DEFAULT_CAMERA_HEIGHT_FT = 9;
+/** Typical infrared (night vision) reach of a home camera, ft (~30 m). */
+export const DEFAULT_IR_RANGE_FT = 100;
 export const DEFAULT_CAMERA_HFOV = 90;
 export const DEFAULT_CAMERA_PITCH = -15;
 export const DEFAULT_CAMERA_RANGE_FT = 100;

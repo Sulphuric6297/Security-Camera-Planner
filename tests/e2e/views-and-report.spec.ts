@@ -105,7 +105,16 @@ test.describe("3D, camera views and report", () => {
     await popup.waitForLoadState();
     await expect(popup.locator("#coverage-checklist tbody tr")).toHaveCount(1, { timeout: 15_000 });
     await expect(popup.locator("#coverage-checklist")).toContainText("Door 1");
+    await expect(popup.locator("#camera-schedule thead")).toContainText("Night (IR)");
+    await expect(popup.getByText(/TB of storage/)).toBeVisible();
     await popup.close();
+
+    // Storage estimate in the Report step follows the days kept
+    const est = page.getByTestId("storage-estimate");
+    await expect(est).toContainText("TB");
+    const before = await est.textContent();
+    await page.getByLabel("Days to keep").selectOption("90");
+    await expect(est).not.toHaveText(before!);
 
     const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: /camera list \(CSV\)/ }).click()]);
     expect(download.suggestedFilename()).toMatch(/\.csv$/);
