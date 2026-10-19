@@ -18,6 +18,16 @@ test.describe("cameras", () => {
     expect(Math.hypot(after.x - target.x, after.y - target.y)).toBeLessThan(12);
   });
 
+  test("hovering the map tells how far from the selected camera and what it sees there", async ({ page }) => {
+    await placeWithKey(page, "c", 0.5, 0.5);
+    const [cam] = await itemsOfType(page, "camera");
+    const p = await screenOf(page, cam.x, cam.y + 30); // 30 ft south
+    await page.mouse.move(p.x, p.y);
+    const readout = page.getByTestId("camera-readout");
+    await expect(readout).toHaveText(/^(29|30|31) ft from Camera 1: /);
+    await expect(readout).not.toContainText("px/ft"); // no jargon
+  });
+
   test("field of view and range handles", async ({ page }) => {
     await placeWithKey(page, "c", 0.5, 0.5);
     const [cam] = await itemsOfType(page, "camera");

@@ -40,6 +40,25 @@ test.describe("guided workflow and plan tools", () => {
     await expect(step(page, 2)).toHaveAttribute("data-done", "false");
   });
 
+  test("import: the Site step ticks only after importing, then the plan opens by itself", async ({ page }) => {
+    await page.getByRole("button", { name: "Find my property" }).click();
+    await page.getByLabel("Search address").fill("123 Main St Fra");
+    await page.getByRole("button", { name: /123 Main St/ }).click();
+    await expect(page.getByText(/of \d+ buildings will be added/)).toBeVisible();
+    // Finding the address is not importing the site
+    await expect(step(page, 0)).toHaveAttribute("data-done", "false");
+    await expect(page.getByTestId("step-panel")).toContainText("Your site");
+    await page.locator("div.fixed button", { hasText: "Import Site" }).last().click();
+    // The dialog closes by itself: the plan, the next step and a summary with a way into 3D
+    const summary = page.getByRole("status").filter({ hasText: /^Site imported\./ });
+    await expect(summary).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByLabel("Search address")).toBeHidden();
+    await expect(step(page, 0)).toHaveAttribute("data-done", "true");
+    await expect(page.getByTestId("step-panel")).toContainText("Buildings");
+    await summary.getByRole("button", { name: "View in 3D" }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__scpView.viewInfo().tiltDeg)).toBeGreaterThan(20);
+  });
+
   test("the selection action bar duplicates, rotates and deletes", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     const bar = page.getByRole("toolbar", { name: "Selection actions" });
@@ -77,7 +96,6 @@ test.describe("guided workflow and plan tools", () => {
 
   test("after importing a site the plan zooms to the property and shows north", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 2D" }).click();
     await expect(page.getByLabel("North arrow")).toBeVisible();
     // The 58 ft house fills a good part of the view, not a speck
     const [first] = await itemsOfType(page, "building");

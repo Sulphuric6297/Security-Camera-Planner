@@ -3,7 +3,8 @@
 //
 // Coordinates: building-local plan coordinates (x, y) map to three.js (x, z) with Y up.
 import * as THREE from "three";
-import { polygonArea } from "../lib/geometry";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { pointInPolygonXY, polygonArea } from "../lib/geometry";
 
 type P = { x: number; y: number };
 export type RoofKind = "flat" | "gable" | "hip";
@@ -64,17 +65,101 @@ export const orientedRect = (pts: P[]) => {
 };
 
 /**
- * Picks a roof the way most buildings look: houses and garages (small, roughly rectangular, not too
- * tall) get pitched roofs, everything else is flat.
+ * A footprint with square corners (an L, T, U...) as a few overlapping rectangles that together
+ * cover it exactly, each as its 4 corner points. Null if the outline isn't square-cornered.
+ * Each rectangle gets its own pitched roof; where they meet the roofs intersect like the
+ * cross-gables of a real house.
+ */
+export const rectilinearParts = (pts: P[]): P[][] | null => {
+  if (pts.length < 4 || pts.length > 16) return null;
+  let angle = 0;
+  let longest = 0;
+  pts.forEach((p, i) => {
+    const q = pts[(i + 1) % pts.length];
+    const len = Math.hypot(q.x - p.x, q.y - p.y);
+    if (len > longest) { longest = len; angle = Math.atan2(q.y - p.y, q.x - p.x); }
+  });
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const local = pts.map(p => ({ x: p.x * c + p.y * s, y: -p.x * s + p.y * c }));
+  // Every edge must run along one of the two directions.
+  for (let i = 0; i < local.length; i++) {
+    const p = local[i];
+    const q = local[(i + 1) % local.length];
+    const a = Math.abs(Math.atan2(q.y - p.y, q.x - p.x)) % (Math.PI / 2);
+    if (Math.min(a, Math.PI / 2 - a) > (6 * Math.PI) / 180) return null;
+  }
+  const tol = Math.max(0.5, longest * 0.02);
+  const cluster = (vals: number[]) => {
+    const out: number[] = [];
+    vals.slice().sort((a, b) => a - b).forEach(v => { if (!out.length || v - out[out.length - 1] > tol) out.push(v); });
+    return out;
+  };
+  const us = cluster(local.map(p => p.x));
+  const vs = cluster(local.map(p => p.y));
+  const nu = us.length - 1;
+  const nv = vs.length - 1;
+  if (nu < 1 || nv < 1) return null;
+  const inside: boolean[][] = [];
+  for (let i = 0; i < nu; i++) {
+    inside.push([]);
+    for (let j = 0; j < nv; j++) inside[i].push(pointInPolygonXY({ x: (us[i] + us[i + 1]) / 2, y: (vs[j] + vs[j + 1]) / 2 }, local));
+  }
+  const covered = inside.map(col => col.map(() => false));
+  const rects: [number, number, number, number][] = [];
+  const remaining = () => inside.some((col, i) => col.some((v, j) => v && !covered[i][j]));
+  while (remaining()) {
+    // The biggest all-inside rectangle that covers something still uncovered.
+    let best: [number, number, number, number] | null = null;
+    let bestArea = 0;
+    for (let i0 = 0; i0 < nu; i0++) for (let i1 = i0; i1 < nu; i1++) for (let j0 = 0; j0 < nv; j0++) for (let j1 = j0; j1 < nv; j1++) {
+      let ok = true;
+      let fresh = false;
+      for (let i = i0; i <= i1 && ok; i++) for (let j = j0; j <= j1; j++) {
+        if (!inside[i][j]) { ok = false; break; }
+        if (!covered[i][j]) fresh = true;
+      }
+      if (!ok || !fresh) continue;
+      const area = (us[i1 + 1] - us[i0]) * (vs[j1 + 1] - vs[j0]);
+      if (area > bestArea) { bestArea = area; best = [i0, i1, j0, j1]; }
+    }
+    if (!best || rects.length >= 6) return null;
+    rects.push(best);
+    for (let i = best[0]; i <= best[1]; i++) for (let j = best[2]; j <= best[3]; j++) covered[i][j] = true;
+  }
+  const back = (x: number, y: number) => ({ x: x * c - y * s, y: x * s + y * c });
+  return rects.map(([i0, i1, j0, j1]) => [back(us[i0], vs[j0]), back(us[i1 + 1], vs[j0]), back(us[i1 + 1], vs[j1 + 1]), back(us[i0], vs[j1 + 1])]);
+};
+
+// A footprint filling less of its bounding rectangle than this has a notch worth its own roof shape.
+const NOTCH_FILL = 0.97;
+
+/**
+ * Picks a roof the way most buildings look: houses and garages (small, not too tall, rectangular
+ * or square-cornered like an L or T) get pitched roofs, everything else is flat.
  */
 export const chooseRoof = (pts: P[], wallHeight: number, unitsPerFoot = 1): RoofKind => {
-  if (pts.length < 3 || pts.length > 10) return "flat";
+  if (pts.length < 3 || pts.length > 16) return "flat";
   const r = orientedRect(pts);
   const fill = polygonArea(pts) / Math.max(1e-6, 4 * r.a * r.b);
   const areaSqFt = polygonArea(pts) / (unitsPerFoot * unitsPerFoot);
-  const shortSideFt = (2 * r.b) / unitsPerFoot;
-  if (fill < 0.85 || areaSqFt > 4500 || shortSideFt < 10 || wallHeight / unitsPerFoot > 32) return "flat";
-  return r.a / Math.max(r.b, 1e-6) < 1.25 ? "hip" : "gable";
+  if (wallHeight / unitsPerFoot > 32) return "flat";
+  // Square-cornered shapes with a real notch (L, T, U) are roofed wing by wing.
+  const parts = pts.length > 4 && fill < NOTCH_FILL ? rectilinearParts(pts) : null;
+  if ((!parts || parts.length < 2) && fill >= 0.85 && pts.length <= 10) {
+    if (areaSqFt > 4500) return "flat";
+    if ((2 * r.b) / unitsPerFoot < 10) return "flat";
+    return r.a / Math.max(r.b, 1e-6) < 1.25 ? "hip" : "gable";
+  }
+  // Bigger houses come in wings (L, T, U); each wing is still house-sized.
+  if (areaSqFt > 7000) return "flat";
+  if (!parts || parts.length > 4) return "flat";
+  const wingsOk = parts.every(q => {
+    const w = Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y);
+    const d = Math.hypot(q[2].x - q[1].x, q[2].y - q[1].y);
+    return Math.min(w, d) / unitsPerFoot >= 10;
+  });
+  return wingsOk ? "gable" : "flat";
 };
 
 type RoofParts = {
@@ -98,6 +183,21 @@ const geometryFrom = (positions: number[]) => {
  * Pitched roofs only make sense on near-rectangular footprints; callers use chooseRoof().
  */
 export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave?: number; maxRise?: number } = {}): RoofParts => {
+  // L, T and other square-cornered shapes: one pitched roof per wing, intersecting.
+  if (kind !== "flat" && pts.length > 4) {
+    const r = orientedRect(pts);
+    const fill = polygonArea(pts) / Math.max(1e-6, 4 * r.a * r.b);
+    const parts = fill < NOTCH_FILL ? rectilinearParts(pts) : null;
+    if (parts && parts.length > 1) {
+      const built = parts.map(q => buildRoof(q, kind, opts));
+      const gables = built.map(b => b.gables).filter((g): g is THREE.BufferGeometry => !!g);
+      return {
+        roof: mergeGeometries(built.map(b => b.roof)) ?? built[0].roof,
+        gables: gables.length ? mergeGeometries(gables) : null,
+        rise: Math.max(...built.map(b => b.rise))
+      };
+    }
+  }
   if (kind === "flat") {
     const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, -p.y)));
     const g = new THREE.ShapeGeometry(shape);

@@ -57,6 +57,9 @@ export const vehicleDimensions = (type: VehicleType, unitsPerFoot = 1) => {
  * Builds a new item of the given kind at (x, y) in plan units. Camera heights are in feet;
  * everything else (footprints, wall/tree/vehicle heights) is in plan units like the rest of the 3D scene.
  */
+/** Whether cameras may be mounted on a building: the user's own buildings only. */
+export const isOwnBuilding = (b: { mine?: boolean; importSource?: string }) => b.mine ?? !b.importSource;
+
 export const createItem = (
   kind: NewItemKind,
   x: number,

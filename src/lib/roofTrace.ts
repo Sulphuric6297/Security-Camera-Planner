@@ -5,6 +5,8 @@
 export type TraceResult = {
   /** Rectangle corners in image pixels, clockwise. */
   corners: { x: number; y: number }[];
+  /** The roof's own outline (square corners, e.g. an L or T shape) in image pixels; null when it is a plain rectangle. */
+  outline: { x: number; y: number }[] | null;
   /** Region size in pixels and how much of the rectangle it fills (0-1). */
   pixelCount: number;
   fill: number;
@@ -17,6 +19,8 @@ type Options = {
   minPixels: number;
   /** Color tolerance (weighted Lab distance). */
   tolerance?: number;
+  /** Size of the grid used to follow the outline, in pixels (about 2-3 ft). */
+  cellPx?: number;
 };
 
 const toLab = (r: number, g: number, b: number) => {
@@ -77,11 +81,14 @@ const minAreaRect = (hull: { x: number; y: number }[]) => {
     if (!best || area < best.area) best = { area, angle, minU, maxU, minV, maxV };
   }
   if (!best) return null;
+  const angle = best.angle;
   const c = Math.cos(best.angle);
   const s = Math.sin(best.angle);
   const toXY = (u: number, v: number) => ({ x: u * c - v * s, y: u * s + v * c });
   return {
     area: best.area,
+    angle,
+    bounds: { minU: best.minU, maxU: best.maxU, minV: best.minV, maxV: best.maxV },
     corners: [toXY(best.minU, best.minV), toXY(best.maxU, best.minV), toXY(best.maxU, best.maxV), toXY(best.minU, best.maxV)]
   };
 };
@@ -191,5 +198,131 @@ export const traceRoof = (image: ImageData, seedX: number, seedY: number, option
   if (hull.length < 3) return null;
   const rect = minAreaRect(hull);
   if (!rect) return null;
-  return { corners: rect.corners, pixelCount: count, fill: Math.min(1, count / Math.max(rect.area, 1)) };
+  const fill = Math.min(1, count / Math.max(rect.area, 1));
+  const cell = Math.max(2, options.cellPx ?? Math.sqrt(options.minPixels) / 5);
+  const outline = fill < 0.93 ? squareOutline(mask, w, h, x0, y0, rect, cell) : null;
+  return { corners: rect.corners, outline, pixelCount: count, fill };
+};
+
+/**
+ * The region's outline with square corners, lined up with its rectangle: sample the mask on a grid
+ * in the rectangle's frame, drop specks and fill notches smaller than a few cells, then follow
+ * the grid's border. Returns null when the shape is too ragged to be a building outline.
+ */
+const squareOutline = (
+  mask: Uint8Array, w: number, h: number, x0: number, y0: number,
+  rect: { angle: number; bounds: { minU: number; maxU: number; minV: number; maxV: number } },
+  cell: number
+) => {
+  const c = Math.cos(rect.angle);
+  const s = Math.sin(rect.angle);
+  const { minU, maxU, minV, maxV } = rect.bounds;
+  const nu = Math.max(1, Math.round((maxU - minU) / cell));
+  const nv = Math.max(1, Math.round((maxV - minV) / cell));
+  if (nu * nv > 40000) return null;
+  const cu = (maxU - minU) / nu;
+  const cv = (maxV - minV) / nv;
+  const toXY = (u: number, v: number) => ({ x: u * c - v * s, y: u * s + v * c });
+  let grid = new Uint8Array(nu * nv);
+  for (let j = 0; j < nv; j++) {
+    for (let i = 0; i < nu; i++) {
+      let hits = 0;
+      for (let a = 0; a < 3; a++) {
+        for (let b = 0; b < 3; b++) {
+          const p = toXY(minU + (i + (a + 0.5) / 3) * cu, minV + (j + (b + 0.5) / 3) * cv);
+          const x = Math.round(p.x) - x0;
+          const y = Math.round(p.y) - y0;
+          if (x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x]) hits++;
+        }
+      }
+      grid[j * nu + i] = hits >= 5 ? 1 : 0;
+    }
+  }
+  const at = (g: Uint8Array, i: number, j: number) => (i < 0 || j < 0 || i >= nu || j >= nv ? 0 : g[j * nu + i]);
+  const morph = (g: Uint8Array, grow: boolean) => {
+    const out = new Uint8Array(nu * nv);
+    for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+      let any = 0, all = 1;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const v = at(g, i + di, j + dj);
+        any |= v;
+        all &= v;
+      }
+      out[j * nu + i] = grow ? any : all;
+    }
+    return out;
+  };
+  // Close small notches, then remove thin bits (3-cell features and smaller).
+  grid = morph(morph(grid, true), false);
+  grid = morph(morph(grid, false), true);
+  // Fill holes: anything not reachable from the border's empty cells is inside.
+  const outside = new Uint8Array(nu * nv);
+  const stack: number[] = [];
+  for (let i = 0; i < nu; i++) { stack.push(i, (nv - 1) * nu + i); }
+  for (let j = 0; j < nv; j++) { stack.push(j * nu, j * nu + nu - 1); }
+  while (stack.length) {
+    const k = stack.pop()!;
+    if (outside[k] || grid[k]) continue;
+    outside[k] = 1;
+    const i = k % nu, j = (k - i) / nu;
+    if (i > 0) stack.push(k - 1);
+    if (i < nu - 1) stack.push(k + 1);
+    if (j > 0) stack.push(k - nu);
+    if (j < nv - 1) stack.push(k + nu);
+  }
+  for (let k = 0; k < nu * nv; k++) grid[k] = outside[k] ? 0 : 1;
+  // Border edges (clockwise on screen), chained into a loop.
+  const next = new Map<string, [number, number]>();
+  const key = (i: number, j: number) => `${i},${j}`;
+  let start: [number, number] | null = null;
+  for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+    if (!grid[j * nu + i]) continue;
+    const add = (a: [number, number], b: [number, number]) => { next.set(key(...a), b); start ??= a; };
+    if (!at(grid, i, j - 1)) add([i, j], [i + 1, j]);
+    if (!at(grid, i + 1, j)) add([i + 1, j], [i + 1, j + 1]);
+    if (!at(grid, i, j + 1)) add([i + 1, j + 1], [i, j + 1]);
+    if (!at(grid, i - 1, j)) add([i, j + 1], [i, j]);
+  }
+  if (!start) return null;
+  const loop: [number, number][] = [];
+  let p: [number, number] = start;
+  for (let guard = 0; guard < next.size + 1; guard++) {
+    loop.push(p);
+    const n = next.get(key(...p));
+    if (!n) return null;
+    p = n;
+    if (p[0] === start[0] && p[1] === start[1]) break;
+  }
+  // Keep only the corners
+  const onlyCorners = (pts: [number, number][]) => pts.filter((q, k) => {
+    const a = pts[(k - 1 + pts.length) % pts.length];
+    const b = pts[(k + 1) % pts.length];
+    return (q[0] - a[0]) * (b[1] - q[1]) - (q[1] - a[1]) * (b[0] - q[0]) !== 0;
+  });
+  let corners = onlyCorners(loop);
+  // Straighten one-cell jogs (a "Z" step in an edge): line the shorter side up with the longer.
+  for (let pass = 0; pass < 20 && corners.length > 4; pass++) {
+    const n = corners.length;
+    const k = corners.findIndex((a, idx) => {
+      const b = corners[(idx + 1) % n];
+      return Math.abs(b[0] - a[0]) + Math.abs(b[1] - a[1]) <= 1;
+    });
+    if (k < 0) break;
+    const P = corners[(k - 1 + n) % n], A = corners[k], B = corners[(k + 1) % n], N = corners[(k + 2) % n];
+    const dirPA = [Math.sign(A[0] - P[0]), Math.sign(A[1] - P[1])];
+    const dirBN = [Math.sign(N[0] - B[0]), Math.sign(N[1] - B[1])];
+    if (dirPA[0] !== dirBN[0] || dirPA[1] !== dirBN[1]) break; // a notch, not a step
+    const lenPA = Math.abs(A[0] - P[0]) + Math.abs(A[1] - P[1]);
+    const lenBN = Math.abs(N[0] - B[0]) + Math.abs(N[1] - B[1]);
+    const next = corners.slice();
+    if (lenPA >= lenBN) {
+      // move N onto A's line (N slides along its other edge)
+      next[(k + 2) % n] = dirPA[0] !== 0 ? [N[0], A[1]] : [A[0], N[1]];
+    } else {
+      next[(k - 1 + n) % n] = dirPA[0] !== 0 ? [P[0], B[1]] : [B[0], P[1]];
+    }
+    corners = onlyCorners(next.filter((_, idx) => idx !== k && idx !== (k + 1) % n));
+  }
+  if (corners.length < 4 || corners.length > 14) return null;
+  return corners.map(([i, j]) => toXY(minU + i * cu, minV + j * cv));
 };

@@ -139,6 +139,24 @@ Figma, SketchUp, Blender and three.js editor patterns) points to one view with o
   "from the photo", replaced on re-import, and listed in the import message so wrong ones get removed.
 - The printed plan is a clean vector drawing of the whole site (`src/lib/planSvg.ts`).
 
+### Workflow walkthrough fixes (done)
+
+From walking the whole flow on screen (`npm run look -- -g flow`):
+
+- Imported buildings take their real roof outline from the photo (L, T, notches) when it clearly
+  matches the map data; otherwise they keep the map's outline. "Fit outline to the photo" redoes
+  it for one building. Roofs follow every wing, and a notch stays open instead of being roofed over.
+- Roofs are clearly darker than walls, so their shape reads from above.
+- "My building": the house at the searched address is marked as yours; Suggest cameras only
+  mounts on your buildings.
+- Import closes by itself and lands on the plan (and the next step) with a short summary and a
+  "View in 3D" button; where the imagery and elevation came from is on the Site step.
+- The Site step is ticked only once the site is imported, not when the address is found.
+- Map display toggles (elevation, photo on roofs) share one row; hover readouts show only when
+  useful ("30 ft from Camera 1: recognize", elevation only while elevation is shown).
+- The camera view is a window you drag (snaps to edges), resize or minimize; it opens clear of
+  the camera and the inspector.
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

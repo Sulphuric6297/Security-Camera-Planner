@@ -22,7 +22,8 @@ test.describe("Import Site", () => {
     const done = page.getByText(/^Site imported\./);
     await expect(done).toBeVisible({ timeout: 60_000 });
     await expect(done).toContainText("Added 2 buildings");
-    await expect(done).toContainText("global terrain tiles"); // USGS stubbed as unavailable
+    // Where the imagery and elevation came from is on the Site step
+    await expect(page.getByTestId("step-panel")).toContainText("global terrain tiles"); // USGS stubbed as unavailable
 
     const p = await project(page);
     expect(p.backgroundImg).toMatch(/^data:image\/jpeg/);
@@ -35,6 +36,11 @@ test.describe("Import Site", () => {
     const buildings = await itemsOfType(page, "building");
     expect(buildings).toHaveLength(2);
     expect(buildings.every(b => b.importSource === "osm")).toBe(true);
+    // The house at the searched address is marked as the user's; the neighbor's isn't.
+    expect(buildings.filter(b => b.mine).length).toBe(1);
+    // The map data has the house as a square, but its roof on the photo is an L: import takes the photo's shape.
+    const house = buildings.find(b => b.mine)!;
+    expect(house.points).toHaveLength(6);
 
     // The tree crown and the parked car on the photo were placed as a tree and a vehicle
     await expect(done).toContainText(/Placed 1 tree and 1 parked car found on the photo/);
@@ -53,7 +59,7 @@ test.describe("Import Site", () => {
     expect(Math.hypot(car.x - carAt.x, car.y - carAt.y)).toBeLessThan(4);
     expect(Math.round(car.rotation) % 180).toBe(90); // parked east-west
 
-    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
     await expect(page.getByRole("tab", { name: "3D" })).toHaveAttribute("aria-selected", "true");
   });
 
@@ -74,7 +80,6 @@ test.describe("Import Site", () => {
 
   test("re-import keeps edited building heights and mounted cameras", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 2D" }).click();
     // Edit an imported building's height through the store's UI path: select and use the slider
     const before = await itemsOfType(page, "building");
     const target = before[0];

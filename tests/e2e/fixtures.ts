@@ -36,8 +36,10 @@ const terrariumTile = (z: number, x: number) => {
 export const DETECTED_OFFSET_M = { east: -4, north: 3 };
 const M_PER_DEG = 111320;
 export const DETECTED_CENTER = { lat: SITE.lat + 0.00025, lon: SITE.lon + 0.0003 };
+// The house's roof on the photo is L-shaped (its south-east corner is a patio), though the map data
+// has it as a plain square, so import has to take the shape from the photo.
 export const ROOFS = [
-  { lat: SITE.lat, lon: SITE.lon, d: 0.00008, color: [70, 72, 78] },
+  { lat: SITE.lat, lon: SITE.lon, d: 0.00008, color: [70, 72, 78], notch: true },
   {
     lat: DETECTED_CENTER.lat - DETECTED_OFFSET_M.north / M_PER_DEG,
     lon: DETECTED_CENTER.lon - DETECTED_OFFSET_M.east / (M_PER_DEG * Math.cos((SITE.lat * Math.PI) / 180)),
@@ -83,9 +85,12 @@ const imageryTile = (z: number, tx: number, ty: number) => {
       if (Math.abs(carE) < PHOTO_CAR.drivewayM / 2 && Math.abs(carN) < PHOTO_CAR.drivewayM / 2) col = [95 + n * 0.2, 95 + n * 0.2, 98 + n * 0.2];
       if (Math.abs(carE) < PHOTO_CAR.lengthM / 2 && Math.abs(carN) < PHOTO_CAR.widthM / 2) col = [180, 30, 35];
       for (const r of ROOFS) {
-        const dLon = r.d; // same shape as the stub footprints (square() offsets lat and lon equally)
-        const inRoof = Math.abs(lat - r.lat) <= r.d && Math.abs(lon - r.lon) <= dLon;
-        const inShadow = !inRoof && Math.abs(lat + shadowDeg - r.lat) <= r.d && Math.abs(lon - shadowDeg - r.lon) <= dLon;
+        // same shape as the stub footprints (square() offsets lat and lon equally), less the notch
+        const roofAt = (la: number, lo: number) =>
+          Math.abs(la - r.lat) <= r.d && Math.abs(lo - r.lon) <= r.d &&
+          !("notch" in r && la - r.lat < -r.d / 3 && lo - r.lon > r.d / 3);
+        const inRoof = roofAt(lat, lon);
+        const inShadow = !inRoof && roofAt(lat + shadowDeg, lon - shadowDeg);
         if (inShadow) col = col.map(v => v * 0.45);
         if (inRoof) col = r.color.map(v => v * (lat > r.lat ? 1.12 : 0.88) + n * 0.3);
       }
