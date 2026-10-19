@@ -23,7 +23,7 @@ test.describe("3D, camera views and report", () => {
 
   test("3D overview of a large site: no fog, sun shadows cover the whole site", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
     await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
     const info = await page.evaluate(() => {
       const t = (window as any).__scpThree();
@@ -49,7 +49,7 @@ test.describe("3D, camera views and report", () => {
 
   test("3D buildings get real roofs, solid by default; photo roofs are an option; the roof can be changed", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 3D" }).click();
+    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
     await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
     const roofs = () =>
       page.evaluate(() => {
@@ -85,7 +85,9 @@ test.describe("3D, camera views and report", () => {
     await expect(win).toBeVisible();
     const map = (await page.getByTestId("plan").boundingBox())!;
     const box = (await win.boundingBox())!;
-    expect(Math.abs(box.x + box.width / 2 - (map.x + map.width / 2))).toBeLessThan(4);
+    // Centered in the part of the map not covered by the edit panel on the right
+    const panel = (await page.getByLabel("Inspector").boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - (map.x + (panel.x - map.x) / 2))).toBeLessThan(4);
     expect(box.y + box.height).toBeGreaterThan(map.y + map.height * 0.6);
 
     // Drag it by the title bar
@@ -101,11 +103,24 @@ test.describe("3D, camera views and report", () => {
     expect((await win.boundingBox())!.width).toBeCloseTo(box.width + 120, -1);
     await expect.poll(() => win.locator("canvas").evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(500);
 
+    // Let go near the left edge: it snaps flush to it
+    const bar2 = (await win.getByTestId("window-titlebar").boundingBox())!;
+    const map2 = (await page.getByTestId("plan").boundingBox())!;
+    await drag(page, { x: (await win.boundingBox())!.x + 60, y: bar2.y + 10 }, { x: map2.x + 25 + 60, y: bar2.y + 10 });
+    await expect.poll(async () => Math.round((await win.boundingBox())!.x - map2.x)).toBe(12);
+
+    // Minimize to the title bar, then bring the picture back
+    await win.getByRole("button", { name: "Minimize" }).click();
+    await expect(win.locator("canvas")).toHaveCount(0);
+    await win.getByRole("button", { name: "Expand" }).click();
+    await expect(win.locator("canvas")).toHaveCount(1);
+    const placed = (await win.boundingBox())!;
+
     // Where you put it is remembered
     await page.waitForTimeout(1200); // autosave
     await page.reload();
     await page.evaluate(() => (window as any).__scpSelect((window as any).__scpProject().items[0].id));
-    await expect.poll(async () => Math.round((await win.boundingBox())!.x)).toBe(Math.round(moved.x));
+    await expect.poll(async () => Math.round((await win.boundingBox())!.x)).toBe(Math.round(placed.x));
   });
 
   test("Camera wall shows one tile per camera", async ({ page }) => {

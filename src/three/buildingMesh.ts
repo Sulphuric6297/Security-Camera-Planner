@@ -54,7 +54,8 @@ export const createBuildingModel = (b: BuildingItem, baseHeight: number, opts: {
   const parts = buildRoof(pts, kind, { pitch: 0.45, eave: 1.5 * upf, maxRise: Math.min(12 * upf, wallHeight * 0.6) });
   const photo = opts.photo ?? null;
   if (photo) applyPhotoUVs(parts.roof, { x: b.x, y: b.y, rotation: b.rotation }, photo.rect);
-  const roofColor = photo ? new THREE.Color(0xffffff) : kind === "flat" ? mix(b.color, "#8a9099", 0.62) : mix(b.color, "#3d4450", 0.7);
+  // Roofs clearly darker than the walls, so the roof shape reads from above.
+  const roofColor = photo ? new THREE.Color(0xffffff) : kind === "flat" ? mix(b.color, "#5f6670", 0.75) : mix(b.color, "#2c323b", 0.85);
   const roof = new THREE.Mesh(parts.roof, new THREE.MeshStandardMaterial({
     color: roofColor,
     map: photo?.texture ?? null,

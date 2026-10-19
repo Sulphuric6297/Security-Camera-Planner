@@ -97,6 +97,8 @@ export interface CameraItem extends BaseItem {
 export interface BuildingItem extends BaseItem {
   type: "building";
   importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
+  /** One of the user's own buildings (cameras can be mounted on it). Unset: buildings the user drew are, imported ones aren't. */
+  mine?: boolean;
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)

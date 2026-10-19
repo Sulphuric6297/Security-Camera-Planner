@@ -75,7 +75,7 @@ import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, 
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
-import { TARGET_KINDS, VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
@@ -557,7 +557,7 @@ export default function SecurityPlanner() {
 
   const formatElevation = (value: number) => `${value >= 0 ? "" : "-"}${Math.abs(value) < 10 ? Math.abs(value).toFixed(1) : Math.round(Math.abs(value))} ft`;
 
-  // "32 ft from Camera 2 · 52 px/ft · Recognize" under the cursor while a camera is selected.
+  // "32 ft from Camera 2: recognize" for the point under the cursor while a camera is selected.
   const updateCameraReadout = (x: number, y: number) => {
     const el = cameraReadoutRef.current;
     if (!el) return;
@@ -569,14 +569,19 @@ export default function SecurityPlanner() {
     const pos = getCameraPlanPosition(cam);
     const dist = Math.hypot(x - pos.x, y - pos.y);
     const level = doriLevelAt(cam, dist);
+    if (dist < 3) {
+      el.style.opacity = "0";
+      return;
+    }
     el.style.opacity = "1";
-    el.textContent = `${Math.round(dist)} ft from ${cam.label} · ${Math.round(pixelsPerFootAt(cam, dist))} px/ft · ${level ? level.label : "Too far"}`;
+    el.textContent = `${Math.round(dist)} ft from ${cam.label}: ${level ? level.label.toLowerCase() : "too far to see"}`;
   };
 
   const updateElevationReadout = (x: number, y: number) => {
     const el = elevationReadoutRef.current;
     if (!el) return;
-    if (x < 0 || y < 0 || x > canvasSize.width || y > canvasSize.height || !hasTerrain) {
+    // Only while elevation is on show (or being shaped); otherwise it's noise.
+    if (x < 0 || y < 0 || x > canvasSize.width || y > canvasSize.height || !hasTerrain || (elevationOverlay === "off" && !isTerrainMode)) {
       el.style.opacity = "0";
       return;
     }
@@ -1130,6 +1135,22 @@ export default function SecurityPlanner() {
           buildingText = " Couldn't reach the building services. Draw buildings over the satellite image with the Building tool.";
         } else {
           const newBuildings = buildingsFromOsm(osm, geoBounds, area, unitsPerFoot);
+          // The building at the searched address is the user's (cameras go on it); others are neighbors.
+          {
+            const at = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
+            const outline = (b: BuildingItem) => (b.points ?? []).map(p => ({ x: b.x + p.x, y: b.y + p.y }));
+            const home = newBuildings.find(b => pointInPolygonXY(at, outline(b)))
+              ?? newBuildings.filter(b => Math.hypot(b.x - at.x, b.y - at.y) < 60 * unitsPerFoot).sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y) - Math.hypot(b.x - at.x, b.y - at.y))[0];
+            newBuildings.forEach(b => { b.mine = b === home; });
+          }
+          // Take each roof's real shape from the photo (Ls, Ts, notches) where it clearly matches.
+          if (imagery === "satellite" && importedImage) {
+            setElevationStatus({ state: "loading", message: "Matching buildings to the roofs on the photo…" });
+            for (const b of newBuildings.slice(0, 80)) {
+              const outline = await photoOutlineFor(b, unitsPerFoot).catch(() => null);
+              if (outline) Object.assign(b, reshapeKeepingRotation(b, outline));
+            }
+          }
           setItems(prev => {
             // Re-import: keep identity and user edits (height, name, color) of buildings that are still
             // there, so cameras mounted on them stay attached.
@@ -1140,7 +1161,7 @@ export default function SecurityPlanner() {
               const match = oldImported.find(ob => !used.has(ob.id) && pointInPolygonXY({ x: ob.x, y: ob.y }, worldPoly));
               if (!match) return nb;
               used.add(match.id);
-              return { ...nb, id: match.id, wallHeight: match.wallHeight ?? nb.wallHeight, label: match.label || nb.label, color: match.color };
+              return { ...nb, id: match.id, wallHeight: match.wallHeight ?? nb.wallHeight, label: match.label || nb.label, color: match.color, mine: match.mine ?? nb.mine };
             });
             const keptIds = new Set(merged.map(b => b.id));
             const rest = prev
@@ -1162,7 +1183,7 @@ export default function SecurityPlanner() {
           const near = boundsOfPoints(nearby.flatMap(b => (b.points ?? []).map(p => ({ x: b.x + p.x, y: b.y + p.y }))));
           if (near) requestFit(near, { margin: 1.4, minSpan: 220 * unitsPerFoot });
           buildingText = newBuildings.length > 0
-            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
+            ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}.`
             : " No buildings were added. Draw them over the satellite image with the Building tool.";
         }
       }
@@ -1190,10 +1211,14 @@ export default function SecurityPlanner() {
       const reliefText = reliefFt < 1
         ? "Nearly flat (under 1 ft of change)."
         : `${Math.round(reliefFt)} ft of elevation change${exaggeration !== 1 ? ` (shown ${exaggeration}× taller)` : ""}.`;
-      setElevationStatus({
-        state: "done",
-        message: `Site imported. ${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${buildingText}${objectsText}${partialImagery ? " Some map tiles were unavailable." : ""}`
-      });
+      const details = `${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${partialImagery ? " Some map tiles were unavailable." : ""}`;
+      const summary = `Site imported.${buildingText}${objectsText}`;
+      setElevationStatus({ state: "done", message: `${summary} ${details}` });
+      setSiteDetails(details);
+      // Straight to the plan: the summary stays up a while, with a way into 3D.
+      setShowElevationDialog(false);
+      setViewMode("plan");
+      showExportNotice(summary, "success", { label: "View in 3D", run: () => setViewMode("iso3d") }, 15000);
       window.setTimeout(() => saveHistory(undefined, terrainHeightsRef.current), 400);
     } catch (err) {
       console.error("Failed to import site", err);
@@ -1310,6 +1335,8 @@ export default function SecurityPlanner() {
   }, [completedSteps]);
   // Which workflow step's panel is showing (null = follow progress: the first unfinished step).
   const [activeStepChoice, setActiveStepChoice] = useState<WorkflowStepId | null>(null);
+  // Where the imported site's imagery and elevation came from (shown on the Site step).
+  const [siteDetails, setSiteDetails] = useState<string | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
   // View preference: DORI coverage bands in the 2D cones (remembered per browser).
   const [showDoriZones, setShowDoriZones] = useState(() => {
@@ -1852,6 +1879,7 @@ export default function SecurityPlanner() {
     setMapMoveMode(false);
     setTerrainHeights({});
     setSiteLocation(null);
+    setSiteDetails(null);
     setSiteBounds(null);
     setPlanGeoRef(null);
     setElevationQuery("");
@@ -1873,10 +1901,12 @@ export default function SecurityPlanner() {
 
   // --- Auto-trace a roof from the satellite map ---
   const roofImageCacheRef = useRef<{ src: string; data: ImageData } | null>(null);
+  // Reads the live photo (refs, not render state), so it also works in the middle of an import.
   const getMapImageData = () => {
+    const url = backgroundImgRef.current;
     const img = bgImageRef.current;
-    if (!backgroundImg || !img || !img.naturalWidth) return null;
-    if (roofImageCacheRef.current?.src === backgroundImg) return roofImageCacheRef.current.data;
+    if (!url || !img || !img.naturalWidth || img.src !== url) return null;
+    if (roofImageCacheRef.current?.src === url) return roofImageCacheRef.current.data;
     const canvas = document.createElement("canvas");
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
@@ -1884,72 +1914,118 @@ export default function SecurityPlanner() {
     if (!ctx) return null;
     ctx.drawImage(img, 0, 0);
     const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    roofImageCacheRef.current = { src: backgroundImg, data };
+    roofImageCacheRef.current = { src: url, data };
     return data;
   };
 
-  const traceRoofAt = async (pos: { x: number; y: number }) => {
+  // Finds the roof under a plan point on the photo: its outline (square corners: rectangles, Ls,
+  // Ts...) in plan coordinates, or null.
+  const findRoofOutline = async (pos: { x: number; y: number }, unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1) => {
+    const url = backgroundImgRef.current;
     // The photo may still be decoding right after it was added.
-    if (backgroundImg && !bgImageRef.current?.naturalWidth) {
-      bgImageRef.current = await loadImageElement(backgroundImg).catch(() => null);
-    }
+    if (url && bgImageRef.current?.src !== url) bgImageRef.current = await loadImageElement(url).catch(() => null);
+    if (url && !bgImageRef.current?.naturalWidth) bgImageRef.current = await loadImageElement(url).catch(() => null);
     const data = getMapImageData();
-    if (!data) {
-      showExportNotice("Import your site (satellite map) first, then click a roof.", "info");
-      return;
-    }
-    const pxPerUnitX = data.width / bgSettings.width;
-    const pxPerUnitY = data.height / bgSettings.height;
-    const ix = (pos.x - bgSettings.x) * pxPerUnitX;
-    const iy = (pos.y - bgSettings.y) * pxPerUnitY;
-    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
-    const result = traceRoof(data, ix, iy, {
+    if (!data) return { error: "no-photo" as const };
+    const bg = bgSettingsRef.current;
+    const pxPerUnitX = data.width / bg.width;
+    const pxPerUnitY = data.height / bg.height;
+    const result = traceRoof(data, (pos.x - bg.x) * pxPerUnitX, (pos.y - bg.y) * pxPerUnitY, {
       maxRadius: 90 * unitsPerFoot * pxPerUnitX, // roofs up to ~180 ft across
-      minPixels: 120 * unitsPerFoot * unitsPerFoot * pxPerUnitX * pxPerUnitY // at least ~120 sq ft
+      minPixels: 120 * unitsPerFoot * unitsPerFoot * pxPerUnitX * pxPerUnitY, // at least ~120 sq ft
+      cellPx: 2.5 * unitsPerFoot * pxPerUnitX // follow the outline to about 2.5 ft
     });
-    if (!result) {
-      showExportNotice("Couldn't find a roof edge there. Try clicking the middle of a roof, or draw it with the Building tool.", "error");
+    if (!result) return { error: "none" as const };
+    const outline = (result.outline ?? result.corners).map(p => ({ x: bg.x + p.x / pxPerUnitX, y: bg.y + p.y / pxPerUnitY }));
+    return { outline, rough: !result.outline && result.fill < 0.7 };
+  };
+
+  /**
+   * The roof outline on the photo for a building from map data, when it clearly is the same
+   * building (about the same size and place); null to keep the map data's outline.
+   */
+  const photoOutlineFor = async (b: BuildingItem, unitsPerFoot: number) => {
+    const current = getBuildingEdgePointsWorld(b);
+    const found = await findRoofOutline({ x: b.x, y: b.y }, unitsPerFoot);
+    if ("error" in found) return null;
+    const a0 = polygonArea(current);
+    const a1 = polygonArea(found.outline);
+    if (a1 < a0 * 0.55 || a1 > a0 * 1.8) return null;
+    const c1 = found.outline.reduce((s, p) => ({ x: s.x + p.x / found.outline.length, y: s.y + p.y / found.outline.length }), { x: 0, y: 0 });
+    if (Math.hypot(c1.x - b.x, c1.y - b.y) > Math.sqrt(a0) * 0.35) return null;
+    if (!pointInPolygonXY({ x: b.x, y: b.y }, found.outline)) return null;
+    return found.outline;
+  };
+
+  // A building item from a plan outline, centered on its bounding box.
+  const buildingShapeFrom = (outline: { x: number; y: number }[]) => {
+    const b = getPointsBounds(outline);
+    const cx = b.minX + b.width / 2;
+    const cy = b.minY + b.height / 2;
+    return { x: cx, y: cy, rotation: 0, width: b.width, height: b.height, points: outline.map(p => ({ x: p.x - cx, y: p.y - cy })) };
+  };
+
+  // New outline for a building, keeping its rotation (cameras mounted on it would swing otherwise).
+  const reshapeKeepingRotation = (b: BuildingItem, outline: { x: number; y: number }[]) => {
+    const shape = buildingShapeFrom(outline);
+    const points = outline.map(p => rotatePoint({ x: p.x - shape.x, y: p.y - shape.y }, -b.rotation));
+    const lb = getPointsBounds(points);
+    return { x: shape.x, y: shape.y, points, width: lb.width, height: lb.height };
+  };
+
+  const traceRoofAt = async (pos: { x: number; y: number }) => {
+    const found = await findRoofOutline(pos);
+    if ("error" in found) {
+      showExportNotice(found.error === "no-photo"
+        ? "Import your site (satellite map) first, then click a roof."
+        : "Couldn't find a roof edge there. Try clicking the middle of a roof, or draw it with the Building tool.", found.error === "no-photo" ? "info" : "error");
       return;
     }
-    const corners = result.corners.map(c => ({ x: bgSettings.x + c.x / pxPerUnitX, y: bgSettings.y + c.y / pxPerUnitY }));
-    const cx = corners.reduce((sum, c) => sum + c.x, 0) / corners.length;
-    const cy = corners.reduce((sum, c) => sum + c.y, 0) / corners.length;
-    const points = corners.map(c => ({ x: c.x - cx, y: c.y - cy }));
-    const bounds = getPointsBounds(points);
+    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
     const building: BuildingItem = {
       id: generateId(),
       type: "building",
-      x: cx,
-      y: cy,
-      rotation: 0,
-      width: bounds.width,
-      height: bounds.height,
+      ...buildingShapeFrom(found.outline),
       wallHeight: Math.round(DEFAULT_BUILDING.wallHeight * unitsPerFoot),
       label: "Building",
-      color: COLORS.building[0],
-      points
+      color: COLORS.building[0]
     };
-    const nextItems = [...items, building];
+    const nextItems = [...currentItemsRef.current, building];
     setItems(nextItems);
     saveHistory(nextItems);
     showExportNotice(
-      result.fill < 0.7
+      found.rough
         ? "Traced a building — the shape may be rough; drag its corners to match the roof."
         : "Traced a building. Click more roofs, or press Esc when done.",
       "success"
     );
   };
 
+  // Reshape a building (e.g. a rough outline from map data) to the roof seen on the photo.
+  const fitBuildingToPhoto = async (id: string) => {
+    const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+    if (!b) return;
+    const outline = await photoOutlineFor(b, planGeoRef?.unitsPerFoot ?? 1);
+    if (!outline) {
+      showExportNotice("Couldn't make out this roof's outline on the photo. Drag its corners to match instead.", "error");
+      return;
+    }
+    updateItem(id, reshapeKeepingRotation(b, outline));
+    setTimeout(() => saveHistory(), 50);
+    showExportNotice("Outline matched to the roof on the photo.", "success", { label: "Undo", run: handleUndo });
+  };
+
   const showExportNotice = (
     message: string,
     tone: 'success' | 'error' | 'info' = 'success',
-    action?: { label: string; run: () => void }
+    action?: { label: string; run: () => void },
+    duration = action ? 7000 : 5000
   ) => {
     setExportNotice({ id: Date.now(), message, tone, action });
     if (exportNoticeTimerRef.current) {
       window.clearTimeout(exportNoticeTimerRef.current);
     }
-    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), action ? 6000 : 3000);
+    exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), duration);
   };
 
   const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -3483,7 +3559,12 @@ export default function SecurityPlanner() {
   // "Suggest cameras": add wall/pole cameras that cover the spots that aren't covered yet.
   const handleSuggestCameras = () => {
     const upf = coverageModel.upf;
-    const buildings = (items.filter(i => i.type === "building") as BuildingItem[]).map(b => ({
+    const own = (items.filter(i => i.type === "building") as BuildingItem[]).filter(b => isOwnBuilding(b));
+    if (own.length === 0 && items.some(i => i.type === "building")) {
+      showExportNotice("Mark which building is yours first (click it, then \"My building\"), so cameras go on it.", "info");
+      return;
+    }
+    const buildings = own.map(b => ({
       id: b.id,
       points: getBuildingEdgePointsWorld(b),
       heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf,
@@ -3718,7 +3799,8 @@ export default function SecurityPlanner() {
   // doesn't finish a step.
   const allSpotsCovered = targetItems.length > 0 && targetItems.every(t => targetResults.get(t.id)?.met);
   const workflowStepsDone: Record<WorkflowStepId, boolean> = {
-    site: !!backgroundImg || !!siteLocation || completedSteps.includes("site"),
+    // Done once the site is in the plan (finding the address isn't enough).
+    site: !!backgroundImg || !!planGeoRef || completedSteps.includes("site"),
     buildings: completedSteps.includes("buildings"),
     cameras: completedSteps.includes("cameras") || allSpotsCovered,
     review: completedSteps.includes("review"),
@@ -3729,6 +3811,7 @@ export default function SecurityPlanner() {
   // A step shows its panel (a workspace with that step's tools); it never locks the user in.
   const handleWorkflowStep = (step: WorkflowStepId) => {
     setActiveStepChoice(step);
+    setExportNotice(null);
     setSelectedId(null);
     setRightPanelMode("properties");
     setIsRightPanelOpen(true);
@@ -3757,7 +3840,8 @@ export default function SecurityPlanner() {
 
   const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
   const cameraAspect = getCameraAspectValue(selectedCamera);
-  const cameraPreviewWidth = previewWidth;
+  // Drawn at the screen's pixel density so the picture is sharp.
+  const cameraPreviewWidth = Math.round(previewWidth * Math.min(2, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1));
   const cameraPreviewHeight = Math.round(cameraPreviewWidth / cameraAspect);
   const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
   const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
@@ -3801,24 +3885,27 @@ export default function SecurityPlanner() {
   const exportNoticeTone = exportNotice?.tone ?? "success";
   const exportNoticeClass =
     exportNoticeTone === "error"
-      ? "border-red-500/40 bg-red-500/10 text-red-200"
+      ? "border-red-500/50 text-red-100"
       : exportNoticeTone === "info"
-        ? "border-slate-500/40 bg-slate-500/10 text-slate-200"
-        : "border-emerald-500/40 bg-emerald-500/10 text-emerald-200";
+        ? "border-white/15 text-slate-100"
+        : "border-emerald-500/50 text-emerald-50";
 
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
       {exportNotice && (
-        <div role="status" className={`absolute bottom-24 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
+        <div role="status" className={`absolute bottom-32 left-1/2 -translate-x-1/2 z-[70] w-max max-w-[min(36rem,calc(100%-2rem))] flex items-center gap-3 pl-4 pr-2 py-2 rounded-2xl border bg-zinc-900/95 text-sm font-medium leading-snug shadow-2xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
           <span>{exportNotice.message}</span>
           {exportNotice.action && (
             <button
               onClick={() => { exportNotice.action?.run(); setExportNotice(null); }}
-              className="px-2.5 py-0.5 rounded-full bg-white/15 hover:bg-white/25 text-xs font-bold uppercase tracking-wide"
+              className="shrink-0 px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-bold whitespace-nowrap"
             >
               {exportNotice.action.label}
             </button>
           )}
+          <button onClick={() => setExportNotice(null)} className="shrink-0 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10" aria-label="Dismiss">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
       {showExportPanel && (
@@ -4440,7 +4527,7 @@ export default function SecurityPlanner() {
                           <StepPanel
                 step={activeStep}
                 items={items}
-                site={workflowStepsDone.site ? { label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
+                site={workflowStepsDone.site ? { details: siteDetails ?? undefined, label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
                 reportViews={exportList.length}
                 showAllCones={frustumSettings.showAll !== false}
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
@@ -5206,6 +5293,7 @@ export default function SecurityPlanner() {
               <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2 pointer-events-none">
                 <div
                   ref={cameraReadoutRef}
+                  data-testid="camera-readout"
                   className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
                   style={{ opacity: 0 }}
                 />
@@ -5214,12 +5302,6 @@ export default function SecurityPlanner() {
                   className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
                   style={{ opacity: 0 }}
                 />
-                {backgroundImg && items.some(i => i.type === "building") && (
-                  <label className="flex items-center gap-2 rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-1.5 text-[11px] font-semibold text-slate-200 pointer-events-auto cursor-pointer" title="Show the satellite photo on building roofs">
-                    <input type="checkbox" checked={roofPhoto} onChange={e => setRoofPhoto(e.target.checked)} className="accent-emerald-500" aria-label="Photo on roofs" />
-                    Photo on roofs
-                  </label>
-                )}
                 {items.some(i => i.type === "camera") && (
                   <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto space-y-1.5">
                     <label className="flex items-center justify-between gap-3 cursor-pointer font-semibold text-slate-200">
@@ -5242,8 +5324,10 @@ export default function SecurityPlanner() {
                     )}
                   </div>
                 )}
+                {(hasTerrain || (backgroundImg && items.some(i => i.type === "building"))) && (
+                <div className="flex items-center gap-1 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto">
                 {hasTerrain && (
-                  <div className="flex items-center gap-0.5 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto" role="group" aria-label="Elevation display">
+                  <div className="flex items-center gap-0.5" role="group" aria-label="Elevation display" title="Elevation">
                     <Mountain className="w-3.5 h-3.5 text-slate-400 mx-1.5" />
                     {([
                       { id: "off", label: "Off" },
@@ -5261,6 +5345,14 @@ export default function SecurityPlanner() {
                     ))}
                   </div>
                 )}
+                {backgroundImg && items.some(i => i.type === "building") && (
+                  <label className={`flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-slate-200 cursor-pointer rounded-md hover:bg-white/10 ${hasTerrain ? "border-l border-white/10 rounded-l-none" : ""}`} title="Show the satellite photo on building roofs">
+                    <input type="checkbox" checked={roofPhoto} onChange={e => setRoofPhoto(e.target.checked)} className="accent-emerald-500" aria-label="Photo on roofs" />
+                    Photo on roofs
+                  </label>
+                )}
+                </div>
+                )}
                 {hasTerrain && elevationOverlay !== "off" && (
                   <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto">
                     <div className="flex items-center justify-between gap-4 mb-1 font-semibold text-slate-200">
@@ -5277,7 +5369,7 @@ export default function SecurityPlanner() {
                     </div>
                   </div>
                 )}
-                {!hasTerrain && viewMode === "plan" && !isTerrainMode && (
+                {!hasTerrain && viewMode === "plan" && !isTerrainMode && (backgroundImg || items.length > 0) && (
                   <button
                     onClick={openElevationDialog}
                     className="pointer-events-auto flex items-center gap-2 rounded-full bg-zinc-900/90 hover:bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-emerald-300 shadow border border-emerald-500/30"
@@ -5291,26 +5383,40 @@ export default function SecurityPlanner() {
           </div>
         </div>
 
-        {/* What the selected camera sees: a window you can drag anywhere and resize */}
+        {/* What the selected camera sees: a window you can drag (it snaps to the edges), resize or minimize */}
         {selectedCamera && showCameraPreview && viewMode !== "nvr" && (
           <FloatingWindow
             label="Camera view"
             storageKey="scp.cameraViewPos"
+            rightInset={inspectorVisible ? 320 : 0}
             width={previewWidth}
             onWidth={setPreviewWidth}
-            minWidth={260}
+            minWidth={240}
             maxWidth={960}
+            avoid={() => {
+              const p = getCameraPlanPosition(selectedCamera);
+              const s = viewRef.current?.toClient(p.x, p.y);
+              const r = document.querySelector('[data-testid="plan"]')?.getBoundingClientRect();
+              return s && r ? { x: s.x - r.left, y: s.y - r.top } : null;
+            }}
             title={
               <>
                 <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span className="text-sm font-medium text-slate-200 truncate">{selectedCamera.label} view</span>
+                <span className="text-sm font-medium text-slate-200 truncate">{selectedCamera.label}</span>
               </>
             }
             actions={
               <>
                 <button
+                  onClick={() => addCameraViewToExportList(selectedCamera)}
+                  className="px-2 py-1 text-[11px] font-semibold text-emerald-300 hover:text-white hover:bg-emerald-600 rounded transition-colors flex items-center gap-1"
+                  title="Add this view to the report"
+                >
+                  <Plus className="w-3 h-3" /> Report
+                </button>
+                <button
                   onClick={() => setMaximizedCamId(selectedCamera.id)}
-                  className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                  className="p-1 text-slate-400 hover:text-white hover:bg-white/10 rounded transition-colors"
                   title="Full screen"
                   aria-label="Full screen"
                 >
@@ -5318,7 +5424,7 @@ export default function SecurityPlanner() {
                 </button>
                 <button
                   onClick={() => setShowCameraPreview(false)}
-                  className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
+                  className="p-1 text-slate-400 hover:text-white hover:bg-white/10 rounded transition-colors"
                   title="Close"
                   aria-label="Close camera view"
                 >
@@ -5327,26 +5433,16 @@ export default function SecurityPlanner() {
               </>
             }
           >
-            <canvas
-              ref={cameraPreviewRef}
-              width={cameraPreviewWidth}
-              height={cameraPreviewHeight}
-              className="w-full block"
-            />
-            <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between gap-2 border-t border-white/5">
-              <div className="flex gap-3 min-w-0 truncate">
-                <span>H-FOV: {(selectedCamera.hFov ?? selectedCamera.fov).toFixed(0)}°</span>
-                <span>V-FOV: {(selectedCamera.vFov ?? vFovFromH(selectedCamera.hFov ?? selectedCamera.fov, getCameraAspectValue(selectedCamera))).toFixed(0)}°</span>
-                <span>Range: {selectedCamera.range}</span>
+            <div className="relative">
+              <canvas
+                ref={cameraPreviewRef}
+                width={cameraPreviewWidth}
+                height={cameraPreviewHeight}
+                className="w-full block"
+              />
+              <div className="absolute left-2 bottom-2 rounded-md bg-black/55 px-2 py-0.5 text-[11px] text-slate-200 pointer-events-none">
+                {(selectedCamera.hFov ?? selectedCamera.fov).toFixed(0)}° wide · {(selectedCamera.vFov ?? vFovFromH(selectedCamera.hFov ?? selectedCamera.fov, getCameraAspectValue(selectedCamera))).toFixed(0)}° tall · {Math.round(selectedCamera.range)} ft
               </div>
-              <button
-                onClick={() => addCameraViewToExportList(selectedCamera)}
-                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1 shrink-0 mr-2"
-                title="Add this view to the report"
-              >
-                <Plus className="w-3 h-3" />
-                Add to Report
-              </button>
             </div>
           </FloatingWindow>
         )}
@@ -5606,6 +5702,28 @@ export default function SecurityPlanner() {
 
               {selectedItem.type === "building" && (
                 <div className={`${panelSection} ${inspectorOrder("main")}`}>
+                  <label className="flex items-start gap-2.5 cursor-pointer rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-2.5">
+                    <input
+                      type="checkbox"
+                      checked={isOwnBuilding(selectedItem as BuildingItem)}
+                      onChange={e => { updateItem(selectedItem.id, { mine: e.target.checked }); setTimeout(() => saveHistory(), 50); }}
+                      className="accent-emerald-500 mt-0.5"
+                      aria-label="My building"
+                    />
+                    <span>
+                      <span className="block text-sm font-semibold text-slate-100">My building</span>
+                      <span className="block text-[11px] text-slate-400">Suggested cameras are only mounted on your buildings, not the neighbors'.</span>
+                    </span>
+                  </label>
+                  {backgroundImg && (
+                    <button
+                      onClick={() => fitBuildingToPhoto(selectedItem.id)}
+                      className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-semibold text-slate-200"
+                      title="Reshape this building to the roof on the satellite photo (L and T shapes too)"
+                    >
+                      <WandSparkles className="w-4 h-4 text-emerald-400" /> Fit outline to the photo
+                    </button>
+                  )}
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
                     <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>

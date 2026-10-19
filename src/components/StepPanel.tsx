@@ -22,6 +22,7 @@ import type { WorkflowStepId } from "./AppHeader";
 import { getDoriDistances, getGroundCoverage } from "../lib/camera";
 import { DEFAULT_CAMERA_PITCH } from "../constants";
 import { estimateStorage } from "../lib/recording";
+import { isOwnBuilding } from "../lib/items";
 
 export const STEP_INFO: Record<WorkflowStepId, { n: number; title: string; blurb: string; next?: WorkflowStepId }> = {
   site: { n: 1, title: "Your site", blurb: "The satellite map, elevation and buildings for your property.", next: "buildings" },
@@ -34,7 +35,7 @@ export const STEP_INFO: Record<WorkflowStepId, { n: number; title: string; blurb
 type Props = {
   step: WorkflowStepId;
   items: CanvasItem[];
-  site: { label?: string; widthFt?: number; heightFt?: number; imagery?: boolean } | null;
+  site: { label?: string; widthFt?: number; heightFt?: number; imagery?: boolean; details?: string } | null;
   reportViews: number;
   showAllCones: boolean;
   onToggleCones: (show: boolean) => void;
@@ -94,6 +95,7 @@ export function StepPanel(props: Props) {
               {props.site.widthFt && props.site.heightFt && (
                 <div className="text-xs text-slate-400">{Math.round(props.site.widthFt).toLocaleString()} × {Math.round(props.site.heightFt).toLocaleString()} ft</div>
               )}
+              {props.site.details && <div className="text-[11px] text-slate-500 mt-1.5 leading-snug">{props.site.details}</div>}
             </div>
           ) : (
             <button onClick={props.onImportSite} className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20">
@@ -110,7 +112,7 @@ export function StepPanel(props: Props) {
               <Upload className="w-4 h-4 text-slate-400" /> Use my own map or floor plan image
             </button>
           </div>
-          <p className="text-xs text-slate-500">Elevation lines and shading are in the bottom-left corner of the plan.</p>
+          {props.site && <p className="text-xs text-slate-500">Elevation lines and shading: bottom-left corner of the map.</p>}
         </>
       )}
 
@@ -147,6 +149,7 @@ export function StepPanel(props: Props) {
                         <span className="block text-[11px] text-slate-500">
                           {Math.round(b.wallHeight ?? 0)} ft tall · {b.roofType && b.roofType !== "auto" ? `${b.roofType} roof` : "auto roof"}
                           {b.importSource === "osm" ? " · from map data" : ""}
+                          {isOwnBuilding(b) ? <span className="text-emerald-400"> · yours</span> : ""}
                         </span>
                       </span>
                     </button>

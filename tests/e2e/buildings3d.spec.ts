@@ -1,7 +1,7 @@
 // Pure-logic tests (no browser page) for 3D building roofs.
 import { test, expect } from "@playwright/test";
 import * as THREE from "three";
-import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, orientedRect } from "../../src/three/buildings";
+import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, orientedRect, rectilinearParts } from "../../src/three/buildings";
 
 const rect = (w: number, d: number, angle = 0) => {
   const c = Math.cos(angle);
@@ -15,8 +15,38 @@ test.describe("3D building roofs", () => {
     expect(chooseRoof(rect(40, 36), 12)).toBe("hip");
     expect(chooseRoof(rect(200, 120), 25)).toBe("flat"); // warehouse
     expect(chooseRoof(rect(50, 30), 60)).toBe("flat"); // tall commercial
+    // An odd, not square-cornered shape stays flat
+    const odd = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 45, y: 30 }, { x: 10, y: 50 }, { x: -5, y: 25 }];
+    expect(chooseRoof(odd, 12)).toBe("flat");
+  });
+
+  test("L- and T-shaped houses get pitched roofs that follow their wings", () => {
     const lShape = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 20, y: 20 }, { x: 20, y: 60 }, { x: 0, y: 60 }];
-    expect(chooseRoof(lShape, 12)).toBe("flat");
+    expect(chooseRoof(lShape, 12)).toBe("gable");
+    const parts = rectilinearParts(lShape)!;
+    expect(parts).toHaveLength(2);
+    // The wings cover the footprint exactly: total area of the union = footprint area
+    const roof = buildRoof(lShape, "gable", { eave: 0 });
+    expect(roof.rise).toBeCloseTo(10 * 0.5, 5); // 20 ft wide wings, 6/12 pitch
+    roof.roof.computeBoundingBox();
+    const b = roof.roof.boundingBox!;
+    expect(b.max.x - b.min.x).toBeCloseTo(60, 3);
+    expect(b.max.z - b.min.z).toBeCloseTo(60, 3);
+    const tShape = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 40, y: 20 }, { x: 40, y: 50 }, { x: 20, y: 50 }, { x: 20, y: 20 }, { x: 0, y: 20 }];
+    expect(rectilinearParts(tShape)).toHaveLength(2);
+    expect(chooseRoof(tShape, 12)).toBe("gable");
+  });
+
+  test("a house with a small corner cut out (a patio) keeps the notch open under its roof", () => {
+    // 42 x 53 ft with a 12 x 18 ft corner missing: fills 90% of its bounding box
+    const house = [{ x: 0, y: 0 }, { x: 42, y: 0 }, { x: 42, y: 35 }, { x: 30, y: 35 }, { x: 30, y: 53 }, { x: 0, y: 53 }];
+    expect(chooseRoof(house, 12)).toBe("gable");
+    const roof = new THREE.Mesh(buildRoof(house, "gable", { eave: 0 }).roof, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+    const hitsAt = (x: number, z: number) =>
+      new THREE.Raycaster(new THREE.Vector3(x, 100, z), new THREE.Vector3(0, -1, 0)).intersectObject(roof).length > 0;
+    expect(hitsAt(36, 44)).toBe(false); // the patio
+    expect(hitsAt(15, 44)).toBe(true);
+    expect(hitsAt(36, 15)).toBe(true);
   });
 
   test("oriented rectangle follows a rotated footprint", () => {

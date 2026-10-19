@@ -163,7 +163,22 @@ export class SiteView {
     container.appendChild(this.labelsLayer);
     container.appendChild(this.handlesLayer);
 
-    this.scene.background = new THREE.Color("#18181b");
+    // A dusky horizon behind the ground when tilted (darker overhead), in the app's dark palette.
+    {
+      const c = document.createElement("canvas");
+      c.width = 2;
+      c.height = 256;
+      const g = c.getContext("2d")!;
+      const grad = g.createLinearGradient(0, 0, 0, 256);
+      grad.addColorStop(0, "#131418");
+      grad.addColorStop(0.6, "#22262e");
+      grad.addColorStop(1, "#343a44");
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 2, 256);
+      const sky = new THREE.CanvasTexture(c);
+      sky.colorSpace = THREE.SRGBColorSpace;
+      this.scene.background = sky;
+    }
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.env = pmrem.fromScene(new RoomEnvironment()).texture;
     pmrem.dispose();

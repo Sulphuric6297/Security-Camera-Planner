@@ -3,7 +3,6 @@ import { test, expect, importSite, planPoint, terrainRelief, project } from "./f
 test.describe("terrain & elevation", () => {
   test("contours are off by default and can be toggled", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 2D" }).click();
     const group = page.getByRole("group", { name: "Elevation display" });
     await expect(group.getByRole("button", { name: "Off" })).toHaveAttribute("aria-pressed", "true");
     await group.getByRole("button", { name: "Contours" }).click();
@@ -13,7 +12,6 @@ test.describe("terrain & elevation", () => {
 
   test("sculpted terrain survives a reload (not overwritten by the downloaded elevation)", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("button", { name: "Open in 2D" }).click();
     const reliefBefore = await terrainRelief(page);
     // Sculpt a mound in the plan view
     await page.getByRole("toolbar", { name: "Tools" }).getByRole("button", { name: "Terrain" }).click();

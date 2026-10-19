@@ -108,6 +108,26 @@ test.describe("what to protect and coverage", () => {
     expect(await itemsOfType(page, "camera")).toHaveLength(0);
   });
 
+  test("Suggest cameras only mounts on your own buildings", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    // Not mine: a neighbor's house
+    await page.getByLabel("My building").uncheck();
+    await page.keyboard.press("Escape");
+    await markSpot(page, 0.5, 0.57);
+    await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
+    await expect(page.getByRole("status")).toContainText("Mark which building is yours");
+    expect(await itemsOfType(page, "camera")).toHaveLength(0);
+    // Mark it as mine: now cameras go on it
+    const [b] = await itemsOfType(page, "building");
+    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+    await page.getByLabel("My building").check();
+    await page.keyboard.press("Escape");
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
+    await expect.poll(async () => (await itemsOfType(page, "camera")).length).toBeGreaterThan(0);
+    expect((await itemsOfType(page, "camera")).every((c: any) => c.mount.buildingId === b.id)).toBe(true);
+  });
+
   test("night check limits cameras to their infrared reach", async ({ page }) => {
     await markSpot(page, 0.5, 0.5);
     await placeWithKey(page, "c", 0.5, 0.58); // ~67 ft away
