@@ -3,7 +3,7 @@
 // see past buildings and trees. Pure functions over plan data (plan units, usually feet).
 import { CAMERA_WALL_SNAP_FT, OBJECT_ELEVATION_OFFSET, clamp } from "../constants";
 import type { BuildingItem, CameraItem, CanvasItem, TreeItem } from "../types";
-import { getEdgeOutwardNormal, rectanglePoints } from "./geometry";
+import { getEdgeOutwardNormal, pointInPolygonXY, rectanglePoints } from "./geometry";
 
 type P = { x: number; y: number };
 
@@ -66,9 +66,17 @@ export const cameraPlanPosition = (cam: CameraItem, items: CanvasItem[]) => {
     const i = clamp(cam.mount.edgeIndex ?? 0, 0, pts.length - 1);
     const a = pts[i];
     const c = pts[(i + 1) % pts.length];
-    const t = clamp(cam.mount.edgeT ?? 0.5, 0, 1);
+    const len = Math.hypot(c.x - a.x, c.y - a.y) || 1;
     const n = getEdgeOutwardNormal(pts, i);
-    return { x: a.x + (c.x - a.x) * t + n.x, y: a.y + (c.y - a.y) * t + n.y };
+    // Not right at the ends of the wall (about a foot in), and never inside the building: at an
+    // inside corner of an L, a point just off one wall can be inside the other wing; slide it
+    // toward the middle of the wall until it is outside.
+    const margin = Math.min(0.5, 1 / len);
+    let t = clamp(cam.mount.edgeT ?? 0.5, margin, 1 - margin);
+    const at = (tt: number) => ({ x: a.x + (c.x - a.x) * tt + n.x, y: a.y + (c.y - a.y) * tt + n.y });
+    const step = (t < 0.5 ? 1 : -1) * Math.min(0.5, 0.5 / len);
+    for (let k = 0; k < 40 && pointInPolygonXY(at(t), pts) && Math.abs(t - 0.5) > Math.abs(step); k++) t += step;
+    return at(t);
   }
   return { x: cam.x, y: cam.y };
 };
@@ -135,6 +143,8 @@ export const visibilityPolygon = (origin: P, range: number, fovDeg: number, rota
   const segments: [P, P][] = [];
   for (const item of obstacles) {
     let pts: P[] = [];
+    // A porch or carport (roof on posts) doesn't block the view.
+    if (item.type === "building" && item.openSides) continue;
     if (item.type === "building") pts = buildingWorldPoints(item);
     else {
       const r = item.radius * (item.width ?? 1);

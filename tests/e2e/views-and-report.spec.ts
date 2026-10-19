@@ -23,7 +23,7 @@ test.describe("3D, camera views and report", () => {
 
   test("3D overview of a large site: no fog, sun shadows cover the whole site", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
+    await page.getByRole("tab", { name: "3D" }).click(); // the toast's own button is covered by the import tests
     await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
     const info = await page.evaluate(() => {
       const t = (window as any).__scpThree();
@@ -49,7 +49,7 @@ test.describe("3D, camera views and report", () => {
 
   test("3D buildings get real roofs, solid by default; photo roofs are an option; the roof can be changed", async ({ page }) => {
     await importSite(page);
-    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
+    await page.getByRole("tab", { name: "3D" }).click(); // the toast's own button is covered by the import tests
     await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
     const roofs = () =>
       page.evaluate(() => {

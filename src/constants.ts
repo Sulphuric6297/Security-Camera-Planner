@@ -21,6 +21,8 @@ export const DEFAULT_CAMERA_HEIGHT_FT = 9;
 export const DEFAULT_IR_RANGE_FT = 100;
 export const DEFAULT_CAMERA_HFOV = 90;
 export const DEFAULT_CAMERA_PITCH = -15;
+/** A camera on a wall under the eaves looks well down at the yard, like a real install (~30°). */
+export const WALL_CAMERA_PITCH = -30;
 export const DEFAULT_CAMERA_RANGE_FT = 100;
 export const DEFAULT_BUILDING = { width: 50, depth: 36, wallHeight: 14 };
 // How close (ft) a new camera must be to a wall to snap onto it.

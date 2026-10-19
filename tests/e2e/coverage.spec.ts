@@ -1,7 +1,7 @@
 // Pure-logic tests (no browser page) for coverage analysis.
 import { test, expect } from "@playwright/test";
 import { blindSpotCells, cameraSees, evaluateTargets, type CoverageCamera, type Obstacle } from "../../src/lib/coverage";
-import { doriDistanceFt, hFovForDensity } from "../../src/lib/camera";
+import { doriDistanceFt, hFovForDensity, lensBarrel } from "../../src/lib/camera";
 
 // A 4 MP camera with a 90° lens at 9 ft, tilted 15° down, looking east (+x).
 const cam = (over: Partial<CoverageCamera> = {}): CoverageCamera => ({
@@ -99,5 +99,13 @@ test.describe("coverage", () => {
     }
     // Closer needs less zoom
     expect(hFovForDensity(2688, 250, 20)).toBeGreaterThan(hFovForDensity(2688, 250, 40));
+  });
+
+  test("wide lenses bend straight lines in the picture; normal lenses don't", () => {
+    expect(lensBarrel(54)).toBe(0); // 6 mm
+    expect(lensBarrel(70)).toBe(0);
+    expect(lensBarrel(87)).toBeGreaterThan(0.05); // 4 mm: a little
+    expect(lensBarrel(105)).toBeGreaterThan(lensBarrel(87)); // 2.8 mm: more
+    expect(lensBarrel(130)).toBeLessThanOrEqual(0.3);
   });
 });

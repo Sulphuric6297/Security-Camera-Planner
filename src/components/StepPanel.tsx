@@ -167,9 +167,9 @@ export function StepPanel(props: Props) {
                         </span>
                       </span>
                     </button>
-                    <label className="flex items-center gap-1 px-1.5 text-[11px] text-slate-300 cursor-pointer shrink-0" title="Yours: cameras can go on it">
-                      <input type="checkbox" className="accent-emerald-500" checked={isOwnBuilding(b)} onChange={e => props.onMine(b.id, e.target.checked)} aria-label={`${b.label?.trim() || `Building ${i + 1}`} is mine`} />
-                      Mine
+                    <label className="flex items-center gap-1 px-1.5 text-[11px] text-slate-300 cursor-pointer shrink-0 whitespace-nowrap" title="Part of my camera plan: cameras can go on it">
+                      <input type="checkbox" className="accent-emerald-500" checked={isOwnBuilding(b)} onChange={e => props.onMine(b.id, e.target.checked)} aria-label={`${b.label?.trim() || `Building ${i + 1}`} is part of my camera plan`} />
+                      In plan
                     </label>
                   </li>
                 ))}
@@ -186,6 +186,25 @@ export function StepPanel(props: Props) {
           <button onClick={() => props.onTool("add-camera")} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
             <Plus className="w-4 h-4" /> Add a camera <span className="text-[10px] px-1.5 rounded bg-black/20 font-mono">C</span>
           </button>
+          {buildings.length > 0 && (
+            <div className={card} data-testid="plan-buildings">
+              <div className="text-[10px] uppercase font-bold text-slate-400 mb-1">Buildings in my camera plan</div>
+              <p className="text-[11px] text-slate-500 mb-1.5">Cameras go on these; Suggest cameras only uses them. Tick a garage or shed to add it.</p>
+              <ul className="space-y-0.5 max-h-40 overflow-y-auto custom-scrollbar">
+                {buildings.map((b, i) => {
+                  const name = b.label?.trim() || `Building ${i + 1}`;
+                  return (
+                    <li key={b.id}>
+                      <label className="flex items-center gap-2 px-1 py-0.5 rounded text-xs text-slate-200 cursor-pointer hover:bg-white/5">
+                        <input type="checkbox" className="accent-emerald-500" checked={isOwnBuilding(b)} onChange={e => props.onMine(b.id, e.target.checked)} aria-label={`${name} is part of my camera plan`} />
+                        <span className="truncate">{name}</span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
           <div className={card}>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] uppercase font-bold text-slate-400">Cameras ({cameras.length})</div>

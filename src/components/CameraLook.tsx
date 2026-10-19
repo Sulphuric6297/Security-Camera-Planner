@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Map as MapIcon, Moon, Pause, Play, Plus, SlidersHorizontal } from "lucide-react";
+import { ChevronLeft, ChevronRight, Map as MapIcon, Moon, Pause, Play, Plus, SlidersHorizontal, X } from "lucide-react";
 
 export type LookCamera = { id: string; number: number; label: string; color: string; thumb?: string };
 
@@ -117,6 +117,16 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
           <MapIcon className="w-3.5 h-3.5" /> Back to map
         </button>
       </div>
+      {/* Close, where a window's close button is expected */}
+      <button
+        className="absolute flex items-center justify-center w-9 h-9 rounded-full bg-zinc-900/85 hover:bg-red-600 border border-white/20 text-white shadow-lg pointer-events-auto"
+        style={{ right: size.w - frame.left - frame.width + 12, top: frame.top + 40 }}
+        onClick={onExit}
+        aria-label="Close camera view"
+        title="Close the camera view (Esc)"
+      >
+        <X className="w-5 h-5" />
+      </button>
 
       {/* What this camera gets */}
       {details.length > 0 && (

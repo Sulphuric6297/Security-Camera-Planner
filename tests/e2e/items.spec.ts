@@ -1,8 +1,22 @@
 // Pure-logic tests (no browser page): new items get real-world sizes at any map scale.
 import { test, expect } from "@playwright/test";
+import * as THREE from "three";
 import { VEHICLE_SIZES, createItem, migrateItems, nextCameraIndex } from "../../src/lib/items";
+import { create3dCar } from "../../src/three/models";
 
 test.describe("real-world item sizes", () => {
+  test("the 3D car is as long as its stated length (bumpers included), not longer", () => {
+    for (const type of ["sedan", "suv", "truck", "van"] as const) {
+      const car = createItem("parking", 0, 0, { vehicleType: type }) as any;
+      const box = new THREE.Box3().setFromObject(create3dCar({ ...car, rotation: 0 }));
+      const len = box.max.z - box.min.z;
+      expect(len, type).toBeLessThanOrEqual(car.height * 1.01);
+      expect(len, type).toBeGreaterThan(car.height * 0.97);
+      // Body width plus mirrors: mirrors add about 7% on each side, like real ones
+      expect(box.max.x - box.min.x, type).toBeLessThan(car.width * 1.16);
+    }
+  });
+
   test("vehicles, trees and buildings are real size in feet", () => {
     const car = createItem("parking", 0, 0) as any;
     expect(car.width).toBeCloseTo(VEHICLE_SIZES.sedan.width, 5);

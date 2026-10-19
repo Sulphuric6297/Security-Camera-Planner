@@ -57,7 +57,7 @@ import { estimateStorage } from "./src/lib/recording";
 import { blindSpotCells, cameraToTurn, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
-import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_PITCH, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, generateId, mountHeightForBuilding } from "./src/constants";
+import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_PITCH, WALL_CAMERA_PITCH, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, generateId, mountHeightForBuilding } from "./src/constants";
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, doriLevelAt, getCameraAspectValue, getCameraHFov, getCameraResolution, getDoriDistances, getGroundCoverage, hFovForDensity, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
@@ -77,7 +77,7 @@ import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
-import { cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
+import { buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
 import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
@@ -89,6 +89,10 @@ export default function SecurityPlanner() {
   const [terrainHeights, setTerrainHeights] = useProjectField("terrainHeights");
   const [isTerrainMode, setIsTerrainMode] = useState(false);
   const [terrainTool, setTerrainTool] = useState<TerrainTool>("sculpt");
+  // Woods brush: which trees it plants.
+  const [woodsMix, setWoodsMix] = useState<"mixed" | "broadleaf" | "conifer">("mixed");
+  const woodsMixRef = useRef(woodsMix);
+  woodsMixRef.current = woodsMix;
   const [terrainBrushSize, setTerrainBrushSize] = useState(4); // in tiles
   const [terrainBrushStrength, setTerrainBrushStrength] = useState(40); // height units per second
   const [terrainBrushFalloff, setTerrainBrushFalloff] = useState(2);
@@ -1183,6 +1187,8 @@ export default function SecurityPlanner() {
         if (found) {
           if (!importTreesCars) found.trees = [];
           setItems(prev => [...prev.filter(i => !((i.type === "tree" || i.type === "parking") && (i as TreeItem | ParkingItem).importSource === "photo")), ...found.trees, ...found.vehicles]);
+          // Part of the import: Undo after this must not take the found trees away.
+          setTimeout(() => saveHistory(), 30);
           const parts = [
             found.trees.length ? `${found.trees.length} tree${found.trees.length === 1 ? "" : "s"}` : "",
             found.vehicles.length ? `${found.vehicles.length} parked car${found.vehicles.length === 1 ? "" : "s"}` : ""
@@ -1550,6 +1556,8 @@ export default function SecurityPlanner() {
           height: buildingHeight
         };
         cam.height = buildingHeight;
+        // Under the eaves: tilted well down at the ground, unless the last camera's tilt is copied.
+        if ((cam.pitch ?? DEFAULT_CAMERA_PITCH) === DEFAULT_CAMERA_PITCH) cam.pitch = WALL_CAMERA_PITCH;
       }
     }
 
@@ -3301,6 +3309,8 @@ export default function SecurityPlanner() {
     items.forEach(item => {
       if (item.type === "building") {
         const b = item as BuildingItem;
+        // A porch or carport (roof on posts): people under it and the view through it are clear.
+        if (b.openSides) return;
         obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf });
       } else if (item.type === "tree") {
         const t = item as TreeItem;
@@ -3317,7 +3327,7 @@ export default function SecurityPlanner() {
     const upf = coverageModel.upf;
     const own = (items.filter(i => i.type === "building") as BuildingItem[]).filter(b => isOwnBuilding(b));
     if (own.length === 0 && items.some(i => i.type === "building")) {
-      showExportNotice("Mark which building is yours first: tick \"Mine\" next to it in the Buildings step, so cameras go on it.", "info", { label: "Show buildings", run: () => handleWorkflowStep("buildings") });
+      showExportNotice("Tick which buildings are part of your camera plan first (under \"Buildings in my camera plan\"), so cameras go on them.", "info", { label: "Show buildings", run: () => handleWorkflowStep("buildings") });
       return;
     }
     const buildings = own.map(b => ({
@@ -3570,6 +3580,45 @@ export default function SecurityPlanner() {
     return createItem(kind, 0, 0, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, ...toolDefaults });
   }, [mode, toolDefaults, planGeoRef]);
 
+  // Woods brush: plants trees inside the brush (a natural mix of sizes, spaced like a real wood,
+  // never on a building), or with Shift clears the trees under it.
+  const paintWoods = (p: { x: number; y: number }, clear: boolean, dt: number) => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const grid = gridSizeRef.current;
+    const r = Math.max(grid, clamp(terrainBrushSizeRef.current, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * grid);
+    const items = currentItemsRef.current;
+    if (clear) {
+      const keep = items.filter(i => i.type !== "tree" || Math.hypot(i.x - p.x, i.y - p.y) > r);
+      if (keep.length !== items.length) setItems(keep);
+      return;
+    }
+    // Denser with more strength: 30 ft apart at the lowest, 9 ft at the highest
+    const spacing = (30 - (clamp(terrainBrushStrengthRef.current, 5, 100) / 100) * 21) * upf;
+    const buildings = items.filter(i => i.type === "building").map(b => buildingWorldPoints(b as BuildingItem));
+    const trees = items.filter(i => i.type === "tree") as TreeItem[];
+    const added: CanvasItem[] = [];
+    const tries = Math.max(1, Math.round(dt * 40));
+    for (let k = 0; k < tries; k++) {
+      const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * r;
+      const q = { x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d };
+      if (q.x < 0 || q.y < 0 || q.x > canvasSizeRef.current.width || q.y > canvasSizeRef.current.height) continue;
+      if (buildings.some(pts => pointInPolygonXY(q, pts))) continue;
+      if ([...trees, ...(added as TreeItem[])].some(t => Math.hypot(t.x - q.x, t.y - q.y) < spacing * (0.8 + Math.random() * 0.4))) continue;
+      const mix = woodsMixRef.current;
+      const conifer = mix === "conifer" || (mix === "mixed" && Math.random() < 0.35);
+      const tree = createItem("tree", q.x, q.y, { unitsPerFoot: upf, treeType: conifer ? "conifer" : "deciduous" }) as TreeItem;
+      // Forest trees: taller and narrower than a yard tree, in a range of sizes
+      const size = 0.75 + Math.random() * 0.5;
+      added.push({
+        ...tree,
+        radius: (conifer ? 7 : 11) * size * upf,
+        height: (conifer ? 55 : 50) * (0.8 + Math.random() * 0.4) * upf,
+        rotation: Math.random() * 360
+      } as TreeItem);
+    }
+    if (added.length) setItems([...items, ...added]);
+  };
+
   const viewTool = useMemo<ViewTool>(() => ({
     mode,
     terrain: isTerrainMode,
@@ -3616,6 +3665,12 @@ export default function SecurityPlanner() {
     },
     onTerrainBrush: (p, dt, lower, phase) => {
       const tool = terrainToolRef.current;
+      if (tool === "woods") {
+        // Saved at once, so an Undo straight after the stroke takes the whole stroke back.
+        if (phase === "end") saveHistory();
+        else paintWoods(p, lower, dt);
+        return;
+      }
       if (phase === "end") {
         saveHistory(undefined, terrainHeightsRef.current);
         return;
@@ -3657,6 +3712,7 @@ export default function SecurityPlanner() {
 
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
+    if (isTerrainMode && terrainTool === "woods") return "Woods: click and hold (or drag) to plant trees · Shift to clear them · Strength sets how dense";
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
     if (vertexInsertMode) return "Click on an edge to add a corner";
     switch (mode) {
@@ -4500,9 +4556,9 @@ export default function SecurityPlanner() {
         onSave={handleSaveProject}
         stepsDone={workflowStepsDone}
         activeStep={activeStep}
-        onStep={handleWorkflowStep}
+        onStep={step => { setPovCamId(null); handleWorkflowStep(step); }}
         viewMode={viewMode}
-        onViewMode={setViewMode}
+        onViewMode={mode => { setPovCamId(null); setViewMode(mode); }}
         onSettings={() => { setRightPanelMode("project"); setIsRightPanelOpen(true); }}
         onUploadBaseMap={() => fileInputRef.current?.click()}
         onAddOverlay={() => elementImageInputRef.current?.click()}
@@ -4663,7 +4719,7 @@ export default function SecurityPlanner() {
 
                     <div className="space-y-1">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Tool</label>
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-4 gap-2">
                         <button
                           onClick={() => setTerrainTool("sculpt")}
                           className={`py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "sculpt"
@@ -4691,7 +4747,34 @@ export default function SecurityPlanner() {
                         >
                           Flatten
                         </button>
+                        <button
+                          onClick={() => setTerrainTool("woods")}
+                          className={`py-2 rounded text-[11px] font-semibold border transition-colors ${terrainTool === "woods"
+                            ? "bg-green-500/20 border-green-400/40 text-green-200"
+                            : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                            }`}
+                          title="Brush in wooded areas: plants trees (Shift: clears them)"
+                        >
+                          Woods
+                        </button>
                       </div>
+                      {terrainTool === "woods" && (
+                        <div className="pt-1 space-y-1">
+                          <div className="grid grid-cols-3 gap-1" role="group" aria-label="Kind of woods">
+                            {(["mixed", "broadleaf", "conifer"] as const).map(k => (
+                              <button
+                                key={k}
+                                onClick={() => setWoodsMix(k)}
+                                aria-pressed={woodsMix === k}
+                                className={`py-1 rounded text-[10px] font-semibold border ${woodsMix === k ? "bg-green-500/20 border-green-400/40 text-green-200" : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"}`}
+                              >
+                                {k === "mixed" ? "Mixed" : k === "broadleaf" ? "Broadleaf" : "Pine"}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-[10px] text-slate-500">Hold and drag over the map to plant trees; Shift clears them. Strength sets how dense.</p>
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-1">
@@ -5595,11 +5678,24 @@ export default function SecurityPlanner() {
                       checked={isOwnBuilding(selectedItem as BuildingItem)}
                       onChange={e => { updateItem(selectedItem.id, { mine: e.target.checked }); setTimeout(() => saveHistory(), 50); }}
                       className="accent-emerald-500 mt-0.5"
-                      aria-label="My building"
+                      aria-label="Part of my camera plan"
                     />
                     <span>
-                      <span className="block text-sm font-semibold text-slate-100">My building</span>
-                      <span className="block text-[11px] text-slate-400">Suggested cameras are only mounted on your buildings, not the neighbors'.</span>
+                      <span className="block text-sm font-semibold text-slate-100">Part of my camera plan</span>
+                      <span className="block text-[11px] text-slate-400">Cameras can go on it and Suggest cameras uses it. Leave off for the neighbors' buildings.</span>
+                    </span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-2.5 cursor-pointer rounded-lg bg-white/5 border border-white/10 p-2.5">
+                    <input
+                      type="checkbox"
+                      checked={!!(selectedItem as BuildingItem).openSides}
+                      onChange={e => { updateItem(selectedItem.id, { openSides: e.target.checked }); setTimeout(() => saveHistory(), 50); }}
+                      className="accent-emerald-500 mt-0.5"
+                      aria-label="Open sides (porch, carport)"
+                    />
+                    <span>
+                      <span className="block text-sm font-semibold text-slate-100">Open sides (porch, carport)</span>
+                      <span className="block text-[11px] text-slate-400">A roof on posts with no walls: cameras see under and through it. For a porch on the house, pull the house's outline back and draw the porch as its own building.</span>
                     </span>
                   </label>
                   {backgroundImg && (

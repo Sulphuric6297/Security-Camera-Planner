@@ -1,6 +1,6 @@
 import { test as pure } from "@playwright/test";
 import { fetchOsmBuildings } from "../../src/lib/geo/buildings";
-import { test, expect, importSite, itemsOfType, project, terrainRelief, SITE, ROOFS, DETECTED_CENTER, PHOTO_TREE, PHOTO_CAR } from "./fixtures";
+import { test, expect, importSite, itemsOfType, placeWithKey, project, terrainRelief, SITE, ROOFS, DETECTED_CENTER, PHOTO_TREE, PHOTO_CAR } from "./fixtures";
 
 test.describe("Import Site", () => {
   test("search, select area, review buildings, import imagery + elevation + buildings", async ({ page }) => {
@@ -94,6 +94,18 @@ test.describe("Import Site", () => {
     expect(summary).not.toContain("parked car");
     expect(await itemsOfType(page, "tree")).toHaveLength(1);
     expect(await itemsOfType(page, "parking")).toHaveLength(0);
+  });
+
+  test("undo after importing keeps the trees found on the photo", async ({ page }) => {
+    await importSite(page);
+    await expect.poll(async () => (await itemsOfType(page, "tree")).length).toBe(1);
+    await page.waitForTimeout(300);
+    await placeWithKey(page, "c", 0.3, 0.3);
+    await page.keyboard.press("Escape");
+    expect(await itemsOfType(page, "camera")).toHaveLength(1);
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await itemsOfType(page, "camera")).length).toBe(0);
+    expect(await itemsOfType(page, "tree")).toHaveLength(1);
   });
 
   test("re-import keeps edited building heights and mounted cameras", async ({ page }) => {

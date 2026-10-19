@@ -59,6 +59,22 @@ test.describe("looking through a camera", () => {
     await expect(page.getByLabel("Inspector")).toBeVisible();
   });
 
+  test("the camera view closes with its X, the 2D/3D tabs or a step, not only Esc", async ({ page }) => {
+    await placeWithKey(page, "c", 0.5, 0.5);
+    const look = page.getByTestId("camera-look");
+    const enter = async () => { await page.keyboard.press("Enter"); await expect(look).toBeVisible(); };
+    await enter();
+    await look.getByRole("button", { name: "Close camera view" }).click();
+    await expect(look).toHaveCount(0);
+    await enter();
+    await page.getByRole("tab", { name: "3D" }).click();
+    await expect(look).toHaveCount(0);
+    await page.evaluate(id => (window as any).__scpSelect(id), (await itemsOfType(page, "camera"))[0].id);
+    await enter();
+    await page.locator('nav[aria-label="Steps"] button').nth(3).click();
+    await expect(look).toHaveCount(0);
+  });
+
   test("arrow keys and thumbnails switch between cameras", async ({ page }) => {
     await placeWithKey(page, "c", 0.3, 0.5);
     await placeWithKey(page, "c", 0.7, 0.5);

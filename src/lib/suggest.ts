@@ -1,6 +1,7 @@
 // "Suggest cameras": a greedy layout that covers the protected spots, which the user then edits.
 // Candidates are wall mounts (at eave height, facing out) along buildings near the spots, plus a
-// pole mount as a fallback; each round keeps the camera that newly covers the most spots.
+// pole mount as a fallback, each aimed to take in as many spots as its lens can at once; each round
+// keeps the camera that newly covers the most spots.
 import type { CameraItem } from "../types";
 import { LENS_PRESETS, RESOLUTION_PRESETS, doriDistanceFt, suggestPitchForDistance, vFovFromH } from "./camera";
 import { cameraSees, levelRank, type CoverageCamera, type DoriLevelId, type Obstacle } from "./coverage";
@@ -80,57 +81,72 @@ export const suggestCameras = (opts: {
     if (open.length === 0) break;
     let best: { s: Suggestion; score: number } | null = null;
 
+    // From one mount point: aim to take in as many open spots as fit in the lens at once (the
+    // middle of each group of spots that fits the field of view), not just one spot straight on.
     const consider = (pos: P, heightFt: number, mount: Suggestion["mount"], facing: P | null) => {
-      for (const aim of open) {
-        const dx = aim.x - pos.x;
-        const dy = aim.y - pos.y;
-        const d = Math.hypot(dx, dy);
-        if (d < 3 * upf) continue;
-        // Wall mounts only look outward.
-        if (facing && (dx * facing.x + dy * facing.y) / d < 0.15) continue;
-        const distFt = d / upf;
-        const optic = OPTICS.find(o => doriDistanceFt(o.hFov, o.width, PPM[aim.goal]) >= distFt * 1.05);
-        if (!optic) continue;
-        const rotation = ((((Math.atan2(dy, dx) * 180) / Math.PI) % 360) + 360) % 360;
-        const pitch = suggestPitchForDistance(heightFt, distFt);
-        const cam: CoverageCamera = {
-          id: "candidate",
-          x: pos.x,
-          y: pos.y,
-          rotation,
-          hFov: optic.hFov,
-          vFov: vFovFromH(optic.hFov, 16 / 9),
-          pitch,
-          heightFt,
-          range: Math.max(d * 1.6, 60 * upf),
-          camera: fakeCamera(optic.hFov, optic.width)
-        };
-        const covers = open.filter(t => {
-          const r = cameraSees(cam, t, opts.obstacles, upf);
-          return r.level !== null && levelRank(r.level) <= levelRank(t.goal);
-        });
-        if (!covers.some(t => t.id === aim.id)) continue;
-        // More spots first; then a cheaper camera (lower index), then closer.
-        const score = covers.length * 1000 - OPTICS.indexOf(optic) * 10 - distFt * 0.1 + (mount ? 5 : 0);
-        if (!best || score > best.score) {
-          best = {
-            score,
-            s: {
+      const ref = facing ? Math.atan2(facing.y, facing.x) : Math.atan2(open[0].y - pos.y, open[0].x - pos.x);
+      const seen = open
+        .map(t => {
+          const dx = t.x - pos.x, dy = t.y - pos.y, d = Math.hypot(dx, dy);
+          let rel = ((Math.atan2(dy, dx) - ref) * 180) / Math.PI;
+          rel = ((rel % 360) + 540) % 360 - 180;
+          return { t, d, rel };
+        })
+        // Wall mounts only look outward; nothing right under the camera.
+        .filter(v => v.d >= 3 * upf && (!facing || ((v.t.x - pos.x) * facing.x + (v.t.y - pos.y) * facing.y) / v.d >= 0.15))
+        .sort((a, b) => a.rel - b.rel);
+      if (!seen.length) return;
+      OPTICS.forEach((optic, opticIndex) => {
+        for (let i = 0; i < seen.length; i++) {
+          for (let j = i; j < seen.length && seen[j].rel - seen[i].rel <= optic.hFov * 0.85; j++) {
+            const group = seen.slice(i, j + 1);
+            // The lens must give each spot in the group the detail it needs.
+            if (group.some(g => doriDistanceFt(optic.hFov, optic.width, PPM[g.t.goal]) < (g.d / upf) * 1.05)) continue;
+            const mid = (seen[i].rel + seen[j].rel) / 2;
+            const rotation = ((((ref * 180) / Math.PI + mid) % 360) + 360) % 360;
+            const meanFt = group.reduce((a, g) => a + g.d, 0) / group.length / upf;
+            const farFt = Math.max(...group.map(g => g.d)) / upf;
+            const pitch = suggestPitchForDistance(heightFt, meanFt);
+            const cam: CoverageCamera = {
+              id: "candidate",
               x: pos.x,
               y: pos.y,
               rotation,
+              hFov: optic.hFov,
+              vFov: vFovFromH(optic.hFov, 16 / 9),
               pitch,
               heightFt,
-              lensId: optic.lensId,
-              hFov: optic.hFov,
-              resolutionWidth: optic.width,
-              range: Math.round(cam.range),
-              mount,
-              covers: covers.map(t => t.id)
+              range: Math.max(farFt * upf * 1.6, 60 * upf),
+              camera: fakeCamera(optic.hFov, optic.width)
+            };
+            const covers = open.filter(t => {
+              const r = cameraSees(cam, t, opts.obstacles, upf);
+              return r.level !== null && levelRank(r.level) <= levelRank(t.goal);
+            });
+            if (!covers.length) continue;
+            // More spots first; then a cheaper camera (lower index), then closer.
+            const score = covers.length * 1000 - opticIndex * 10 - meanFt * 0.1 + (mount ? 5 : 0);
+            if (!best || score > best.score) {
+              best = {
+                score,
+                s: {
+                  x: pos.x,
+                  y: pos.y,
+                  rotation,
+                  pitch,
+                  heightFt,
+                  lensId: optic.lensId,
+                  hFov: optic.hFov,
+                  resolutionWidth: optic.width,
+                  range: Math.round(cam.range),
+                  mount,
+                  covers: covers.map(t => t.id)
+                }
+              };
             }
-          };
+          }
         }
-      }
+      });
     };
 
     candidates.forEach(c => {

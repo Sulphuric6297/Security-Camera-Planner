@@ -8,7 +8,7 @@ export type BuildingLabelDefaults = {
   fontWeight: number;
 };
 export type ViewMode = "plan" | "iso3d" | "nvr";
-export type TerrainTool = "sculpt" | "smooth" | "flatten";
+export type TerrainTool = "sculpt" | "smooth" | "flatten" | "woods";
 export type DemAlignTool = "move" | "scale" | "rotate" | "pan";
 export type DemData = {
   name: string;
@@ -99,6 +99,8 @@ export interface BuildingItem extends BaseItem {
   importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
   /** One of the user's own buildings (cameras can be mounted on it). Unset: buildings the user drew are, imported ones aren't. */
   mine?: boolean;
+  /** Porch, carport or pavilion: a roof on posts, no walls (cameras see through and under it). */
+  openSides?: boolean;
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)

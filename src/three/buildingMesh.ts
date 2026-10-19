@@ -2,6 +2,7 @@
 // Roofs are a solid color by default; the aerial photo can be shown on them instead (an option,
 // since the photo makes buildings hard to read in 3D).
 import * as THREE from "three";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { DEFAULT_BUILDING } from "../constants";
 import type { BuildingItem } from "../types";
 import { buildingLocalPoints } from "../lib/planGeom";
@@ -100,6 +101,46 @@ export const buildingRoofKind = (b: BuildingItem, unitsPerFoot = 1) => {
   return !b.roofType || b.roofType === "auto" ? chooseRoof(buildingLocalPoints(b), h, unitsPerFoot) : b.roofType;
 };
 
+/** Whether a roof's triangles are wound to face up (pitched and flat roofs are built either way round). */
+const roofFacesUp = (geo: THREE.BufferGeometry) => {
+  const pos = geo.getAttribute("position");
+  const index = geo.getIndex();
+  const n = index ? index.count : pos.count;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  let sum = 0;
+  for (let i = 0; i + 2 < n; i += 3) {
+    const ia = index ? index.getX(i) : i, ib = index ? index.getX(i + 1) : i + 1, ic = index ? index.getX(i + 2) : i + 2;
+    a.fromBufferAttribute(pos, ia); b.fromBufferAttribute(pos, ib); c.fromBufferAttribute(pos, ic);
+    sum += b.sub(a).cross(c.sub(a)).y;
+  }
+  return sum >= 0;
+};
+
+/** Posts and edge beams for an open-sided building (porch, carport), merged into one geometry. */
+const openFrame = (pts: { x: number; y: number }[], height: number, upf: number) => {
+  const parts: THREE.BufferGeometry[] = [];
+  const post = 0.45 * upf, beamH = 0.8 * upf, beamD = 0.4 * upf;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], c = pts[(i + 1) % pts.length];
+    const len = Math.hypot(c.x - a.x, c.y - a.y);
+    if (len < 0.01) continue;
+    const n = Math.max(1, Math.ceil(len / (10 * upf)));
+    for (let k = 0; k < n; k++) {
+      const t = k / n;
+      const g = new THREE.BoxGeometry(post, height, post);
+      g.translate(a.x + (c.x - a.x) * t, height / 2, a.y + (c.y - a.y) * t);
+      parts.push(g);
+    }
+    const beam = new THREE.BoxGeometry(len, beamH, beamD);
+    beam.rotateY(-Math.atan2(c.y - a.y, c.x - a.x));
+    beam.translate((a.x + c.x) / 2, height - beamH / 2, (a.y + c.y) / 2);
+    parts.push(beam);
+  }
+  const merged = mergeGeometries(parts.map(g => g.toNonIndexed()), false) ?? new THREE.BufferGeometry();
+  parts.forEach(g => g.dispose());
+  return merged;
+};
+
 /**
  * Model in plan units, positioned at the building (base at `baseHeight`). Children carry
  * `userData.itemId` for picking; the roof is named "building-roof".
@@ -117,16 +158,20 @@ export const createBuildingModel = (
   group.rotation.y = -THREE.MathUtils.degToRad(b.rotation);
   group.userData.itemId = b.id;
 
-  const wallGeo = buildFacadeWalls(pts, wallHeight, upf);
-  shadeWalls(wallGeo, wallHeight);
-  const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({ color: b.color, map: getFacadeTexture(), roughness: 0.92, metalness: 0, vertexColors: true }));
+  // A porch or carport: posts (at the corners and every ~10 ft) and a beam along each edge
+  // carrying the roof, instead of walls.
+  const wallGeo = b.openSides ? openFrame(pts, wallHeight, upf) : buildFacadeWalls(pts, wallHeight, upf);
+  if (!b.openSides) shadeWalls(wallGeo, wallHeight);
+  const walls = new THREE.Mesh(wallGeo, b.openSides
+    ? new THREE.MeshStandardMaterial({ color: mix(b.color, "#f3f1ec", 0.6), roughness: 0.85, metalness: 0 })
+    : new THREE.MeshStandardMaterial({ color: b.color, map: getFacadeTexture(), roughness: 0.92, metalness: 0, vertexColors: true }));
   walls.name = "building-walls";
   walls.castShadow = true;
   walls.receiveShadow = true;
   walls.userData.itemId = b.id;
   group.add(walls);
 
-  (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
+  if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
 
   const kind = buildingRoofKind(b, upf);
   const parts = buildRoof(pts, kind, { pitch: 0.45, eave: 1.5 * upf, maxRise: Math.min(12 * upf, wallHeight * 0.6) });
@@ -134,15 +179,27 @@ export const createBuildingModel = (
   if (photo) applyPhotoUVs(parts.roof, { x: b.x, y: b.y, rotation: b.rotation }, photo.rect);
   // Roofs clearly darker than the walls, so the roof shape reads from above.
   const roofColor = photo ? new THREE.Color(0xffffff) : kind === "flat" ? mix(b.color, "#5f6670", 0.75) : mix(b.color, "#2c323b", 0.85);
+  // Which side of the roof faces the sky: that side gets the roof color, the underside (the soffit
+  // under the eaves, seen from cameras on the walls) is light trim, not the dark roof color.
+  const upSide = roofFacesUp(parts.roof) ? THREE.FrontSide : THREE.BackSide;
   const roof = new THREE.Mesh(parts.roof, new THREE.MeshStandardMaterial({
     color: roofColor,
     map: photo?.texture ?? null,
     roughness: 0.85,
     metalness: 0,
-    side: THREE.DoubleSide,
+    side: upSide,
     polygonOffset: kind === "flat",
     polygonOffsetFactor: -1
   }));
+  const soffit = new THREE.Mesh(parts.roof, new THREE.MeshStandardMaterial({
+    color: mix(b.color, "#f1ede6", 0.55),
+    roughness: 0.9,
+    metalness: 0,
+    side: upSide === THREE.FrontSide ? THREE.BackSide : THREE.FrontSide
+  }));
+  soffit.name = "building-soffit";
+  soffit.userData.itemId = b.id;
+  soffit.receiveShadow = true;
   roof.position.y = wallHeight + (kind === "flat" ? 0.04 * upf : 0);
   roof.name = "building-roof";
   roof.userData.itemId = b.id;
@@ -150,6 +207,8 @@ export const createBuildingModel = (
   roof.castShadow = kind !== "flat";
   roof.receiveShadow = true;
   group.add(roof);
+  soffit.position.copy(roof.position);
+  group.add(soffit);
   if (parts.gables) {
     const gables = new THREE.Mesh(parts.gables, new THREE.MeshStandardMaterial({ color: b.color, roughness: 0.92, side: THREE.DoubleSide }));
     gables.userData.itemId = b.id;

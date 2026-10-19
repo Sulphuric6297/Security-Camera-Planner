@@ -172,3 +172,36 @@ test("recorder", async ({ page }) => {
   await shot(page, "19-recorder-3d");
 });
 
+
+test("trees", async ({ page }) => {
+  // Each kind of tree, from above and through a camera at eye level
+  await placeWithKey(page, "c", 0.5, 0.62);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const s = (window as any).__scpProject();
+    const cam = s.items.find((i: any) => i.type === "camera");
+    const mk = (id: string, dx: number, dy: number, treeType: string, radius: number, height: number, color: string) =>
+      ({ id, type: "tree", x: cam.x + dx, y: cam.y + dy, rotation: 0, treeType, radius, height, width: 1, color });
+    const trees = [
+      mk("t1", -22, -45, "deciduous", 14, 38, "#2f6b2f"),
+      mk("t2", 4, -38, "conifer", 9, 45, "#24543a"),
+      mk("t3", 26, -46, "deciduous", 11, 30, "#3d7a35"),
+      mk("t4", -6, -24, "bush", 4, 5, "#3f7d3a"),
+      mk("t5", 40, -70, "conifer", 7, 38, "#24543a"),
+      mk("t6", -45, -75, "conifer", 8, 50, "#24543a")
+    ];
+    s.setField("items", [...s.items.map((i: any) => (i.id === cam.id ? { ...i, rotation: 270, pitch: 5, height: 6, mount: { ...(i.mount ?? { type: "free" }), height: 6 } } : i)), ...trees]);
+  });
+  await page.keyboard.press("3");
+  await page.evaluate(() => {
+    const items = (window as any).__scpProject().items.filter((i: any) => i.type === "tree");
+    const xs = items.map((b: any) => b.x), ys = items.map((b: any) => b.y);
+    (window as any).__scpView.fitBounds({ minX: Math.min(...xs) - 15, minY: Math.min(...ys) - 15, maxX: Math.max(...xs) + 15, maxY: Math.max(...ys) + 15 }, { animate: false, minSpan: 30 });
+  });
+  await shot(page, "20-trees-3d");
+  const [cam] = await itemsOfType(page, "camera");
+  await page.evaluate(id => (window as any).__scpSelect(id), cam.id);
+  await page.keyboard.press("Enter");
+  await shot(page, "21-trees-eye-level");
+  await page.keyboard.press("Escape");
+});

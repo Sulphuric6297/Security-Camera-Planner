@@ -9,7 +9,7 @@ import * as THREE from "three";
 import CameraControls from "camera-controls";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { DEFAULT_BUILDING, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_PITCH, DEFAULT_IR_RANGE_FT, OBJECT_ELEVATION_OFFSET, clamp, mountHeightForBuilding } from "../constants";
-import { getCameraAspectValue, getCameraHFov, suggestPitchForDistance } from "../lib/camera";
+import { getCameraAspectValue, getCameraHFov, lensBarrel, suggestPitchForDistance } from "../lib/camera";
 import { boundsOfPoints, type Bounds } from "../lib/view";
 import {
   buildingBaseHeight,
@@ -564,6 +564,36 @@ export class SiteView {
     return out;
   }
 
+  private lens: { target: THREE.WebGLRenderTarget; scene: THREE.Scene; cam: THREE.OrthographicCamera; mat: THREE.ShaderMaterial } | null = null;
+  /** Off-screen picture and the full-frame pass that bends it like a wide lens. */
+  private lensPass() {
+    if (this.lens) return this.lens;
+    const target = new THREE.WebGLRenderTarget(1, 1, { samples: 4, type: THREE.HalfFloatType });
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { map: { value: target.texture }, k: { value: 0 }, aspect: { value: 16 / 9 } },
+      vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }",
+      // Barrel model: a point at radius r (1 at the frame's corners) shows what the straight lens
+      // shows at r * (1 + k r^2) / (1 + k). Corners stay put (same field of view); the middle is
+      // a little larger and the edges squeezed, so straight lines bow outward.
+      fragmentShader: `
+        uniform sampler2D map; uniform float k; uniform float aspect; varying vec2 vUv;
+        void main() {
+          vec2 p = vUv * 2.0 - 1.0;
+          float r2 = (p.x * p.x * aspect * aspect + p.y * p.y) / (aspect * aspect + 1.0);
+          vec2 s = p * (1.0 + k * r2) / (1.0 + k);
+          gl_FragColor = texture2D(map, s * 0.5 + 0.5);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }`,
+      depthTest: false,
+      depthWrite: false
+    });
+    const scene = new THREE.Scene();
+    scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+    this.lens = { target, scene, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), mat };
+    return this.lens;
+  }
+
   /** Renders a camera's view into a rectangle of the canvas (CSS px), in camera-view dress. */
   private drawCameraView(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }, night = this.povNight) {
     const doc = this.doc!;
@@ -628,10 +658,30 @@ export class SiteView {
       this.renderer.shadowMap.needsUpdate = true;
       this.shadowsDirty = false;
     }
-    this.renderer.setViewport(rect.x, rect.y, rect.width, rect.height);
-    this.renderer.setScissor(rect.x, rect.y, rect.width, rect.height);
-    this.renderer.setScissorTest(true);
-    this.renderer.render(this.scene, c);
+    const k = lensBarrel(hFov);
+    if (k > 0.005) {
+      // Wide lenses bend straight lines (barrel distortion): draw the picture off screen, then bend it.
+      const lens = this.lensPass();
+      const ratio = this.renderer.getPixelRatio();
+      const tw = Math.max(1, Math.round(rect.width * ratio)), th = Math.max(1, Math.round(rect.height * ratio));
+      if (lens.target.width !== tw || lens.target.height !== th) lens.target.setSize(tw, th);
+      this.renderer.setRenderTarget(lens.target);
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      this.renderer.render(this.scene, c);
+      this.renderer.setRenderTarget(null);
+      lens.mat.uniforms.k.value = k;
+      lens.mat.uniforms.aspect.value = aspect;
+      this.renderer.setViewport(rect.x, rect.y, rect.width, rect.height);
+      this.renderer.setScissor(rect.x, rect.y, rect.width, rect.height);
+      this.renderer.setScissorTest(true);
+      this.renderer.render(lens.scene, lens.cam);
+    } else {
+      this.renderer.setViewport(rect.x, rect.y, rect.width, rect.height);
+      this.renderer.setScissor(rect.x, rect.y, rect.width, rect.height);
+      this.renderer.setScissorTest(true);
+      this.renderer.render(this.scene, c);
+    }
     this.renderer.setScissorTest(false);
     this.renderer.setViewport(0, 0, this.size.width, this.size.height);
     this.horizon.visible = false;
@@ -692,6 +742,7 @@ export class SiteView {
     this.ground.dispose();
     disposeObjectDeep(this.scene);
     this.env.dispose();
+    if (this.lens) { this.lens.target.dispose(); this.lens.mat.dispose(); }
     this.renderer.dispose();
     this.renderer.forceContextLoss();
     this.container.innerHTML = "";
@@ -906,7 +957,7 @@ export class SiteView {
       case "building": {
         const b = item as BuildingItem;
         const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
@@ -2054,7 +2105,7 @@ export class SiteView {
     }
     pos.needsUpdate = true;
     const t = this.tool.terrainTool;
-    (this.brush.material as THREE.LineBasicMaterial).color.setHex(t === "sculpt" ? 0xf59e0b : t === "smooth" ? 0x38bdf8 : 0x818cf8);
+    (this.brush.material as THREE.LineBasicMaterial).color.setHex(t === "sculpt" ? 0xf59e0b : t === "smooth" ? 0x38bdf8 : t === "woods" ? 0x22c55e : 0x818cf8);
     this.brush.visible = true;
     this.invalidate();
   }

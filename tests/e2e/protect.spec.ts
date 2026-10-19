@@ -117,6 +117,12 @@ test.describe("what to protect and coverage", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("coverage-panel")).toContainText("blocked by a building or tree");
     expect(await status(page)).toBe("none");
+    // Made a carport (roof on posts): the camera sees through it
+    const [b] = await itemsOfType(page, "building");
+    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+    await page.getByLabel("Inspector").getByLabel("Open sides (porch, carport)").check();
+    expect((await itemsOfType(page, "building"))[0].openSides).toBe(true);
+    await expect.poll(() => status(page)).not.toBe("none");
   });
 
   test("aim a camera by clicking a spot on the map", async ({ page }) => {
@@ -179,18 +185,24 @@ test.describe("what to protect and coverage", () => {
   test("Suggest cameras only mounts on your own buildings", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     // Not mine: a neighbor's house
-    await page.getByLabel("My building").uncheck();
+    await page.getByLabel("Inspector").getByLabel("Part of my camera plan").uncheck();
     await page.keyboard.press("Escape");
     await markSpot(page, 0.5, 0.57);
     await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
-    await expect(page.getByRole("status")).toContainText("Mark which building is yours");
+    await expect(page.getByRole("status")).toContainText("Tick which buildings are part of your camera plan");
     expect(await itemsOfType(page, "camera")).toHaveLength(0);
     // Mark it as mine from the Buildings list (the message takes you there): now cameras go on it
     const [b] = await itemsOfType(page, "building");
     await page.getByRole("status").getByRole("button", { name: "Show buildings" }).click();
-    await page.getByRole("checkbox", { name: /is mine$/ }).check();
+    await page.getByRole("checkbox", { name: /is part of my camera plan$/ }).check();
     expect((await itemsOfType(page, "building"))[0].mine).toBe(true);
+    // The Cameras step lists the buildings in the plan too, with the same tick
     await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    const inPlan = page.getByTestId("plan-buildings").getByRole("checkbox", { name: /is part of my camera plan$/ });
+    await expect(inPlan).toBeChecked();
+    await inPlan.uncheck();
+    expect((await itemsOfType(page, "building"))[0].mine).toBe(false);
+    await inPlan.check();
     await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
     await expect.poll(async () => (await itemsOfType(page, "camera")).length).toBeGreaterThan(0);
     expect((await itemsOfType(page, "camera")).every((c: any) => c.mount.buildingId === b.id)).toBe(true);

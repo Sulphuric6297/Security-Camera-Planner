@@ -130,3 +130,9 @@ export const suggestPitchForDistance = (mountHeightFt: number, targetFt: number,
   const drop = mountHeightFt - targetHeightFt;
   return -Math.round((Math.atan2(Math.max(drop, 0), Math.max(targetFt, 1)) * 180) / Math.PI);
 };
+
+/**
+ * How much a lens of this horizontal field of view bends straight lines in its picture (barrel
+ * distortion, 0 = not at all): none for normal lenses, clearly for wide ones (2.8 mm, ~105°).
+ */
+export const lensBarrel = (hFov: number) => Math.min(1, Math.max(0, (hFov - 70) / 50)) * 0.3;

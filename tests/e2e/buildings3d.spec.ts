@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import * as THREE from "three";
 import { applyPhotoUVs, buildFacadeWalls, buildRoof, chooseRoof, doorsOnWalls, orientedRect, rectilinearParts } from "../../src/three/buildings";
 import { straightSkeleton } from "../../src/three/roofSkeleton";
+import { createBuildingModel } from "../../src/three/buildingMesh";
 
 const rect = (w: number, d: number, angle = 0) => {
   const c = Math.cos(angle);
@@ -217,5 +218,44 @@ test.describe("3D building roofs", () => {
     // Plan units at 2 per foot: the same door, the same place
     const big = pts.map(p => ({ x: p.x * 2, y: p.y * 2 }));
     expect(doorsOnWalls(big, [{ x: 10, y: 26 }], 2)[0]).toMatchObject({ x: 10, y: 20 });
+  });
+
+  test("an open-sided building (porch, carport) is a roof on posts: no walls", () => {
+    const porch: any = { id: "p", type: "building", x: 0, y: 0, rotation: 0, width: 24, height: 10, wallHeight: 9, color: "#9ca3af", openSides: true };
+    const model = createBuildingModel(porch, 0);
+    const frame = model.getObjectByName("building-walls") as THREE.Mesh;
+    const box = new THREE.Box3().setFromObject(frame);
+    expect(box.max.y).toBeCloseTo(9, 1); // posts and beams up to the eaves
+    // Posts and beams only: a small fraction of the footprint's side area is solid
+    const pos = frame.geometry.getAttribute("position");
+    let area = 0;
+    for (let k = 0; k < pos.count; k += 3) {
+      const a = new THREE.Vector3().fromBufferAttribute(pos, k), b = new THREE.Vector3().fromBufferAttribute(pos, k + 1), c = new THREE.Vector3().fromBufferAttribute(pos, k + 2);
+      area += b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+    }
+    const wallArea = 2 * (24 + 10) * 9;
+    expect(area).toBeLessThan(wallArea * 0.5);
+    expect(model.getObjectByName("building-roof")).toBeTruthy();
+    // The same building with walls: solid sides
+    const closed = createBuildingModel({ ...porch, openSides: false }, 0).getObjectByName("building-walls") as THREE.Mesh;
+    expect(closed.geometry.getAttribute("position").count).toBeGreaterThan(0);
+  });
+
+  test("under the eaves the roof is light trim (soffit), not the dark roof color, for every roof", () => {
+    for (const roofType of ["gable", "hip", "flat"]) {
+      const house: any = { id: "h", type: "building", x: 0, y: 0, rotation: 0, width: 40, height: 30, wallHeight: 10, color: "#9ca3af", roofType };
+      const model = createBuildingModel(house, 0);
+      const roof = model.getObjectByName("building-roof") as THREE.Mesh;
+      const soffit = model.getObjectByName("building-soffit") as THREE.Mesh;
+      expect(soffit, roofType).toBeTruthy();
+      const rm = roof.material as THREE.MeshStandardMaterial, sm = soffit.material as THREE.MeshStandardMaterial;
+      expect(sm.side, roofType).not.toBe(rm.side);
+      expect(rm.side, roofType).not.toBe(THREE.DoubleSide);
+      const hsl = (m: THREE.MeshStandardMaterial) => m.color.getHSL({ h: 0, s: 0, l: 0 }).l;
+      expect(hsl(sm), roofType).toBeGreaterThan(hsl(rm) + 0.2);
+      // The roof's own side faces up: a ray from above hits its front (or back, as set)
+      const facesUp = (() => { const g = roof.geometry; g.computeVertexNormals(); const n = g.getAttribute("normal"); let y = 0; for (let k = 0; k < n.count; k++) y += n.getY(k); return y > 0; })();
+      expect(rm.side === THREE.FrontSide, roofType).toBe(facesUp);
+    }
   });
 });

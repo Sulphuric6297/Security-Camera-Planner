@@ -70,4 +70,19 @@ test.describe("suggest cameras", () => {
     expect(s).toHaveLength(1);
     expect(s[0].mount).toBeNull();
   });
+
+  test("angles one camera between two spots it can take in together, instead of two cameras", () => {
+    // A small 20 x 20 ft shed; two spots in front of it, far to either side: no camera aimed
+    // straight at one sees the other, but one aimed between them sees both.
+    const shed: SuggestBuilding = { id: "shed", heightFt: 10, mountHeightFt: 9, points: [{ x: -10, y: -10 }, { x: 10, y: -10 }, { x: 10, y: 10 }, { x: -10, y: 10 }] };
+    const obs: Obstacle[] = [{ kind: "building", id: shed.id, points: shed.points, heightFt: shed.heightFt }];
+    const targets = [
+      { id: "left", x: -13, y: 26, goal: "detect" as const },
+      { id: "right", x: 13, y: 26, goal: "detect" as const }
+    ];
+    const s = suggestCameras({ targets, buildings: [shed], obstacles: obs, existing: [] });
+    expect(s).toHaveLength(1);
+    expect(s[0].covers.sort()).toEqual(["left", "right"]);
+    for (const t of targets) expect(cameraSees(asCamera(s[0]), t, obs).level).not.toBeNull();
+  });
 });
