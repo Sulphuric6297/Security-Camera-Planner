@@ -4961,7 +4961,7 @@ export default function SecurityPlanner() {
                       <div>
                         <div className="font-semibold text-slate-200 mb-1">Imagery from a screenshot (e.g. Google Maps)</div>
                         <ol className="list-decimal ml-4 space-y-0.5">
-                          <li>Open <a className="text-emerald-300 underline" href="https://www.google.com/maps/@39.78,-89.68,16z/data=!3m1!1e3" target="_blank" rel="noreferrer">Google Maps satellite</a> or the <a className="text-emerald-300 underline" href="https://www.nconemap.gov/" target="_blank" rel="noreferrer">NC OneMap imagery viewer</a>, north up, zoomed on your property.</li>
+                          <li>Open <a className="text-emerald-300 underline" href="https://www.google.com/maps/@?api=1&map_action=map&basemap=satellite" target="_blank" rel="noreferrer">Google Maps satellite</a> or the <a className="text-emerald-300 underline" href="https://www.nconemap.gov/" target="_blank" rel="noreferrer">NC OneMap imagery viewer</a>, north up, zoomed on your property.</li>
                           <li>Screenshot just the map area and upload it:</li>
                         </ol>
                         <button type="button" onClick={() => fileInputRef.current?.click()} className="mt-1.5 w-full py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-200 font-semibold">

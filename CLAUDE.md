@@ -2,6 +2,16 @@
 
 Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no backend.
 
+## Privacy (never break this)
+
+- **Never put the owner's personal details in the repository**: not their address, street, town,
+  ZIP code, the coordinates of their property, their name or email, photos or screenshots of
+  their place, or anything else personal. That covers code, tests, fixtures, docs, file names,
+  commit messages, pull requests and the deployed site. The repository is public.
+- Examples, fixtures and walkthroughs use made-up places ("123 Main St, Springfield").
+- The owner's own plan files and screenshots of them stay local (scratch folders, git-excluded
+  `zz-*` files) and are never committed. Git authors use the owner's GitHub no-reply email.
+
 ## How to work
 
 - **Look at the real app, not just the tests.** Tests check stored numbers; they don't show
