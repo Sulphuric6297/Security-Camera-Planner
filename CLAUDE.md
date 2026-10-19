@@ -2,9 +2,18 @@
 
 Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no backend.
 
-## The testing rule (mandatory after every change)
+## How to work: speed and accuracy first, then tests
 
-**Every change, however small, must pass the full check before it is committed:**
+- **Edit directly.** Use the editor's exact find-and-replace edits on the files. Don't write
+  long scripts to make changes, and don't re-read or re-check things that haven't changed.
+- **Make all the changes for the task, then test once at the end.** Don't run tests, builds or
+  screenshots after each small edit; `npm run typecheck` is fine as a quick sanity check.
+- Then run the full check below and fix whatever it points out.
+
+## The testing rule
+
+Work through a batch of related changes first; you don't need to run tests after every small edit.
+**Before committing or pushing, the whole batch must pass the full check:**
 
 ```bash
 npm run check   # typecheck + production build + full end-to-end suite (all app areas)
@@ -18,7 +27,7 @@ npm run check   # typecheck + production build + full end-to-end suite (all app 
   Change a test only when the intended behaviour changed, and say so in the commit message.
 - **Every bug fix adds a test that fails without the fix. Every new feature adds a test for
   it.** Put it in the spec for that area (see the table below).
-- Before calling a change done, check for flakiness: `npx playwright test --repeat-each=3`.
+- For larger batches, also check for flakiness: `npx playwright test --repeat-each=3`.
 - CI runs the same `npm run check` on every push and pull request. Deploy to GitHub Pages
   runs only if it passes.
 

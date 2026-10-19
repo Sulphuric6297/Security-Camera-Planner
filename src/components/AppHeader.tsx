@@ -16,7 +16,9 @@ import {
   Upload,
   Eye,
   FileText,
-  Keyboard
+  Keyboard,
+  PanelLeft,
+  CircleHelp
 } from "lucide-react";
 import type { ViewMode } from "../types";
 
@@ -39,6 +41,8 @@ type Props = {
   onAddOverlay: () => void;
   onAddViewToReport: () => void;
   onShortcuts: () => void;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
   className?: string;
 };
 
@@ -80,9 +84,18 @@ export function AppHeader(props: Props) {
   const menuItem = "w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-200 hover:bg-white/10 rounded-lg text-left";
 
   return (
-    <div className={`h-14 bg-zinc-900/85 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl z-40 flex items-center gap-3 px-3 ring-1 ring-white/5 ${props.className ?? ""}`}>
+    <header className={`h-14 bg-zinc-900 border-b border-white/10 z-40 flex items-center gap-3 px-3 ${props.className ?? ""}`}>
       {/* Project */}
       <div className="flex items-center gap-2 min-w-0 shrink">
+        <button
+          onClick={props.onToggleSidebar}
+          className={`${iconBtn} ${props.sidebarOpen ? "text-white bg-white/10" : ""}`}
+          title={props.sidebarOpen ? "Hide the steps panel" : "Show the steps panel"}
+          aria-label="Toggle steps panel"
+          aria-pressed={props.sidebarOpen}
+        >
+          <PanelLeft className="w-4 h-4" />
+        </button>
         <div className="w-8 h-8 shrink-0 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
           <Camera className="w-5 h-5" />
         </div>
@@ -188,7 +201,10 @@ export function AppHeader(props: Props) {
             </div>
           )}
         </div>
+        <button onClick={props.onShortcuts} className={iconBtn} title="Keyboard shortcuts and help (?)" aria-label="Help">
+          <CircleHelp className="w-4 h-4" />
+        </button>
       </div>
-    </div>
+    </header>
   );
 }

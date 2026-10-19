@@ -40,8 +40,8 @@ test("click a roof on the map to trace it into a building", async ({ page }) => 
   const off = Math.min(...[0, 90, 180, -90, -180].map(r => Math.abs(rotation - 20 - r)));
   expect(off, "traced rectangle follows the roof's 20° angle").toBeLessThan(6);
 
-  // Clicking lawn finds no roof
-  await page.mouse.click(box.x + 0.1 * box.width, box.y + 0.1 * box.height);
+  // Clicking lawn finds no roof (top-left of the map is under the tool's options card)
+  await page.mouse.click(box.x + 0.75 * box.width, box.y + 0.75 * box.height);
   await expect(page.getByRole("status")).toContainText("Couldn't find a roof");
   await page.keyboard.press("Escape");
 });

@@ -16,7 +16,7 @@ test.describe("terrain & elevation", () => {
     await page.getByRole("button", { name: "Open in 2D" }).click();
     const reliefBefore = await terrainRelief(page);
     // Sculpt a mound in the plan view
-    await page.locator('button[title="Edit Terrain"]').click();
+    await page.getByRole("toolbar", { name: "Tools" }).getByRole("button", { name: "Terrain" }).click();
     const p = await planPoint(page, 0.5, 0.5);
     await page.mouse.move(p.x, p.y);
     await page.mouse.down();
