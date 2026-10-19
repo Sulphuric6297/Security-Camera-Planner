@@ -154,6 +154,29 @@ test.describe("3D, camera views and report", () => {
     await expect.poll(async () => Math.round((await win.boundingBox())!.x)).toBe(Math.round(placed.x));
   });
 
+  test("a tree in front of the house turns see-through, but not while it is selected", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.4);
+    await page.keyboard.press("Escape");
+    const [b] = await itemsOfType(page, "building");
+    // A big tree just south of the house: between the 3D view (looking north) and the house
+    await page.evaluate(b => (window as any).__scpProject().setField("items", (prev: any[]) => [...prev, { id: "t1", type: "tree", x: b.x, y: b.y + b.height / 2 + 9, rotation: 0, radius: 12, height: 32, color: "#4a7a3a", treeType: "deciduous" }]), b);
+    await page.keyboard.press("3");
+    await page.waitForTimeout(500);
+    await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 35, maxX: b.x + 35, minY: b.y - 25, maxY: b.y + 40 }, { animate: false }), b);
+    const faded = () => page.evaluate(() => {
+      let min = 1;
+      (window as any).__scpThree().scene.traverse((o: any) => {
+        if (o.userData.itemId !== "t1" || !o.isMesh) return;
+        for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m.transparent) min = Math.min(min, m.opacity);
+      });
+      return min;
+    });
+    await expect.poll(faded, { timeout: 5000 }).toBeLessThan(0.6);
+    // Selected: solid again, it's what you're working on
+    await page.evaluate(() => (window as any).__scpSelect("t1"));
+    await expect.poll(faded, { timeout: 5000 }).toBeGreaterThan(0.99);
+  });
+
   test("Camera wall shows one tile per camera", async ({ page }) => {
     await placeWithKey(page, "c", 0.3, 0.5);
     await placeWithKey(page, "c", 0.7, 0.5);

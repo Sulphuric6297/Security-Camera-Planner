@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
+import { VEHICLE_MODEL_CREDITS } from "../three/vehicleModels";
 
 const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 const mod = isMac ? "⌘" : "Ctrl";
@@ -14,6 +15,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ["R", "Trace a roof from the map"],
       ["T", "Add a tree"],
       ["P", "Add a vehicle"],
+      ["W", "Add a driveway, walkway or patio"],
       ["L", "Add text"],
       ["M", "Mark a spot to protect"],
       ["D", "Measure a distance (Shift+click: keep going)"],
@@ -93,6 +95,15 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
             </div>
           ))}
         </div>
+        <p className="mt-5 pt-3 border-t border-white/10 text-[11px] text-slate-500" data-testid="credits">
+          3D vehicles:{" "}
+          {VEHICLE_MODEL_CREDITS.map((c, i) => (
+            <span key={c.title}>
+              {i > 0 && " · "}
+              <a href={c.url} target="_blank" rel="noreferrer" className="underline hover:text-slate-300">{c.title}</a> by {c.author} ({c.license})
+            </span>
+          ))}
+        </p>
       </div>
     </div>
   );

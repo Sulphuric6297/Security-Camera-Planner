@@ -85,6 +85,36 @@ test.describe("plan editing", () => {
     expect(after.y - before.y).toBeCloseTo(-50, -1);
   });
 
+  test("zooming with the wheel after turning the view round never spins it", async ({ page }) => {
+    await page.keyboard.press("3");
+    await page.waitForTimeout(500);
+    // Turn the view round and round with the right mouse button, past a full turn
+    const p = await planPoint(page, 0.6, 0.6);
+    for (let k = 0; k < 3; k++) {
+      await page.mouse.move(p.x, p.y);
+      await page.mouse.down({ button: "right" });
+      await page.mouse.move(p.x + 700, p.y, { steps: 20 });
+      await page.mouse.up({ button: "right" });
+      await page.waitForTimeout(400);
+    }
+    // Record the heading on every frame while the wheel zoom eases in: it stays put
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__headings = [];
+      const until = performance.now() + 900;
+      const tick = () => { w.__headings.push(w.__scpView.viewInfo().heading); if (performance.now() < until) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    });
+    const q = await planPoint(page, 0.8, 0.75);
+    await page.mouse.move(q.x, q.y);
+    await page.mouse.wheel(0, -300);
+    await page.waitForTimeout(1000);
+    const headings: number[] = await page.evaluate(() => (window as any).__headings);
+    expect(headings.length).toBeGreaterThan(5);
+    const worst = Math.max(...headings.map(h => Math.abs(((h - headings[0]) % 360 + 540) % 360 - 180)));
+    expect(worst).toBeLessThan(3);
+  });
+
   test("two-finger scroll up/down zooms at the cursor; sideways slides the map", async ({ page }) => {
     const before = await measuredPxPerFt(page);
     const p = await planPoint(page, 0.8, 0.8); // (the start card covers the middle of an empty plan)
@@ -124,6 +154,32 @@ test.describe("plan editing", () => {
     await drag(page, h, { x: h.x, y: h.y - 60 }, 6);
     const [taller] = await itemsOfType(page, "building");
     expect(taller.wallHeight).toBeGreaterThan(b.wallHeight + 5);
+  });
+
+  test("a vehicle shows its real 3D model, at its stated length and in its color", async ({ page }) => {
+    await placeWithKey(page, "p", 0.5, 0.5);
+    const [car] = await itemsOfType(page, "parking");
+    await page.evaluate(id => (window as any).__scpProject().setField("items", (prev: any[]) => prev.map(i => (i.id === id ? { ...i, color: "#8e1b1b" } : i))), car.id);
+    // The model loads in the background; the vehicle is rebuilt with it
+    await page.waitForFunction(id => {
+      let found = false;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (o.userData.itemId === id && o.userData.vehicleModel) found = true; });
+      return found;
+    }, car.id, { timeout: 15000 });
+    const info = await page.evaluate(id => {
+      let obj: any = null;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (!obj && o.userData.itemId === id && o.userData.vehicleModel) obj = o; });
+      const mesh = obj.getObjectByName("vehicle-body");
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const paint = mats.find((m: any) => m.userData.paint);
+      // Its length along the car (local z, scaled)
+      mesh.geometry.computeBoundingBox();
+      const b = mesh.geometry.boundingBox;
+      return { length: (b.max.z - b.min.z) * mesh.scale.z, paint: paint?.userData.paintColor ?? null, type: obj.userData.vehicleModel };
+    }, car.id);
+    expect(info.type).toBe("sedan");
+    expect(info.length).toBeCloseTo(car.height, 1);
+    expect(info.paint).toBe("#8e1b1b");
   });
 
   test("vehicles are placed at real size; picking a type sets its size", async ({ page }) => {

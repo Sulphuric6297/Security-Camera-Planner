@@ -221,6 +221,13 @@ preview:
   pavers), reshaped by its corners like a house; a drawn driveway becomes the driveway spot to
   protect.
 
+### Real vehicles (done)
+
+- Cars are real 3D models (sedan, SUV, pickup, minivan, hatchback, sports car) at their real
+  length and in the color picked, with the paint recolored and trim, chrome, lights and glass
+  kept. Each type loads only when one is on the map (about 0.5 MB) and every car of a type shares
+  one mesh, so 60 cars draw faster than the old generated ones did.
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

@@ -437,3 +437,28 @@ test("house editing", async ({ page }) => {
   await page.mouse.click(under.x, under.y);
   await shot(page, "54-camera-under-porch");
 });
+
+test("vehicles", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.4);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  const types = [["sedan", "#9aa1a8"], ["suv", "#1f3550"], ["truck", "#7d1a1a"], ["van", "#e7e7e4"], ["hatchback", "#2c4a7a"], ["sports", "#c0392b"]] as const;
+  await page.evaluate(([b, types]) => {
+    const s = (window as any).__scpProject();
+    const sizes: Record<string, [number, number, number]> = { sedan: [6.1, 15.8, 4.8], suv: [6.6, 16.2, 5.9], truck: [6.8, 19.3, 6.4], van: [6.6, 17.5, 6.6], hatchback: [5.9, 13.6, 4.8], sports: [6.2, 14.8, 4.2] };
+    const cars = types.map(([t, color], i) => ({ id: `car-${t}`, type: "parking", vehicleType: t, color, x: b.x - 25 + i * 10, y: b.y + b.height / 2 + 14, rotation: i % 2 ? 0 : 180, width: sizes[t][0], height: sizes[t][1], vehicleHeight: sizes[t][2] }));
+    s.setField("items", (prev: any[]) => [...prev, ...cars]);
+  }, [b, types] as const);
+  await page.keyboard.press("3");
+  await page.waitForTimeout(500);
+  await page.evaluate(() => (window as any).__scpView.tiltBy(-12));
+  await page.waitForTimeout(700);
+  await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 32, maxX: b.x + 32, minY: b.y, maxY: b.y + b.height / 2 + 26 }, { animate: false }), b);
+  await page.waitForTimeout(1500);
+  await shot(page, "60-vehicles-3d");
+  await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 30, maxX: b.x - 5, minY: b.y + b.height / 2 + 4, maxY: b.y + b.height / 2 + 24 }, { animate: false }), b);
+  await shot(page, "61-vehicles-close");
+  await page.keyboard.press("2");
+  await page.waitForTimeout(800);
+  await shot(page, "62-vehicles-2d");
+});

@@ -28,11 +28,12 @@ import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
 import { isOwnBuilding } from "../lib/items";
 import { isDoor, openingPlace, snapToWall, wallPieces } from "../lib/openings";
 import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
-import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
+import { create3dCar, create3dTree, getCarSignature, getTreeSignature, resolveVehicleType } from "../three/models";
 import { buildingRoofKind, createBuildingModel, isGableWall } from "../three/buildingMesh";
 import { doorsOnWalls } from "../three/buildings";
 import { createCameraModel } from "../three/cameraModel";
 import { createPaving } from "../three/paving";
+import { createVehicleModel, onVehicleModelsLoaded, vehicleModelsVersion } from "../three/vehicleModels";
 import { disposeObjectDeep } from "../three/dispose";
 import type { BuildingItem, CameraItem, CanvasItem, Opening, ImageItem, LabelItem, ParkingItem, PavingItem, RecorderItem, TargetItem, TreeItem } from "../types";
 import { Ground } from "./ground";
@@ -307,6 +308,14 @@ export class SiteView {
     on(container, "contextmenu", e => e.preventDefault());
     on(window, "keydown", e => { if (e.key === " " && !(e.target as HTMLElement)?.closest?.("input,textarea,select")) this.spaceDown = true; });
     on(window, "keyup", e => { if (e.key === " ") this.spaceDown = false; });
+
+    // A vehicle model finished loading: rebuild the vehicles that were standing in for it
+    this.disposers.push(onVehicleModelsLoaded(() => {
+      if (!this.doc) return;
+      this.syncItems(null);
+      this.shadowsDirty = true;
+      this.invalidate(true);
+    }));
 
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(container);
@@ -645,6 +654,7 @@ export class SiteView {
         mesh.userData.solidMat = mesh.material;
         const fade = (m: THREE.Material) => {
           const c = m.clone();
+          c.userData = { ...c.userData, shared: false };
           c.transparent = true;
           c.depthWrite = false;
           return c;
@@ -714,8 +724,9 @@ export class SiteView {
       const p = itemPoint(sel, doc.items);
       targets.push(new THREE.Vector3(p.x, this.h(p.x, p.y) + 3 * this.upf(), p.y));
     }
+    // The selected tree itself always stays solid (it's what you're working on)
     const trees: THREE.Object3D[] = [];
-    for (const it of doc.items) if (it.type === "tree") { const e = this.objects.get(it.id); if (e) trees.push(e.obj); }
+    for (const it of doc.items) if (it.type === "tree" && it.id !== this.selectedId) { const e = this.objects.get(it.id); if (e) trees.push(e.obj); }
     // Each tree's target opacity: 0.15 over the house, 0.55 just next to it, else solid
     const want = new Map<THREE.Object3D, number>();
     if (targets.length && trees.length) {
@@ -1139,7 +1150,7 @@ export class SiteView {
         return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, b.gableWalls ?? null, b.roofPitch ?? null, b.floorHeight ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
-      case "parking": return getCarSignature(item as ParkingItem);
+      case "parking": return `${getCarSignature(item as ParkingItem)}|${vehicleModelsVersion()}`;
       case "paving": {
         const pv = item as PavingItem;
         return JSON.stringify([pv.x, pv.y, pv.rotation, pv.points, pv.width, pv.height, pv.surface, this.heightsVersion, doc.gridSize, doc.unitsPerFoot]);
@@ -1158,7 +1169,11 @@ export class SiteView {
         return createBuildingModel(item as BuildingItem, 0, { unitsPerFoot: doc.unitsPerFoot, photo, doors: this.doorsFor(item as BuildingItem) });
       }
       case "tree": return create3dTree(item as TreeItem);
-      case "parking": return create3dCar(item as ParkingItem);
+      case "parking": {
+        // The real model for its type, or the generated car while that model loads
+        const car = item as ParkingItem;
+        return createVehicleModel(car.color, resolveVehicleType(car) ?? "sedan", car.height) ?? create3dCar(car);
+      }
       case "paving": return createPaving(item as PavingItem, (x, y) => this.h(x, y), doc.gridSize, doc.unitsPerFoot);
       case "camera": return createCameraModel((item as CameraItem).color, doc.unitsPerFoot);
       case "image": {
@@ -2905,6 +2920,10 @@ export class SiteView {
     const np = p.clone().add(pos.sub(p).multiplyScalar(f));
     const nt = p.clone().add(target.sub(p).multiplyScalar(f));
     void this.controls.setLookAt(np.x, np.y, np.z, nt.x, nt.y, nt.z, true);
+    // setLookAt works the heading out afresh (between -180 and 180 degrees); after the view has
+    // been turned round a few times, easing there from the old heading would spin the whole view
+    // round. Bring the old heading within half a turn of the new one first (it looks the same).
+    this.controls.normalizeRotations();
     this.invalidate();
   }
 
@@ -3001,8 +3020,10 @@ export class SiteView {
       const obj = item.type === "label" || item.type === "target" || item.type === "recorder" ? this.pinGhost() : this.buildObject(item);
       if (obj) {
         obj.traverse(o => {
-          const m = (o as THREE.Mesh).material as THREE.Material | undefined;
-          if (m) { m.transparent = true; m.opacity = 0.55; m.depthWrite = false; }
+          // Its own see-through copies (the originals may be shared with other models)
+          const mesh = o as THREE.Mesh;
+          const see = (m: THREE.Material) => { const c = m.clone(); c.userData = { ...c.userData, shared: false }; c.transparent = true; c.opacity = 0.55; c.depthWrite = false; return c; };
+          if (mesh.material) mesh.material = Array.isArray(mesh.material) ? mesh.material.map(see) : see(mesh.material);
           o.raycast = () => {};
         });
       }

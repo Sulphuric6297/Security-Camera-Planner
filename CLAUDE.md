@@ -55,12 +55,12 @@ Useful commands:
 | --- | --- |
 | `smoke.spec.ts` | App loads, onboarding, steps, 2D/3D/camera-wall views, tool and view shortcuts |
 | `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
-| `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types, dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning |
+| `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types, dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning, wheel zoom never spins a turned view, vehicles shown as their real 3D model (length, paint) |
 | `camera.spec.ts` | Aim handle sets rotation and tilt, field-of-view and range handles, dragging a camera onto a wall mounts it, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation; the brush works as fast at a low frame rate; Woods brush plants/clears trees, with Undo |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip, Recent plans (New keeps the plan, Undo, reopen, delete, duplicate) |
-| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, walls with siding/windows and doors at marked door spots, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
+| `views-and-report.spec.ts` | 3D render, camera preview, trees in front of the house see-through (but not the selected one), 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, walls with siding/windows and doors at marked door spots, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
 | `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens, picking from a side list brings the item into view |
 | `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), Fix a spot (aim + zoom the best camera, or turn an idle one), spots renamed for their kind, buildings in the camera plan, open-sided buildings don't block, drawing porch/carport parts of a house (cameras see under them, Esc, remove one), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid, wide-lens curve (pure logic) |
@@ -112,6 +112,10 @@ keep it updated as phases ship.
   `src/components/`. The map view (2D and 3D are one view) is `src/viewport/`: `SiteView.ts` is the
   engine (scene, camera-controls navigation, picking, handles), `SiteViewport.tsx` its React wrapper.
   The printed plan is drawn by `src/lib/planSvg.ts`.
+- Vehicles are real 3D models: `public/models/cars/pack/*.glb` (one small file per type, split from
+  the "Generic passenger car pack" by Comrade1280, CC BY 4.0, credited in the shortcuts dialog;
+  the body texture's alpha marks the paint). `src/three/vehicleModels.ts` loads them on demand;
+  the generated car in `src/three/models.ts` stands in until one has loaded (and in node tests).
 - Real camera models live in `public/cameras.json` (a copy is built in from `src/data/cameras.json`;
   `src/lib/cameraCatalog.ts` loads the site's copy at start-up). The UniFi entries are refreshed
   weekly by `.github/workflows/update-cameras.yml` (`scripts/update-camera-catalog.mjs`); edit the
