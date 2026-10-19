@@ -118,7 +118,7 @@ export function SiteViewport(props: Props) {
         {props.actions.toggleLock && (
           <button
             className={`${btn} ${props.actions.locked ? "!text-amber-300 bg-amber-500/15" : ""}`}
-            title={props.actions.locked ? "Locked in place: click to unlock" : "Lock in place, so it can't be moved by mistake"}
+            title={props.actions.locked ? "Locked in place: click to unlock" : "Lock in place, so it can't be moved or reshaped by mistake (its windows, doors and porches stay editable)"}
             aria-label={props.actions.locked ? "Unlock" : "Lock"}
             aria-pressed={!!props.actions.locked}
             onClick={props.actions.toggleLock}

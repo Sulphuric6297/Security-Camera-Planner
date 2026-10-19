@@ -17,6 +17,7 @@ import {
   buildingWorldPoints,
   cameraMountHeight,
   cameraPlanPosition,
+  cameraUnderRoof,
   heightAt,
   nearestWall,
   rotatePoint,
@@ -25,7 +26,7 @@ import {
 } from "../lib/planGeom";
 import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
 import { isOwnBuilding } from "../lib/items";
-import { openingPlace, snapToWall, wallPieces } from "../lib/openings";
+import { isDoor, openingPlace, snapToWall, wallPieces } from "../lib/openings";
 import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
 import { buildingRoofKind, createBuildingModel, isGableWall } from "../three/buildingMesh";
@@ -79,7 +80,7 @@ const STYLE = `
 .scp-bld{font:700 12px system-ui,sans-serif;color:#fff;text-shadow:0 0 4px rgba(0,0,0,.9),0 0 2px #000}
 .scp-text{pointer-events:auto;cursor:move;font-weight:700;font-family:system-ui,sans-serif;text-shadow:0 0 3px #fff,0 0 2px #fff}
 .scp-text.sel{color:#059669 !important}
-.scp-h{position:absolute;left:0;top:0;pointer-events:auto;will-change:transform;box-sizing:border-box;touch-action:none}
+.scp-h{position:absolute;left:0;top:0;pointer-events:auto;will-change:translate;box-sizing:border-box;touch-action:none}
 .scp-h[data-handle=corner]{width:14px;height:14px;border-radius:50%;background:#fff;border:2.5px solid #059669;cursor:grab;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=mid]{width:11px;height:11px;border-radius:50%;background:rgba(255,255,255,.65);border:2px solid #059669;cursor:copy}
 .scp-h[data-handle=height],.scp-h[data-handle=cam-height]{width:22px;height:30px;cursor:ns-resize;display:flex;align-items:center;justify-content:center}
@@ -89,8 +90,9 @@ const STYLE = `
 .scp-h[data-handle=fov-l],.scp-h[data-handle=fov-r],.scp-h[data-handle=range],.scp-h[data-handle=radius]{width:15px;height:15px;border-radius:50%;background:var(--c,#3b82f6);border:2.5px solid #fff;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=range]{cursor:ns-resize}
 .scp-h[data-handle=opening-size]{width:11px;height:11px;border-radius:2px;background:#fff;border:2px solid #0ea5e9;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
-.scp-h[data-handle=opening-size][data-index="2"]{cursor:ns-resize}
+.scp-h[data-handle=opening-size][data-index="2"],.scp-h[data-handle=opening-size][data-index="3"]{cursor:ns-resize}
 .scp-h[data-handle=opening]{width:10px;height:10px;border-radius:50%;background:#0ea5e9;border:2px solid #fff;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5);opacity:.55;transition:opacity .15s,scale .15s}
+/* Handles are placed with the translate property, so scale grows them where they are */
 .scp-h[data-handle=opening]:hover,.scp-h[data-handle=opening][data-picked="1"]{opacity:1;scale:1.25}
 .scp-h[data-handle=gable]{width:22px;height:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
 .scp-h[data-handle=gable]::before{content:"";width:20px;height:14px;background:#fff;clip-path:polygon(0 100%,100% 100%,100% 45%,50% 0,0 45%);border:0}
@@ -494,8 +496,22 @@ export class SiteView {
     if (item.type === "building") {
       const b = item as BuildingItem;
       const base = buildingBaseHeight(b, doc.heights, doc.gridSize);
-      const top = base + (this.objects.get(b.id)?.obj.userData.top ?? b.wallHeight ?? 14);
-      buildingWorldPoints(b).forEach(p => pts.push(new THREE.Vector3(p.x, base, p.y), new THREE.Vector3(p.x, top, p.y)));
+      const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * this.upf();
+      // Its real outline: the walls, the roof's own corners (not the ridge height everywhere) and
+      // any porch or carport sticking out of it
+      buildingWorldPoints(b).forEach(p => pts.push(new THREE.Vector3(p.x, base, p.y), new THREE.Vector3(p.x, base + wall, p.y)));
+      openPartsOf(b).forEach(part => part.pts.forEach(q => {
+        const r = rotatePoint(q, b.rotation);
+        pts.push(new THREE.Vector3(b.x + r.x, base, b.y + r.y), new THREE.Vector3(b.x + r.x, base + wall, b.y + r.y));
+      }));
+      const roof = this.objects.get(b.id)?.obj.getObjectByName("building-roof") as THREE.Mesh | undefined;
+      const rp = roof?.geometry.getAttribute("position");
+      if (roof && rp) {
+        roof.updateWorldMatrix(true, false);
+        const v = new THREE.Vector3();
+        const step = Math.max(1, Math.floor(rp.count / 400));
+        for (let i = 0; i < rp.count; i += step) pts.push(v.fromBufferAttribute(rp, i).applyMatrix4(roof.matrixWorld).clone());
+      }
     } else {
       const b = this.itemBounds(id)!;
       const h = this.itemAnchor(item).y;
@@ -1120,7 +1136,7 @@ export class SiteView {
       case "building": {
         const b = item as BuildingItem;
         const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, b.gableWalls ?? null, b.roofPitch ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, b.gableWalls ?? null, b.roofPitch ?? null, b.floorHeight ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
@@ -1582,9 +1598,11 @@ export class SiteView {
     const doc = this.doc;
     if (!doc) return;
     const picked = this.tool.mode === "select" && !this.tool.terrain ? this.item(this.selectedId) : null;
-    // A locked item has no handles: nothing on it can be dragged
-    const sel = picked && !picked.locked ? picked : null;
-    const key = sel ? `${sel.id}|${sel.type}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).map(p => `${p.kind}${p.floor > 0}${p.railing}${p.entries?.length ?? -1}`).join(",")}|${(sel as BuildingItem).openings?.length ?? -1}|${this.tool.opening ?? -1}` : sel.type === "paving" ? buildingLocalPoints(sel as unknown as BuildingItem).length : ""}` : "";
+    // A locked item keeps its place and outline: no corner, edge, rotate or mount-height handles,
+    // but its windows, doors, porches, roof ends and a camera's aim stay editable
+    const sel = picked;
+    const locked = !!sel?.locked;
+    const key = sel ? `${sel.id}|${sel.type}|${locked}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).map(p => `${p.kind}${p.floor > 0}${p.railing}${p.entries?.length ?? -1}`).join(",")}|${(sel as BuildingItem).openings?.length ?? -1}|${this.tool.opening ?? -1}` : sel.type === "paving" ? buildingLocalPoints(sel as unknown as BuildingItem).length : ""}` : "";
     if (key === this.handleKey) return;
     this.handleKey = key;
     this.handles.forEach(h => h.el.remove());
@@ -1604,14 +1622,14 @@ export class SiteView {
       this.handles.push({ el, kind, index: opts.index, world, start, visible: opts.visible });
     };
     const id = sel.id;
-    if (sel.type === "paving") this.buildingHandles(id, add);
+    if (sel.type === "paving" && !locked) this.buildingHandles(id, add);
     if (sel.type === "building") {
-      this.buildingHandles(id, add);
+      this.buildingHandles(id, add, locked);
       this.openPartHandles(id, add);
       this.openingHandles(id, add);
       this.gableHandles(id, add);
     }
-    else if (sel.type === "camera") this.cameraHandles(id, add);
+    else if (sel.type === "camera") this.cameraHandles(id, add, locked);
     else if (sel.type === "tree") {
       add("radius", () => {
         const t = this.item(id) as TreeItem | null;
@@ -1620,7 +1638,7 @@ export class SiteView {
         return new THREE.Vector3(t.x + r, this.h(t.x + r, t.y) + 0.2, t.y);
       }, e => this.planeDrag(e, id, (p, t: TreeItem) => ({ radius: Math.max(1 * this.upf(), Math.hypot(p.x - t.x, p.y - t.y) / (t.width ?? 1)) })), { title: "Drag to resize the crown", color: "#16a34a" });
     }
-    if (sel.type === "building" || sel.type === "parking" || sel.type === "image" || sel.type === "paving") this.rotateHandle(id, add);
+    if (!locked && (sel.type === "building" || sel.type === "parking" || sel.type === "image" || sel.type === "paving")) this.rotateHandle(id, add);
   }
 
   private planeDrag<T extends CanvasItem>(e: PointerEvent, id: string, patch: (p: P, item: T, ev: PointerEvent) => Partial<CanvasItem> | null, y?: number): Drag | null {
@@ -1677,7 +1695,7 @@ export class SiteView {
   }
 
   /** Corners and edge middles of an outline: a building's, or a driveway's or patio's (flat on the ground). */
-  private buildingHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+  private buildingHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void, locked = false) {
     const b0 = this.item(id) as BuildingItem;
     const flat = b0.type !== "building";
     const n = buildingLocalPoints(b0).length;
@@ -1711,7 +1729,7 @@ export class SiteView {
         end: () => this.cb.onCommit()
       };
     };
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < (locked ? 0 : n); i++) {
       add("corner", () => {
         const b = this.item(id) as BuildingItem | null;
         if (!b) return null;
@@ -1836,7 +1854,7 @@ export class SiteView {
         const r = rotatePoint({ x: place.x + place.normal.x * 0.5 * this.upf(), y: place.y + place.normal.y * 0.5 * this.upf() }, b.rotation);
         return { b, o, world: new THREE.Vector3(b.x + r.x, buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + o.sill + o.height / 2, b.y + r.y) };
       };
-      add("opening", () => where()?.world ?? null, () => {
+      add("opening", () => where()?.world ?? null, e => {
         const w = where();
         if (!w) return null;
         this.cb.onSelectOpening(id, k);
@@ -1844,36 +1862,58 @@ export class SiteView {
         const pose = { x: w.b.x, y: w.b.y, rotation: w.b.rotation };
         const outline = buildingLocalPoints(w.b);
         const pieces = wallPieces(outline, insetParts(outline, openPartsOf(w.b)));
+        const upf = this.upf();
+        // In a tilted view a window moves on its wall: along it and up or down (doors stay on the
+        // floor; their bottom square sets how high they sit). From above, along the walls only.
+        const place0 = openingPlace(outline, w.o, pieces);
+        const n = place0 ? rotatePoint(place0.normal, w.b.rotation) : null;
+        const wallPlane = n && this.controls.polarAngle > 22 * DEG && !isDoor(w.o.kind)
+          ? new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(n.x, 0, n.y), w.world)
+          : null;
+        const grab = new THREE.Vector3();
+        const grabbed = !!wallPlane && !!this.ray(e.clientX, e.clientY).intersectPlane(wallPlane, grab);
+        const sill0 = w.o.sill;
         let moved = false;
         return {
           move: ev => {
-            const hit = this.planeAt(ev.clientX, ev.clientY, y);
             const b = this.item(id) as BuildingItem | null;
             const o = b?.openings?.[k];
-            if (!hit || !b || !o) return;
+            if (!b || !o) return;
+            let hit: THREE.Vector3 | null = null;
+            let sill = o.sill;
+            if (grabbed) {
+              const h = new THREE.Vector3();
+              if (this.ray(ev.clientX, ev.clientY).intersectPlane(wallPlane!, h)) {
+                hit = h;
+                const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+                sill = Math.round(clamp(sill0 + (h.y - grab.y), 0, Math.max(0, wall - o.height - 0.25 * upf)) / (0.25 * upf)) * 0.25 * upf;
+              }
+            } else hit = this.planeAt(ev.clientX, ev.clientY, y);
+            if (!hit) return;
             const at = snapToWall(pieces, toBuildingLocal(pose, { x: hit.x, y: hit.z }), o.width);
             if (!at) return;
             moved = true;
-            const next = b.openings!.map((q, j) => (j === k ? { ...q, x: at.x, y: at.y, edge: undefined, at: undefined } : q));
+            const next = b.openings!.map((q, j) => (j === k ? { ...q, x: at.x, y: at.y, sill, edge: undefined, at: undefined } : q));
             this.cb.onChange(id, { openings: next } as Partial<CanvasItem>);
           },
           end: () => { if (moved) this.cb.onCommit(); }
         };
-      }, { index: k, picked: k === this.tool.opening, title: "Drag along the walls to move it · click to edit it" });
+      }, { index: k, picked: k === this.tool.opening, title: "Drag to move it along the wall (and up or down) · click to edit it" });
       if (k !== this.tool.opening) return;
-      // The picked one: drag its sides to make it wider or narrower, its top for its height
-      const edgePoint = (side: number, top = false) => {
+      // The picked one: drag its sides to make it wider or narrower, its top for its height, its
+      // bottom for how high it sits (the sill)
+      const edgePoint = (side: number, top = false, bottom = false) => {
         const w = where();
         if (!w) return null;
         const outline = buildingLocalPoints(w.b);
         const place = openingPlace(outline, w.o, wallPieces(outline, insetParts(outline, openPartsOf(w.b))));
         if (!place) return null;
         const off = 0.4 * this.upf();
-        const lx = place.x + place.dir.x * (top ? 0 : side * w.o.width / 2) + place.normal.x * off;
-        const ly = place.y + place.dir.y * (top ? 0 : side * w.o.width / 2) + place.normal.y * off;
+        const lx = place.x + place.dir.x * (top || bottom ? 0 : side * w.o.width / 2) + place.normal.x * off;
+        const ly = place.y + place.dir.y * (top || bottom ? 0 : side * w.o.width / 2) + place.normal.y * off;
         const r = rotatePoint({ x: lx, y: ly }, w.b.rotation);
         const base = buildingBaseHeight(w.b, this.doc!.heights, this.doc!.gridSize);
-        return new THREE.Vector3(w.b.x + r.x, base + (top ? w.o.sill + w.o.height : w.o.sill + w.o.height / 2), w.b.y + r.y);
+        return new THREE.Vector3(w.b.x + r.x, base + (top ? w.o.sill + w.o.height : bottom ? w.o.sill : w.o.sill + w.o.height / 2), w.b.y + r.y);
       };
       const setOpening = (patch: Partial<Opening>) => {
         const b = this.item(id) as BuildingItem | null;
@@ -1911,6 +1951,16 @@ export class SiteView {
           setOpening({ height: Math.round(clamp(h, 1 * this.upf(), wall - o.sill) / (0.25 * this.upf())) * 0.25 * this.upf() });
         });
       }, { index: 2, title: "Drag up or down to make it taller or shorter" });
+      add("opening-size", () => edgePoint(0, false, true), e => {
+        const w = where();
+        if (!w) return null;
+        const top = w.o.sill + w.o.height;
+        // The top stays put: lowering the bottom makes it taller
+        return this.heightDrag(e, () => edgePoint(0, false, true), () => w.o.sill, v => {
+          const sill = Math.round(clamp(v, 0, top - 1 * this.upf()) / (0.25 * this.upf())) * 0.25 * this.upf();
+          setOpening({ sill, height: top - sill });
+        });
+      }, { index: 3, title: "Drag up or down to move its bottom (how high it sits)" });
     });
   }
 
@@ -2034,7 +2084,7 @@ export class SiteView {
     };
   }
 
-  private cameraHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+  private cameraHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void, locked = false) {
     const upf = this.upf();
     const cam = () => this.item(id) as CameraItem | null;
     const pos = (c: CameraItem) => cameraPlanPosition(c, this.doc!.items);
@@ -2088,6 +2138,7 @@ export class SiteView {
       const { dist } = angleTo(c, hit);
       return { range: Math.round(Math.max(5 * upf, dist)) };
     }), { title: "Drag to change how far the view is drawn", color: cam()?.color });
+    if (locked) return;
     add("cam-height", () => {
       const c = cam();
       return c ? this.cameraWorld(c) : null;
@@ -2144,7 +2195,7 @@ export class SiteView {
       el.style.display = "";
       const w = center ? el.offsetWidth / 2 : 0;
       const hgt = center ? el.offsetHeight / 2 : 0;
-      el.style.transform = `translate(${Math.round(s.x - w)}px, ${Math.round(s.y - hgt + dy)}px)`;
+      el.style.translate = `${Math.round(s.x - w)}px ${Math.round(s.y - hgt + dy)}px`;
     };
     this.layoutOverlays();
     for (const m of this.measureLabels) place(m.el, m.at, -12);
@@ -2160,7 +2211,7 @@ export class SiteView {
         const s = this.project(w);
         if (s) {
           h.el.style.display = "";
-          h.el.style.transform = `translate(${Math.round(s.x - 11)}px, ${Math.round(s.y - 62)}px)`;
+          h.el.style.translate = `${Math.round(s.x - 11)}px ${Math.round(s.y - 62)}px`;
           continue;
         }
       }
@@ -2168,7 +2219,7 @@ export class SiteView {
         const s = this.project(w);
         if (s) {
           h.el.style.display = "";
-          h.el.style.transform = `translate(${Math.round(s.x - 11)}px, ${Math.round(s.y - 34)}px)`;
+          h.el.style.translate = `${Math.round(s.x - 11)}px ${Math.round(s.y - 34)}px`;
           continue;
         }
       }
@@ -2329,6 +2380,12 @@ export class SiteView {
         if (cur.type === "camera") {
           const cam = cur as CameraItem;
           const items = this.doc!.items;
+          // Under a porch or carport roof: on the wall at its back, or hung under the roof
+          const under = ev.altKey ? null : cameraUnderRoof({ x, y }, items, upf, cam.mount?.height ?? cameraMountHeight(cam));
+          if (under) {
+            this.cb.onChange(id, { x: under.x, y: under.y, rotation: cam.mount?.type === "building" && under.mount.type === "building" ? cam.rotation : under.rotation, mount: under.mount, height: under.heightFt } as Partial<CameraItem>);
+            return;
+          }
           const wall = ev.altKey ? null : nearestWall({ x, y }, items.filter(i => i.type === "building"));
           if (wall && wall.distance < wallSnapDistance(upf)) {
             const b = items.find(i => i.id === wall.buildingId) as BuildingItem | undefined;
@@ -2338,7 +2395,7 @@ export class SiteView {
               x: wall.point.x,
               y: wall.point.y,
               rotation: sameWall && cam.mount?.edgeIndex === wall.edgeIndex ? cam.rotation : wall.rotation,
-              mount: { type: "building", buildingId: wall.buildingId, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, height },
+              mount: { type: "building", buildingId: wall.buildingId, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, at: wall.at, height },
               height
             } as Partial<CameraItem>);
           } else {
@@ -2359,19 +2416,22 @@ export class SiteView {
     const domItem = (target.closest?.("[data-item-id]") as HTMLElement | null)?.dataset.itemId ?? null;
     const itemId = h ? this.selectedId : domItem ?? this.pick(ev.clientX, ev.clientY);
     const g = this.groundAt(ev.clientX, ev.clientY);
-    let local: P | null = null, height: number | null = null;
+    let local: P | null = null, height: number | null = null, surface: P | null = null;
     const item = this.item(itemId);
     if (item?.type === "building") {
       const b = item as BuildingItem;
       const base = buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize);
       const obj = this.objects.get(b.id)?.obj;
       this.ray(ev.clientX, ev.clientY);
-      const hit = obj ? this.raycaster.intersectObject(obj, true).find(x => x.object.name === "building-walls") : undefined;
+      const hits = obj ? this.raycaster.intersectObject(obj, true) : [];
+      const hit = hits.find(x => x.object.name === "building-walls");
+      // What was clicked on the house itself (a railing, a porch floor, a post), on the plan
+      if (hits[0]) surface = { x: hits[0].point.x, y: hits[0].point.z };
       const p = hit?.point ?? this.planeAt(ev.clientX, ev.clientY, base + (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / 2);
       if (p) local = toBuildingLocal(b, { x: p.x, y: p.z });
       if (hit) height = hit.point.y - base;
     }
-    this.cb.onContextMenu({ clientX: ev.clientX, clientY: ev.clientY, itemId, handle: h ? { kind: h.kind, index: h.index } : null, ground: g ? { x: g.x, y: g.z } : null, local, height });
+    this.cb.onContextMenu({ clientX: ev.clientX, clientY: ev.clientY, itemId, handle: h ? { kind: h.kind, index: h.index } : null, ground: g ? { x: g.x, y: g.z } : null, local, height, surface });
   }
 
   private onPointerDown(e: PointerEvent) {
@@ -2917,14 +2977,17 @@ export class SiteView {
     }
     const doc = this.doc;
     let item: CanvasItem = { ...preview, x: at.x, y: at.z } as CanvasItem;
-    if (item.type === "camera") {
+    const under = item.type === "camera" ? cameraUnderRoof({ x: at.x, y: at.z }, doc.items, doc.unitsPerFoot) : null;
+    if (under) {
+      item = { ...item, x: under.x, y: under.y, rotation: under.rotation, mount: under.mount, height: under.heightFt } as CameraItem;
+    } else if (item.type === "camera") {
       const buildings = doc.items.filter(i => i.type === "building");
       const on = buildings.find(b => pointInPolygonXY({ x: at.x, y: at.z }, buildingWorldPoints(b as BuildingItem)));
       const wall = nearestWall({ x: at.x, y: at.z }, on ? [on] : buildings);
       if (wall && (on || wall.distance < wallSnapDistance(doc.unitsPerFoot))) {
         const b = buildings.find(x => x.id === wall.buildingId) as BuildingItem;
         const height = mountHeightForBuilding(b);
-        item = { ...item, x: wall.point.x, y: wall.point.y, rotation: wall.rotation, mount: { type: "building", buildingId: wall.buildingId, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, height }, height } as CameraItem;
+        item = { ...item, x: wall.point.x, y: wall.point.y, rotation: wall.rotation, mount: { type: "building", buildingId: wall.buildingId, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, at: wall.at, height }, height } as CameraItem;
       }
     }
     // Paving is built where it lies (draped on the ground), so its preview is rebuilt as it moves

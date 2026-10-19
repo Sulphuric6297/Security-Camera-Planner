@@ -389,3 +389,51 @@ test("paving", async ({ page }) => {
   await page.evaluate(id => (window as any).__scpSelect(id), drive.id);
   await shot(page, "47-paving-selected");
 });
+
+test("house editing", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.45);
+  await page.keyboard.press("Escape");
+  const [b0] = await itemsOfType(page, "building");
+  await page.evaluate(id => {
+    const s = (window as any).__scpProject();
+    s.setField("items", (prev: any[]) => prev.map((i: any) => (i.id !== id ? i : {
+      ...i,
+      label: "House",
+      openParts: [{ kind: "porch", pts: [{ x: -15, y: 18 }, { x: 15, y: 18 }, { x: 15, y: 26 }, { x: -15, y: 26 }], floor: 2.5, roof: "own" }, { kind: "carport", pts: [{ x: 10, y: -18 }, { x: 25, y: -18 }, { x: 25, y: -6 }, { x: 10, y: -6 }], floor: 0 }],
+      openings: [
+        { id: "slider", kind: "slider", x: 0, y: 18, width: 6, height: 6.7, sill: 2.5 },
+        { id: "w1", kind: "window", x: -10, y: 18, width: 3, height: 4.25, sill: 5 },
+        { id: "w2", kind: "window", x: 10, y: 18, width: 3, height: 4.25, sill: 5 },
+        { id: "d2", kind: "door", x: -25, y: 6, width: 3, height: 6.7, sill: 0 }
+      ]
+    })));
+  }, b0.id);
+  await page.keyboard.press("3");
+  await page.waitForTimeout(500);
+  await page.evaluate(() => (window as any).__scpView.tiltBy(-18));
+  await page.waitForTimeout(800);
+  const fit = (b: any) => page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 32, maxX: b.x + 32, minY: b.y - 22, maxY: b.y + 34 }, { animate: false }), b);
+  await fit(b0);
+  await page.evaluate(id => (window as any).__scpSelect(id), b0.id);
+  await shot(page, "50-house-selected");
+  // Pick the sliding door
+  await page.locator('[data-handle="opening"][data-index="0"]').click();
+  await shot(page, "51-door-picked");
+  // Right-click the porch railing
+  const at = async (x: number, y: number, lift: number) => (await page.evaluate(([x, y, l]) => (window as any).__scpView.toClient(x, y, l), [b0.x + x, b0.y + y, lift] as const)) as { x: number; y: number };
+  const rail = await at(-10, 26, 4.5);
+  await page.mouse.click(rail.x, rail.y, { button: "right" });
+  await shot(page, "52-railing-menu");
+  await page.keyboard.press("Escape");
+  // Esc again lets go of the door; the house stays selected
+  await page.keyboard.press("Escape");
+  await page.getByRole("toolbar", { name: "Selection actions" }).getByLabel("Floor height").selectOption("Raised");
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => (window as any).__scpSelect(null));
+  await shot(page, "53-raised-floor");
+  // A camera under the porch
+  await page.keyboard.press("c");
+  const under = await at(-5, 20, 0);
+  await page.mouse.click(under.x, under.y);
+  await shot(page, "54-camera-under-porch");
+});

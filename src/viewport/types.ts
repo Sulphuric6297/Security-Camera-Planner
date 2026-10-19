@@ -96,4 +96,6 @@ export type ContextInfo = {
   ground: P | null;
   local: P | null;
   height: number | null;
+  /** The point clicked on a building's own model (a railing, a porch floor...), on the plan. */
+  surface?: P | null;
 };

@@ -135,3 +135,64 @@ export const overlaps = (a: Opening, b: Opening, gap = 0) => {
 
 /** Add an opening, taking out any it would overlap (as a window gives way to a new door). */
 export const placeOpening = (list: Opening[], o: Opening, upf: number) => [...list.filter(q => !overlaps(q, o, 0.3 * upf)), o];
+
+/** A copy of an opening (pasted): beside it on the same wall when there's room, else on the wall
+ * nearest `at` (or the longest wall), always on a wall and with a new id. */
+export const pastedOpening = (outline: P[], src: Opening, upf: number, pieces: WallPiece[] = wallPieces(outline), at?: P): Opening | null => {
+  const id = `o${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  let p: P | null = null;
+  if (at) p = snapToWall(pieces, at, src.width);
+  else {
+    const place = src.x !== undefined || src.edge !== undefined ? openingPlace(outline, src, pieces) : null;
+    if (place) {
+      const step = src.width + 2 * upf;
+      const ahead = place.at + step + src.width / 2 <= place.len ? 1 : place.at - step - src.width / 2 >= 0 ? -1 : 0;
+      if (ahead) p = { x: place.x + place.dir.x * step * ahead, y: place.y + place.dir.y * step * ahead };
+    }
+    if (!p) {
+      // The middle of the longest wall
+      const w = [...pieces].sort((a, b) => Math.hypot(b.b.x - b.a.x, b.b.y - b.a.y) - Math.hypot(a.b.x - a.a.x, a.b.y - a.a.y))[0];
+      if (w) p = { x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 };
+    }
+    if (p) p = snapToWall(pieces, p, src.width);
+  }
+  if (!p) return null;
+  const { edge: _e, at: _a, ...rest } = src;
+  return { ...rest, id, x: p.x, y: p.y };
+};
+
+/** The first floor's height above the ground (the top of the foundation): a slab, a crawl space,
+ * a raised floor. Unset: about a foot, what the story presets assume. */
+export const FLOOR_PRESETS: { label: string; ft: number; title: string }[] = [
+  { label: "Slab", ft: 0.5, title: "On a slab: the floor about 6 inches up" },
+  { label: "Crawl space", ft: 2.5, title: "Over a crawl space: the floor about 2½ ft up" },
+  { label: "Raised", ft: 4, title: "Raised: the floor about 4 ft up, steps to every door" }
+];
+export const floorOf = (b: { floorHeight?: number }, upf: number) => b.floorHeight ?? 1 * upf;
+/** Wall height (to the eaves) for a story preset on a house with this floor height. */
+export const wallForStories = (wallFt: number, b: { floorHeight?: number }, upf: number) => wallFt * upf + floorOf(b, upf) - 1 * upf;
+export const storyPresetOf = (b: { floorHeight?: number; wallHeight?: number }, upf: number, defaultWall: number) => {
+  const wall = b.wallHeight ?? defaultWall;
+  return STORY_PRESETS.find(p => Math.abs(wallForStories(p.wallFt, b, upf) - wall) < 0.6 * upf);
+};
+
+/**
+ * A new floor height for a house: everything on it goes up or down with the floor (the walls to
+ * the eaves, the windows and doors, raised porch and deck floors), so the stories stay as tall.
+ * `openings` are its current ones (the automatic windows when it has none of its own).
+ */
+export const withFloorHeight = (
+  b: { floorHeight?: number; wallHeight?: number; openParts?: { floor: number; kind: string }[] },
+  height: number,
+  upf: number,
+  openings: Opening[],
+  defaultWall: number
+) => {
+  const delta = height - floorOf(b, upf);
+  return {
+    floorHeight: height,
+    wallHeight: Math.max(6 * upf, (b.wallHeight ?? defaultWall) + delta),
+    openings: openings.map(o => ({ ...o, sill: Math.max(0, o.sill + delta) })),
+    ...(b.openParts ? { openParts: b.openParts.map(p => (p.floor > 0.2 * upf && (p.kind === "porch" || p.kind === "deck") ? { ...p, floor: Math.max(0, p.floor + delta) } : p)) } : {})
+  };
+};

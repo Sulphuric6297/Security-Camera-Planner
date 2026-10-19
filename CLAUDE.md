@@ -73,6 +73,7 @@ Useful commands:
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view, the picture fills the window with Settings beside it, closing with its X/tabs/steps; camera pictures rendered from the 3D scene |
 | `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |
 | `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows; a hand-labelled real satellite photo of a parking lot (`tests/fixtures/aerial`) (pure logic) |
+| `house-editing.spec.ts` | Hands-on editing of a porch house (mouse and keyboard, checked on screen): the picked door's dot on the door, windows dragged up the wall and the bottom square for the sill, locked houses still edit their windows/porches but don't move, copy/paste windows (Ctrl+C/V) and porches (right-click), steps from a railing's right-click, menus stay on screen, cameras under porches and carports, floor height (crawl space) |
 | `paving.spec.ts` | Driveways, walkways and patios: draped on sloping ground, cut to the terrain grid, a drawn driveway becomes the spot to protect (pure logic); placing one with W, surface/kind, corner and bend handles |
 
 When you add a feature in a new area, add a new spec file and a row to this table.

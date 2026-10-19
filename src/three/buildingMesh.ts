@@ -8,7 +8,7 @@ import type { BuildingItem } from "../types";
 import { buildingLocalPoints } from "../lib/planGeom";
 import { FACADE_BAY_FT, FACADE_STOREY_FT, applyPhotoUVs, orientedRect, buildFacadeWallPieces, buildFacadeWalls, buildRoof, chooseRoof, type PhotoRect } from "./buildings";
 import { attachEdge, clipToPart, snapPartToWalls, enclosedWalls, hasRailing, insetParts, openPartPosts, openPartsOf, partEntries, partRoof, partSides } from "../lib/openParts";
-import { getEdgeOutwardNormal } from "../lib/geometry";
+import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
 import type { Opening, OpenPart } from "../types";
 import { isDoor, openingPlace, storiesOf, wallPieces } from "../lib/openings";
 
@@ -95,7 +95,7 @@ const trimMat = () => openingMat("trim", () => new THREE.MeshStandardMaterial({ 
  * A window or door the user placed, as a model on the wall: trim, glass or panels, sill, shutters.
  * Box fronts face +z, turned to the wall's outward normal; local building coordinates.
  */
-const createOpening = (o: Opening, place: { x: number; y: number; normal: { x: number; y: number } }, upf: number, color: string) => {
+const createOpening = (o: Opening, place: { x: number; y: number; normal: { x: number; y: number } }, upf: number, color: string, steps = true) => {
   const g = new THREE.Group();
   const w = o.width, h = o.height, trim = 0.3 * upf;
   const box = (bw: number, bh: number, d: number, x: number, y: number, z: number, mat: THREE.Material) => {
@@ -135,7 +135,18 @@ const createOpening = (o: Opening, place: { x: number; y: number; normal: { x: n
         box(leafW * 0.5, h * 0.18, 0.22 * upf, x, o.sill + h * 0.8, 0.12 * upf, glassMat());
       }
     }
-    if (o.sill < 0.5 * upf) box(w + 1.2 * upf, 0.5 * upf, 2.2 * upf, 0, 0.25 * upf, 1.1 * upf, openingMat("step", () => new THREE.MeshStandardMaterial({ color: "#9a9a96", roughness: 0.95 })));
+    const stepMat = openingMat("step", () => new THREE.MeshStandardMaterial({ color: "#9a9a96", roughness: 0.95 }));
+    if (o.sill < 0.5 * upf) box(w + 1.2 * upf, 0.5 * upf, 2.2 * upf, 0, 0.25 * upf, 1.1 * upf, stepMat);
+    else if (steps) {
+      // A raised floor with no porch in front: steps down to the ground, about 7 inches each
+      const n = Math.max(1, Math.round(o.sill / (0.6 * upf)));
+      const run = 0.95 * upf;
+      for (let k = 0; k < n; k++) {
+        const top = (o.sill * (n - k)) / n;
+        const depth = run * (k + 1) + 0.6 * upf;
+        box(w + 1.2 * upf, top, depth, 0, top / 2, depth / 2, stepMat);
+      }
+    }
   } else {
     box(w + 2 * trim, h + 2 * trim, 0.12 * upf, 0, cy, 0.06 * upf, trimMat());
     box(w, h, 0.16 * upf, 0, cy, 0.08 * upf, glassMat());
@@ -445,8 +456,9 @@ export const createBuildingModel = (
   const stories = storiesOf(wallHeight, upf);
   if (!b.openSides && stories > 1) {
     const bands: THREE.BufferGeometry[] = [];
+    const floor0 = b.floorHeight ?? 1 * upf;
     for (let k = 1; k < stories; k++) {
-      const y = (wallHeight * k) / stories;
+      const y = floor0 + ((wallHeight - floor0) * k) / stories;
       pts.forEach((a, i) => {
         const c = pts[(i + 1) % pts.length];
         const n = getEdgeOutwardNormal(pts, i);
@@ -469,8 +481,26 @@ export const createBuildingModel = (
     const pieces = wallPieces(pts, insetParts(pts, partList));
     b.openings.forEach(o => {
       const place = openingPlace(pts, o, pieces);
-      if (place) group.add(createOpening(o, place, upf, b.color));
+      // No steps where a porch or deck is in front of the door
+      const front = place ? { x: place.x + place.normal.x * 1.5 * upf, y: place.y + place.normal.y * 1.5 * upf } : null;
+      const porch = !!front && partList.some(p => p.floor > 0.2 * upf && pointInPolygonXY(front, p.pts));
+      if (place) group.add(createOpening(o, place, upf, b.color, !porch));
     });
+  }
+  // The foundation below the first floor (a crawl space or a raised floor shows more of it)
+  const floorH = b.floorHeight ?? 1 * upf;
+  if (!b.openSides && floorH > 0.3 * upf) {
+    const pieces = openParts ? enclosedWalls(pts, openParts) : pts.map((a, i) => ({ a, b: pts[(i + 1) % pts.length], out: getEdgeOutwardNormal(pts, i) }));
+    const off = 0.12 * upf;
+    const geo = merged(pieces.map(w => barBox({ x: w.a.x + w.out.x * off, y: w.a.y + w.out.y * off }, { x: w.b.x + w.out.x * off, y: w.b.y + w.out.y * off }, 0.3 * upf, -0.5 * upf, floorH)));
+    if (geo) {
+      const m = new THREE.Mesh(geo, openingMat("foundation", () => new THREE.MeshStandardMaterial({ color: "#8f8c86", roughness: 0.97 })));
+      m.name = "building-foundation";
+      m.castShadow = true;
+      m.receiveShadow = true;
+      m.userData.itemId = b.id;
+      group.add(m);
+    }
   } else if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
   // Open parts (porch, carport, patio): floors, posts and railings where the outer walls are left out.
   partList.forEach(part => group.add(openPartModel(pts, part, wallHeight, upf, b.color)));

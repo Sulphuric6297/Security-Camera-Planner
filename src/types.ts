@@ -84,6 +84,9 @@ export interface CameraItem extends BaseItem {
     edgeIndex?: number;
     edgeT?: number;
     height?: number;
+    /** On a wall inside the outline (the back wall of a porch or carport set into the house): a
+     * point on it in the building's own frame (the camera sits on the wall nearest it). */
+    at?: { x: number; y: number };
   };
   range: number;
   color: string;
@@ -167,6 +170,9 @@ export interface BuildingItem extends BaseItem {
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)
+  /** The first floor's height above the ground (a slab, a crawl space, a raised floor), plan units.
+   * Unset: about a foot. Below it the walls show the foundation. */
+  floorHeight?: number;
   roofType?: "auto" | "flat" | "gable" | "hip"; // 3D roof shape; "auto" picks from the footprint
   label: string;
   color: string;

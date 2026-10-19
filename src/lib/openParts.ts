@@ -322,3 +322,29 @@ export const nearestSide = (outline: P[], part: OpenPart, p: P) => {
   });
   return best;
 };
+
+/**
+ * A porch, deck or carport moved onto another wall (`edge` of `to`), the same size and the same
+ * way in or out of the house, centred at the point on that wall nearest `at` (kept within the
+ * wall). For copy and paste.
+ */
+export const partToEdge = (from: P[], pts: P[], to: P[], edge: number, at: P): P[] => {
+  // The part in its wall's frame: along the wall and out from it
+  const k = attachEdge(from, pts);
+  const m = { x: (pts[k].x + pts[(k + 1) % pts.length].x) / 2, y: (pts[k].y + pts[(k + 1) % pts.length].y) / 2 };
+  const src = nearestEdge(from, m).index;
+  const frame = (o: P[], i: number) => {
+    const a = o[i], b = o[(i + 1) % o.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    return { a, u: { x: (b.x - a.x) / len, y: (b.y - a.y) / len }, n: getEdgeOutwardNormal(o, i), len };
+  };
+  const f = frame(from, src);
+  const local = pts.map(p => ({ along: (p.x - m.x) * f.u.x + (p.y - m.y) * f.u.y, out: (p.x - m.x) * f.n.x + (p.y - m.y) * f.n.y }));
+  const lo = Math.min(...local.map(q => q.along)), hi = Math.max(...local.map(q => q.along));
+  // Where it goes: along the new wall, kept on it
+  const g = frame(to, edge);
+  let t = (at.x - g.a.x) * g.u.x + (at.y - g.a.y) * g.u.y;
+  t = hi - lo >= g.len ? g.len / 2 - (lo + hi) / 2 : Math.max(-lo, Math.min(g.len - hi, t));
+  const c = { x: g.a.x + g.u.x * t, y: g.a.y + g.u.y * t };
+  return local.map(q => ({ x: c.x + g.u.x * q.along + g.n.x * q.out, y: c.y + g.u.y * q.along + g.n.y * q.out }));
+};

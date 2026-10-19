@@ -72,11 +72,11 @@ import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { OPEN_PART_DEFAULTS, hasRailing, insetParts, nearestEdge, nearestSide, openPartsOf, partAlongEdge, partEntries, partRoof, partSides } from "./src/lib/openParts";
+import { OPEN_PART_DEFAULTS, hasRailing, insetParts, nearestEdge, nearestSide, openPartsOf, partAlongEdge, partEntries, partRoof, partSides, partToEdge } from "./src/lib/openParts";
 import { spotsFromBuildings, protectFrom, type ProtectFrom } from "./src/lib/protectSpots";
 import { findModel, loadCatalog } from "./src/lib/cameraCatalog";
 import { sunPosition } from "./src/lib/sun";
-import { OPENING_DEFAULTS, STORY_PRESETS, autoOpenings, isDoor, openingAt, openingPlace, openingPoint, placeOpening, storiesOf, wallPieces } from "./src/lib/openings";
+import { FLOOR_PRESETS, OPENING_DEFAULTS, STORY_PRESETS, autoOpenings, floorOf, isDoor, openingAt, openingPlace, openingPoint, pastedOpening, placeOpening, storiesOf, storyPresetOf, wallForStories, wallPieces, withFloorHeight } from "./src/lib/openings";
 import { doorsOnWalls } from "./src/three/buildings";
 import { buildingRoofKind, gableWallsOf, toggleGableWall } from "./src/three/buildingMesh";
 import { getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
@@ -87,7 +87,7 @@ import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ContextInfo, ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
-import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
+import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, cameraUnderRoof, heightAt, nearestWall, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
 import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, Opening, OpeningKind, OpenPart, OpenPartKind, ParkingItem, PavingItem, PavingKind, PavingSurface, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
@@ -1571,6 +1571,8 @@ export default function SecurityPlanner() {
     distance: number;
     point: { x: number; y: number };
     rotation: number;
+    /** On a wall inside the outline (a porch's back wall) */
+    at?: { x: number; y: number };
   };
 
   // Find nearest building edge from a point and calculate outward-facing rotation
@@ -1604,7 +1606,13 @@ export default function SecurityPlanner() {
     if (newItem.type === "camera" && lastCameraSettingsRef.current) {
       Object.assign(newItem, applyCameraSettings(newItem as CameraItem, lastCameraSettingsRef.current, { height: false }));
     }
-    if (newItem.type === "camera") {
+    // Under a porch, carport or open-sided building: on the wall at its back, or hung under its roof
+    const under = newItem.type === "camera" ? cameraUnderRoof({ x, y }, items, planGeoRef?.unitsPerFoot ?? 1) : null;
+    if (newItem.type === "camera" && under) {
+      const cam = newItem as CameraItem;
+      Object.assign(cam, { x: under.x, y: under.y, rotation: under.rotation, mount: under.mount, height: under.heightFt });
+      if ((cam.pitch ?? DEFAULT_CAMERA_PITCH) === DEFAULT_CAMERA_PITCH) cam.pitch = WALL_CAMERA_PITCH;
+    } else if (newItem.type === "camera") {
       // Clicked on a building: mount on its nearest wall. Otherwise snap onto a wall only when placed
       // right next to it, so cameras land where the user clicked.
       const onBuilding = items.find(i => i.type === "building" && pointInPolygonXY({ x, y }, getBuildingEdgePointsWorld(i as BuildingItem)));
@@ -1623,6 +1631,7 @@ export default function SecurityPlanner() {
           buildingId: edge.buildingId,
           edgeIndex: edge.edgeIndex,
           edgeT: edge.edgeT,
+          at: edge.at,
           height: buildingHeight
         };
         cam.height = buildingHeight;
@@ -3125,21 +3134,31 @@ export default function SecurityPlanner() {
           return;
         }
 
-        // Copy (Ctrl+C)
+        // Copy (Ctrl+C): a picked window or door, or the selected item
         if (key === "c") {
           if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
-          if (selectedId) {
-            const item = items.find(i => i.id === selectedId);
-            if (item) {
-              setClipboard(item);
-              event.preventDefault();
-            }
+          const sel = items.find(i => i.id === selectedId);
+          const o = sel?.type === "building" && selectedOpening?.id === sel.id ? openingsOf(sel as BuildingItem)[selectedOpening.index] : undefined;
+          if (sel && o) {
+            copyHousePart({ kind: "opening", o, from: sel.id });
+            event.preventDefault();
+          } else if (sel) {
+            setClipboard(sel);
+            houseClipRef.current = null;
+            event.preventDefault();
           }
         }
 
-        // Paste (Ctrl+V)
+        // Paste (Ctrl+V): a copied window, door or porch onto the selected house, else a copied item
         if (key === "v") {
           if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
+          const sel = items.find(i => i.id === selectedId);
+          if (houseClipRef.current) {
+            event.preventDefault();
+            if (sel?.type === "building") pasteHousePart(sel.id);
+            else showExportNotice(`Select a house to paste the ${clipLabel(houseClipRef.current)} onto (or right-click a wall)`, "info");
+            return;
+          }
           const cb = clipboardRef.current;
           if (cb) {
             const newItem = pastedCopy(cb);
@@ -3160,6 +3179,11 @@ export default function SecurityPlanner() {
         // Esc while drawing a porch or carport part only stops drawing (the building stays selected).
         if (mode === "add-open-part" || mode === "add-opening" || mode === "add-wing") {
           setMode("select");
+          return;
+        }
+        // Esc steps back one level: a picked window or door first (the house stays selected)
+        if (selectedOpening) {
+          setSelectedOpening(null);
           return;
         }
         setSelectedId(null);
@@ -3746,11 +3770,12 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (!ctxMenu) return;
     const close = (e: Event) => { if (!(e.target as HTMLElement)?.closest?.("[data-context-menu]")) setCtxMenu(null); };
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
+    // Esc closes only the menu (caught first, so the selection stays)
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopImmediatePropagation(); e.preventDefault(); setCtxMenu(null); } };
     window.addEventListener("pointerdown", close, true);
     window.addEventListener("wheel", close, true);
-    window.addEventListener("keydown", esc);
-    return () => { window.removeEventListener("pointerdown", close, true); window.removeEventListener("wheel", close, true); window.removeEventListener("keydown", esc); };
+    window.addEventListener("keydown", esc, true);
+    return () => { window.removeEventListener("pointerdown", close, true); window.removeEventListener("wheel", close, true); window.removeEventListener("keydown", esc, true); };
   }, [ctxMenu]);
   const renderContextMenu = (info: ContextInfo) => {
     const upf = planGeoRef?.unitsPerFoot ?? 1;
@@ -3758,7 +3783,7 @@ export default function SecurityPlanner() {
     const byPorch = !info.itemId && info.ground
       ? (items.filter(i => i.type === "building") as BuildingItem[]).find(bb => {
         const local = toBuildingLocal(bb, info.ground!);
-        return openPartsOf(bb).some(part => nearestSide(buildingLocalPoints(bb), part, local).dist < 4 * upf);
+        return openPartsOf(bb).some(part => { const n = nearestSide(buildingLocalPoints(bb), part, local); return n.side >= 0 && n.dist < 4 * upf; });
       })
       : undefined;
     const item = info.itemId ? items.find(i => i.id === info.itemId) : byPorch ?? null;
@@ -3772,6 +3797,7 @@ export default function SecurityPlanner() {
       entries.push({ group: OPENING_DEFAULTS[o.kind].label });
       entries.push({ row: (Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(kind => ({ label: OPENING_DEFAULTS[kind].label, on: kind === o.kind, run: () => { const d = OPENING_DEFAULTS[kind]; set({ kind, width: d.widthFt * upf, height: d.heightFt * upf, sill: d.sillFt * upf }); } })) });
       if (!isDoor(o.kind)) entries.push({ label: o.shutters ? "Remove the shutters" : "Add shutters", run: () => set({ shutters: !o.shutters }) });
+      entries.push({ label: "Copy (then Ctrl+V, or right-click a wall)", run: () => copyHousePart({ kind: "opening", o, from: b.id }) });
       entries.push({ label: `Delete this ${OPENING_DEFAULTS[o.kind].label.toLowerCase()}`, danger: true, run: () => removeOpening(b.id, k) });
     } else if (b && (info.handle?.kind === "part-edge" || info.handle?.kind === "part-floor" || info.handle?.kind === "part-steps") && info.handle.index !== undefined) {
       const k = info.handle.kind === "part-edge" ? Math.floor(info.handle.index / 4) : info.handle.kind === "part-steps" ? Math.floor(info.handle.index / 100) : info.handle.index;
@@ -3785,6 +3811,7 @@ export default function SecurityPlanner() {
           const list = partEntries(buildingLocalPoints(b), part);
           entries.push({ label: "Remove these steps", run: () => { updateItem(b.id, { openParts: parts.map((p, j) => (j === k ? { ...p, entries: list.filter((_, x) => x !== e) } : p)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
         }
+        entries.push({ label: `Copy this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, run: () => copyHousePart({ kind: "part", part, outline: buildingLocalPoints(b), from: b.id }) });
         entries.push({ label: `Delete this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, danger: true, run: () => { const rest = parts.filter((_, j) => j !== k); updateItem(b.id, { openParts: rest.length ? rest : undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
       }
     } else if (b) {
@@ -3805,31 +3832,40 @@ export default function SecurityPlanner() {
           entries.push({ group: OPENING_DEFAULTS[o.kind].label });
           entries.push({ row: (Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(kind => ({ label: OPENING_DEFAULTS[kind].label, on: kind === o.kind, run: () => { const d = OPENING_DEFAULTS[kind]; set(list.map((q, j) => (j === hitIndex ? { ...q, kind, width: d.widthFt * upf, height: d.heightFt * upf, sill: d.sillFt * upf } : q))); } })) });
           if (!isDoor(o.kind)) entries.push({ label: o.shutters ? "Remove the shutters" : "Add shutters", run: () => set(list.map((q, j) => (j === hitIndex ? { ...q, shutters: !q.shutters } : q))) });
+          entries.push({ label: "Copy (then Ctrl+V, or right-click a wall)", run: () => copyHousePart({ kind: "opening", o, from: b.id }) });
           entries.push({ label: `Delete this ${OPENING_DEFAULTS[o.kind].label.toLowerCase()}`, danger: true, run: () => { set(list.filter((_, j) => j !== hitIndex)); setSelectedOpening(null); showExportNotice("Removed it", "info", { label: "Undo", run: handleUndo }); } });
         }
       }
-      // On (or next to) a porch or deck: its railing and entries
-      const g = info.ground ? toBuildingLocal(b, info.ground) : null;
+      // On (or next to) a porch or deck: its railing and entries. The point clicked on the house's
+      // model (the railing itself) counts first, then the ground under the pointer.
+      const probes = [info.surface, info.ground].filter((q): q is { x: number; y: number } => !!q).map(q => toBuildingLocal(b, q));
       const parts = openPartsOf(b);
-      const onPart = g ? parts.map((part, k) => ({ part, k, near: nearestSide(outline, part, g) })).filter(x => x.near.side >= 0 && x.near.dist < 4 * upf).sort((x, y) => x.near.dist - y.near.dist)[0] : undefined;
+      // Near one of its open sides (a railing), or anywhere on it (its roof, floor or posts)
+      const partHits = parts.flatMap((part, k) => probes.map(q => ({ part, k, near: nearestSide(outline, part, q), inside: pointInPolygonXY(q, part.pts) })));
+      const onPart = partHits.filter(x => x.near.side >= 0 && x.near.dist < 4 * upf).sort((x, y) => x.near.dist - y.near.dist)[0] ?? partHits.find(x => x.inside);
       if (onPart) {
         const { part, k, near } = onPart;
+        const atSide = near.side >= 0 && near.dist < 4 * upf;
         const setPart = (patch: Partial<OpenPart>) => { updateItem(b.id, { openParts: parts.map((q, j) => (j === k ? { ...q, ...patch } : q)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); };
         const list = partEntries(outline, part);
         const sideLen = (() => { const s2 = partSides(outline, part)[near.side]; return s2 ? Math.hypot(s2.b.x - s2.a.x, s2.b.y - s2.a.y) : 1; })();
         const here = list.findIndex(e => e.side === near.side && Math.abs(e.at - near.at) * sideLen < 3 * upf);
         const noRail = part.noRail ?? [];
-        entries.push({ group: `${OPEN_PART_DEFAULTS[part.kind].label} ${k + 1}: this side` });
-        if (part.floor > 0.2 * upf) {
+        entries.push({ group: `${OPEN_PART_DEFAULTS[part.kind].label} ${k + 1}${atSide ? ": this side" : ""}` });
+        if (!atSide) entries.push({ row: (["porch", "deck", "carport", "patio"] as OpenPartKind[]).map(kind => ({ label: OPEN_PART_DEFAULTS[kind].label, on: kind === part.kind, run: () => setPart({ kind, floor: OPEN_PART_DEFAULTS[kind].floorFt * upf, railing: undefined }) })) });
+        if (atSide && part.floor > 0.2 * upf) {
           if (here >= 0) entries.push({ label: "Remove these steps", run: () => setPart({ entries: list.filter((_, j) => j !== here) }) });
           else entries.push({ label: "Put steps here", run: () => setPart({ entries: [...list, { side: near.side, at: near.at }], railing: hasRailing(part, upf) ? part.railing : true }) });
           entries.push(noRail.includes(near.side)
             ? { label: "Railing on this side", run: () => setPart({ noRail: noRail.filter(x => x !== near.side), railing: true }) }
             : { label: "No railing on this side", run: () => setPart({ noRail: [...noRail, near.side] }) });
         }
+        entries.push({ label: `Copy this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, run: () => copyHousePart({ kind: "part", part, outline, from: b.id }) });
         entries.push({ label: `Delete this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, danger: true, run: () => { const rest = parts.filter((_, j) => j !== k); updateItem(b.id, { openParts: rest.length ? rest : undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
       }
       entries.push({ group: b.label || "Building" });
+      const clip = houseClipRef.current;
+      if (clip && p) entries.push({ label: `Paste the ${clipLabel(clip)} here`, run: () => { pasteHousePart(b.id, p); } });
       if (p) {
         const add = (kind: OpeningKind) => () => addOpening(b.id, p, info.height, kind);
         entries.push({ label: "Add a window here", run: add("window") });
@@ -3846,7 +3882,8 @@ export default function SecurityPlanner() {
         }
       }
       const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
-      entries.push({ row: STORY_PRESETS.map(sp => ({ label: `${sp.label} ${sp.label === "1" ? "story" : "st."}`, on: Math.abs(sp.wallFt * upf - wall) < 0.6 * upf, run: () => { updateItem(b.id, { wallHeight: sp.wallFt * upf }); setTimeout(() => saveHistory(), 50); } })) });
+      entries.push({ row: STORY_PRESETS.map(sp => ({ label: `${sp.label} ${sp.label === "1" ? "story" : "st."}`, on: Math.abs(wallForStories(sp.wallFt, b, upf) - wall) < 0.6 * upf, run: () => { updateItem(b.id, { wallHeight: wallForStories(sp.wallFt, b, upf) }); setTimeout(() => saveHistory(), 50); } })) });
+      entries.push({ row: FLOOR_PRESETS.map(fp => ({ label: fp.label, on: Math.abs(floorOf(b, upf) - fp.ft * upf) < 0.3 * upf, run: () => setFloorHeight(b, fp.ft * upf) })) });
       entries.push({ label: b.locked ? "Unlock (let it move again)" : "Lock in place", run: () => toggleLock(b.id) });
       entries.push({ label: "Duplicate", run: duplicateSelected });
       if (!b.locked) entries.push({ label: "Delete this building", danger: true, run: () => { deleteItem(b.id); setTimeout(() => saveHistory(), 50); } });
@@ -3868,15 +3905,25 @@ export default function SecurityPlanner() {
       entries.push({ label: "Spot to protect (door, gate, driveway)", run: place("add-target") });
     }
     if (!entries.length) return null;
-    // Keep it on screen
-    const left = Math.min(info.clientX, window.innerWidth - 250), top = Math.min(info.clientY, window.innerHeight - 40 - entries.length * 30);
+    // Keep it on screen: measured once drawn, it opens upward when there's no room below (and
+    // scrolls if it is taller than the window)
+    const left = Math.max(8, Math.min(info.clientX, window.innerWidth - 248));
+    const fit = (el: HTMLDivElement | null) => {
+      if (!el) return;
+      const h = el.offsetHeight;
+      const room = window.innerHeight - 8;
+      const top = info.clientY + h <= room ? info.clientY : Math.max(8, Math.min(info.clientY - h, room - h));
+      el.style.top = `${Math.round(top)}px`;
+      el.style.visibility = "visible";
+    };
     return (
       <div
+        ref={fit}
         data-context-menu
         role="menu"
         aria-label="Actions"
-        className="fixed z-[200] w-60 rounded-xl border border-white/15 bg-zinc-900 shadow-2xl py-1 text-sm"
-        style={{ left, top: Math.max(8, top) }}
+        className="fixed z-[200] w-60 rounded-xl border border-white/15 bg-zinc-900 shadow-2xl py-1 text-sm overflow-y-auto custom-scrollbar"
+        style={{ left, top: info.clientY, maxHeight: "calc(100vh - 16px)", visibility: "hidden" }}
         onContextMenu={e => e.preventDefault()}
       >
         {entries.map((e, i) =>
@@ -3900,12 +3947,72 @@ export default function SecurityPlanner() {
     );
   };
 
+  /** A copied part of a house (a window or door, a porch or carport), pasted onto a house. */
+  type HouseClip = { kind: "opening"; o: Opening; from: string } | { kind: "part"; part: OpenPart; outline: { x: number; y: number }[]; from: string };
+  const houseClipRef = useRef<HouseClip | null>(null);
+  const clipLabel = (c: HouseClip) => (c.kind === "opening" ? OPENING_DEFAULTS[c.o.kind].label : OPEN_PART_DEFAULTS[c.part.kind].label).toLowerCase();
+  const copyHousePart = (c: HouseClip) => {
+    houseClipRef.current = c;
+    // The last thing copied is what pastes
+    setClipboard(null);
+    showExportNotice(`Copied the ${clipLabel(c)}: Ctrl+V puts a copy on the selected house, or right-click a wall and paste it there`, "info");
+  };
+  const pasteHousePart = (id: string, at?: { x: number; y: number }) => {
+    const c = houseClipRef.current;
+    const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+    if (!c || !b || b.type !== "building") return false;
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const outline = buildingLocalPoints(b);
+    if (c.kind === "opening") {
+      const pieces = wallPieces(outline, insetParts(outline, openPartsOf(b)));
+      // Beside the original on its own house; on another house, the longest wall (or where clicked)
+      const src = c.from === b.id ? c.o : { ...c.o, x: undefined, y: undefined, edge: undefined, at: undefined };
+      const o = pastedOpening(outline, src, upf, pieces, at);
+      if (!o) return false;
+      const list = placeOpening(openingsOf(b), o, upf);
+      updateItem(b.id, { openings: list } as Partial<BuildingItem>);
+      setSelectedId(b.id);
+      setSelectedOpening({ id: b.id, index: list.length - 1 });
+    } else {
+      const parts = openPartsOf(b);
+      const place = (edge: number, p: { x: number; y: number }) => partToEdge(c.outline, c.part.pts, outline, edge, p);
+      let pts: { x: number; y: number }[];
+      if (at) pts = place(nearestEdge(outline, at).index, at);
+      else {
+        // The longest wall that has no porch on it yet
+        const edges = outline.map((a, i) => ({ i, a, b: outline[(i + 1) % outline.length] })).sort((x, y) => Math.hypot(y.b.x - y.a.x, y.b.y - y.a.y) - Math.hypot(x.b.x - x.a.x, x.b.y - x.a.y));
+        const tries = edges.map(e => place(e.i, { x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }));
+        const free = tries.find(t => {
+          const m = { x: t.reduce((s2, q) => s2 + q.x, 0) / t.length, y: t.reduce((s2, q) => s2 + q.y, 0) / t.length };
+          return !parts.some(q => pointInPolygonXY(m, q.pts));
+        });
+        pts = free ?? tries[0];
+      }
+      // Steps and railing gaps were set for the original's sides: the copy starts with the usual
+      const part: OpenPart = { ...c.part, pts, entries: undefined, noRail: undefined };
+      updateItem(b.id, { openParts: [...parts, part] } as Partial<BuildingItem>);
+      setSelectedId(b.id);
+    }
+    setTimeout(() => saveHistory(), 50);
+    showExportNotice(`Pasted the ${clipLabel(c)}`, "info", { label: "Undo", run: handleUndo });
+    return true;
+  };
+
+  /** Raise or lower a house's first floor (crawl space, slab): its walls, windows, doors and
+   * porch floors move with it. */
+  const setFloorHeight = (b: BuildingItem, height: number, commit = true) => {
+    const cur = (currentItemsRef.current.find(i => i.id === b.id) as BuildingItem | undefined) ?? b;
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    updateItem(cur.id, withFloorHeight(cur, height, upf, openingsOf(cur), DEFAULT_BUILDING.wallHeight * upf) as Partial<BuildingItem>);
+    if (commit) setTimeout(() => saveHistory(), 50);
+  };
+
   const toggleLock = (id: string) => {
     const it = currentItemsRef.current.find(i => i.id === id);
     if (!it) return;
     updateItem(id, { locked: !it.locked });
     setTimeout(() => saveHistory(), 50);
-    showExportNotice(it.locked ? "Unlocked: it can be moved again" : "Locked in place", "info");
+    showExportNotice(it.locked ? "Unlocked: it can be moved again" : "Locked in place: it won't move or change shape, and you can still edit its windows, doors and porches", "info");
   };
 
   /** The house's main edits right on the map: stories, roof, and adding windows, doors, porches, wings. */
@@ -4000,8 +4107,8 @@ export default function SecurityPlanner() {
         </>
       );
     }
-    const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
-    const preset = STORY_PRESETS.find(p => Math.abs(p.wallFt * upf - wall) < 0.6 * upf);
+    const preset = storyPresetOf(b, upf, DEFAULT_BUILDING.wallHeight * upf);
+    const floorFt = Math.round((floorOf(b, upf) / upf) * 2) / 2;
     const chip = (on: boolean) => `h-7 px-1.5 rounded-md text-[11px] font-semibold ${on ? "bg-emerald-500/25 text-emerald-100" : "text-slate-300 hover:bg-white/10"}`;
     const startOpening = (k: OpeningKind) => { if (!b.openings) updateItem(b.id, { openings: openingsOf(b) } as Partial<BuildingItem>); setOpeningKind(k); setMode("add-opening"); setQuickAdd(false); };
     const startPart = (k: OpenPartKind) => { setOpenPartKind(k); setMode("add-open-part"); setQuickAdd(false); };
@@ -4010,11 +4117,21 @@ export default function SecurityPlanner() {
         <div className="flex items-center" role="group" aria-label="Stories" title="Stories">
           <span className="pl-1.5 pr-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Stories</span>
           {STORY_PRESETS.map(p => (
-            <button key={p.label} className={chip(preset === p)} aria-pressed={preset === p} onClick={() => { updateItem(b.id, { wallHeight: p.wallFt * upf }); setTimeout(() => saveHistory(), 50); }} title={`${p.label} ${p.label === "1" ? "story" : "stories"}`}>
+            <button key={p.label} className={chip(preset === p)} aria-pressed={preset === p} onClick={() => { updateItem(b.id, { wallHeight: wallForStories(p.wallFt, b, upf) }); setTimeout(() => saveHistory(), 50); }} title={`${p.label} ${p.label === "1" ? "story" : "stories"}`}>
               {p.label}
             </button>
           ))}
         </div>
+        <select
+          value={FLOOR_PRESETS.find(fp => Math.abs(fp.ft - floorFt) < 0.3)?.label ?? "custom"}
+          onChange={e => { const fp = FLOOR_PRESETS.find(x => x.label === e.target.value); if (fp) setFloorHeight(b, fp.ft * upf); }}
+          className="h-7 mr-1 bg-zinc-800 border border-white/10 rounded-md px-1 text-[11px] font-semibold text-slate-200"
+          aria-label="Floor height"
+          title="How high the first floor is off the ground"
+        >
+          {FLOOR_PRESETS.map(fp => <option key={fp.label} value={fp.label}>{fp.label} floor</option>)}
+          {!FLOOR_PRESETS.some(fp => Math.abs(fp.ft - floorFt) < 0.3) && <option value="custom">Floor {floorFt} ft</option>}
+        </select>
         <select
           value={b.gableWalls ? "custom" : b.roofType ?? "auto"}
           onChange={e => { if (e.target.value !== "custom") { updateItem(b.id, { roofType: e.target.value as BuildingItem["roofType"], gableWalls: undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } }}
@@ -5629,8 +5746,9 @@ export default function SecurityPlanner() {
                 zoomTo: zoomToSelection,
                 locked: !!selectedItem.locked,
                 toggleLock: () => toggleLock(selectedItem.id),
-                extra: selectedItem.type === "building" && !selectedItem.locked ? renderBuildingQuickBar(selectedItem as BuildingItem) : undefined,
-                only: selectedItem.type === "building" && !selectedItem.locked && selectedOpening?.id === selectedItem.id && !!(selectedItem as BuildingItem).openings?.[selectedOpening.index]
+                // Locked houses stay editable (windows, doors, porches, roof): only their place is fixed
+                extra: selectedItem.type === "building" ? renderBuildingQuickBar(selectedItem as BuildingItem) : undefined,
+                only: selectedItem.type === "building" && selectedOpening?.id === selectedItem.id && !!(selectedItem as BuildingItem).openings?.[selectedOpening.index]
               } : null}
               snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList }}
               onReady={v => { viewRef.current = v; }}
@@ -6347,9 +6465,9 @@ export default function SecurityPlanner() {
                   {(() => {
                     const b = selectedItem as BuildingItem;
                     const upf = planGeoRef?.unitsPerFoot ?? 1;
-                    const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
                     const current = b.roofType ?? "auto";
-                    const preset = STORY_PRESETS.find(p => Math.abs(p.wallFt * upf - wall) < 0.6 * upf);
+                    const preset = storyPresetOf(b, upf, DEFAULT_BUILDING.wallHeight * upf);
+                    const floorFt = Math.round((floorOf(b, upf) / upf) * 2) / 2;
                     return (
                       <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-2" data-testid="building-shape">
                         <div className="text-[11px] font-semibold text-slate-300">Stories</div>
@@ -6359,7 +6477,7 @@ export default function SecurityPlanner() {
                               key={p.label}
                               type="button"
                               aria-pressed={preset === p}
-                              onClick={() => { updateItem(b.id, { wallHeight: p.wallFt * upf }); setTimeout(() => saveHistory(), 50); }}
+                              onClick={() => { updateItem(b.id, { wallHeight: wallForStories(p.wallFt, b, upf) }); setTimeout(() => saveHistory(), 50); }}
                               className={`py-1.5 rounded-lg text-xs font-semibold border ${preset === p ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
                               title={`${p.label} ${p.label === "1" ? "story" : "stories"}: walls ${p.wallFt} ft to the eaves`}
                             >
@@ -6367,6 +6485,38 @@ export default function SecurityPlanner() {
                             </button>
                           ))}
                         </div>
+                        <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
+                          <span>First floor off the ground</span>
+                          <span className="text-slate-400 font-normal">{floorFt} ft</span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1" role="group" aria-label="Floor height">
+                          {FLOOR_PRESETS.map(fp => {
+                            const on = Math.abs(fp.ft - floorFt) < 0.3;
+                            return (
+                              <button
+                                key={fp.label}
+                                type="button"
+                                aria-pressed={on}
+                                title={fp.title}
+                                onClick={() => setFloorHeight(b, fp.ft * upf)}
+                                className={`py-1.5 rounded-lg text-[11px] font-semibold border ${on ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                              >
+                                {fp.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={8}
+                          step={0.5}
+                          value={floorFt}
+                          onChange={e => setFloorHeight(b, Number(e.target.value) * upf, false)}
+                          onPointerUp={() => setTimeout(() => saveHistory(), 50)}
+                          className="w-full accent-emerald-500"
+                          aria-label="Floor height in feet"
+                        />
                         <div className="text-[11px] font-semibold text-slate-300">Roof</div>
                         <div className="grid grid-cols-4 gap-1" role="group" aria-label="Roof shape">
                           {(["auto", "gable", "hip", "flat"] as const).map(kind => (
