@@ -17,6 +17,7 @@ export type ReportCamera = {
   recognizeFt: number;
   detectFt: number;
   blindSpotFt: number | null;
+  irRangeFt: number;
   notes?: string;
   /** Protected spots this camera is the best view of, e.g. "Front door (faces)". */
   covers: string[];
@@ -43,6 +44,7 @@ export type ReportInput = {
   cameras: ReportCamera[];
   spots: ReportSpot[];
   counts: { buildings: number };
+  storage?: { days: number; mode: "continuous" | "motion"; tb: number; driveTb: number };
 };
 
 const esc = (text: string) =>
@@ -75,7 +77,7 @@ const csvCell = (v: string | number) => {
 
 /** One row per camera, for spreadsheets or an installer's quote. */
 export const camerasCsv = (cameras: ReportCamera[]) => {
-  const header = ["#", "Name", "Mount", "Height (ft)", "Faces", "Tilt (deg down)", "Lens", "Field of view (deg)", "Resolution", "Faces to (ft)", "Recognize to (ft)", "Detect to (ft)", "Blind spot (ft)", "Covers", "Notes"];
+  const header = ["#", "Name", "Mount", "Height (ft)", "Faces", "Tilt (deg down)", "Lens", "Field of view (deg)", "Resolution", "Faces to (ft)", "Recognize to (ft)", "Detect to (ft)", "Night IR (ft)", "Blind spot (ft)", "Covers", "Notes"];
   const rows = cameras.map(c => [
     c.number,
     c.label,
@@ -89,6 +91,7 @@ export const camerasCsv = (cameras: ReportCamera[]) => {
     Math.round(c.identifyFt),
     Math.round(c.recognizeFt),
     Math.round(c.detectFt),
+    Math.round(c.irRangeFt),
     c.blindSpotFt == null ? "" : Math.round(c.blindSpotFt),
     c.covers.join("; "),
     c.notes ?? ""
@@ -123,7 +126,7 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
   const scheduleHtml = r.cameras.length
     ? `<h2>Camera schedule</h2>
       <table id="camera-schedule">
-        <thead><tr><th>Camera</th><th>Mount</th><th>Faces</th><th>Lens</th><th>Tilt</th><th>Identify to</th><th>Recognize to</th><th>Detect to</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Camera</th><th>Mount</th><th>Faces</th><th>Lens</th><th>Tilt</th><th>Identify to</th><th>Recognize to</th><th>Detect to</th><th>Night (IR)</th><th>Notes</th></tr></thead>
         <tbody>${r.cameras.map(c => `<tr>
           <td><span class="dot" style="background:${esc(c.color)}"></span>${c.number}. ${esc(c.label)}</td>
           <td>${Math.round(c.heightFt)} ft ${esc(c.mount)}</td>
@@ -133,6 +136,7 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
           <td>${Math.round(c.identifyFt)} ft</td>
           <td>${Math.round(c.recognizeFt)} ft</td>
           <td>${Math.round(c.detectFt)} ft</td>
+          <td>${Math.round(c.irRangeFt)} ft</td>
           <td>${esc(c.notes ?? "")}</td>
         </tr>`).join("")}</tbody>
       </table>
@@ -146,7 +150,7 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
         <thead><tr><th>Qty</th><th>Item</th><th>Cameras</th></tr></thead>
         <tbody>${parts.map(p => `<tr><td>${p.qty}</td><td>${esc(p.description)}</td><td>${p.numbers.map(n => `#${n}`).join(", ")}</td></tr>`).join("")}</tbody>
       </table>
-      <p class="note">Plus a recorder (NVR) with ${r.cameras.length} or more channels, and network cable or power for each camera.</p>`
+      <p class="note">Plus a recorder (NVR) with ${r.cameras.length} or more channels${r.storage ? ` and about ${r.storage.tb < 1 ? r.storage.tb.toFixed(1) : Math.round(r.storage.tb * 10) / 10} TB of storage (a ${r.storage.driveTb} TB drive) for ${r.storage.days} days of ${r.storage.mode === "motion" ? "motion-only" : "continuous"} recording` : ""}, and network cable or power for each camera.</p>`
     : "";
 
   const cameraSections = r.cameras.map(c => `

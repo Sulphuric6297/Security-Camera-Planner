@@ -26,8 +26,14 @@ export const VEHICLE_SIZES: Record<VehicleType, { label: string; width: number; 
 };
 export const DEFAULT_VEHICLE: VehicleType = "sedan";
 
-/** A mature yard tree: ~24 ft canopy, ~30 ft tall. */
-export const DEFAULT_TREE = { radius: 12, height: 30 };
+/** Yard trees by size (canopy radius and height, ft). Medium is the default. */
+export const TREE_SIZES = {
+  small: { label: "Small", radius: 6, height: 15 },
+  medium: { label: "Medium", radius: 10, height: 28 },
+  large: { label: "Large", radius: 16, height: 45 }
+} as const;
+export type TreeSize = keyof typeof TREE_SIZES;
+export const DEFAULT_TREE = TREE_SIZES.medium;
 
 export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target";
 
@@ -55,7 +61,15 @@ export const createItem = (
   kind: NewItemKind,
   x: number,
   y: number,
-  opts: { unitsPerFoot?: number; cameraIndex?: number; targetIndex?: number } = {}
+  opts: {
+    unitsPerFoot?: number;
+    cameraIndex?: number;
+    targetIndex?: number;
+    treeSize?: TreeSize;
+    treeType?: "deciduous" | "conifer" | "palm" | "bush";
+    vehicleType?: VehicleType;
+    targetKind?: TargetKind;
+  } = {}
 ): CanvasItem => {
   const u = opts.unitsPerFoot && opts.unitsPerFoot > 0 ? opts.unitsPerFoot : 1;
   const common = { id: generateId(), x, y, rotation: 0 };
@@ -92,20 +106,34 @@ export const createItem = (
         points: rectanglePoints(w, d)
       } as CanvasItem;
     }
-    case "tree":
-      return { ...common, type: "tree", radius: DEFAULT_TREE.radius * u, height: DEFAULT_TREE.height * u, color: COLORS.tree[0] } as CanvasItem;
-    case "parking":
+    case "tree": {
+      const size = TREE_SIZES[opts.treeSize ?? "medium"];
+      const treeType = opts.treeType ?? "deciduous";
+      return {
+        ...common,
+        type: "tree",
+        treeType,
+        radius: (treeType === "conifer" ? size.radius * 0.7 : treeType === "bush" ? Math.min(size.radius, 4) : size.radius) * u,
+        height: (treeType === "bush" ? 5 : size.height) * u,
+        color: treeType === "conifer" ? COLORS.tree[3] : COLORS.tree[0]
+      } as CanvasItem;
+    }
+    case "parking": {
+      const vt = opts.vehicleType ?? DEFAULT_VEHICLE;
       return {
         ...common,
         type: "parking",
-        vehicleType: DEFAULT_VEHICLE,
-        ...vehicleDimensions(DEFAULT_VEHICLE, u),
+        vehicleType: vt,
+        ...vehicleDimensions(vt, u),
         color: COLORS.parking[0]
       } as CanvasItem;
+    }
     case "label":
       return { ...common, type: "label", text: "Text", fontSize: 14, color: COLORS.label[0] } as CanvasItem;
-    case "target":
-      return { ...common, type: "target", kind: "door", goal: TARGET_KINDS.door.goal, label: `Door ${(opts.targetIndex ?? 0) + 1}` } as CanvasItem;
+    case "target": {
+      const kind = opts.targetKind ?? "door";
+      return { ...common, type: "target", kind, goal: TARGET_KINDS[kind].goal, label: `${TARGET_KINDS[kind].label} ${(opts.targetIndex ?? 0) + 1}` } as CanvasItem;
+    }
   }
 };
 

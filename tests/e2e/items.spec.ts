@@ -24,7 +24,7 @@ test.describe("real-world item sizes", () => {
       const b = createItem("building", 0, 0, { unitsPerFoot: u }) as any;
       expect(b.width / u).toBeCloseTo(50, 5);
       const t = createItem("tree", 0, 0, { unitsPerFoot: u }) as any;
-      expect(t.radius / u).toBeCloseTo(12, 5);
+      expect(t.radius / u).toBeCloseTo(10, 5);
     }
   });
 

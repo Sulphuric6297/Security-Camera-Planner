@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, AlertTriangle, X, Target, Trash2 } from "lucide-react";
+import { Check, AlertTriangle, X, Target, Trash2, Wand2 } from "lucide-react";
 import type { CameraItem, TargetItem } from "../types";
 import type { TargetCoverage } from "../lib/coverage";
 import { TARGET_KINDS } from "../lib/items";
@@ -36,6 +36,9 @@ type Props = {
   onToggleBlindSpots: (on: boolean) => void;
   /** Share of the site some camera sees (when blind spots are on). */
   coveredFraction?: number | null;
+  onSuggest: () => void;
+  night: boolean;
+  onToggleNight: (on: boolean) => void;
 };
 
 /** "What to protect": the checklist that turns camera cones into a yes/no answer. */
@@ -112,6 +115,11 @@ export function CoveragePanel(props: Props) {
           })}
         </ul>
       )}
+      {targets.length > 0 && met < targets.length && (
+        <button onClick={props.onSuggest} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-semibold text-white">
+          <Wand2 className="w-4 h-4" /> Suggest cameras for the rest
+        </button>
+      )}
       <button onClick={props.onAdd} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-dashed border-white/20 text-sm text-slate-200 hover:bg-white/5">
         <Target className="w-4 h-4 text-rose-300" /> Mark a door, gate or driveway
       </button>
@@ -123,6 +131,10 @@ export function CoveragePanel(props: Props) {
           )}
         </span>
         <input type="checkbox" checked={props.showBlindSpots} onChange={e => props.onToggleBlindSpots(e.target.checked)} className="accent-rose-500" aria-label="Show blind spots" />
+      </label>
+      <label className="flex items-center justify-between gap-2 text-xs text-slate-300 cursor-pointer" title="Limit every camera to its night vision (infrared) range">
+        <span>Check at night (infrared range)</span>
+        <input type="checkbox" checked={props.night} onChange={e => props.onToggleNight(e.target.checked)} className="accent-indigo-500" aria-label="Check at night" />
       </label>
     </div>
   );

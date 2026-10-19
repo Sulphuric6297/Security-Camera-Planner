@@ -1,4 +1,4 @@
-import { test, expect, importSite, itemsOfType, placeWithKey } from "./fixtures";
+import { test, expect, importSite, itemsOfType, placeWithKey, stubNetwork } from "./fixtures";
 
 const step = (page: any, i: number) => page.locator('nav[aria-label="Steps"] button').nth(i);
 
@@ -94,4 +94,25 @@ test.describe("guided workflow and plan tools", () => {
     await page.getByRole("button", { name: "Add to the report" }).click();
     await expect.poll(async () => (await page.evaluate(() => (window as any).__scpProject().exportList.length))).toBe(1);
   });
+
+  test("handles are bigger on touch screens", async ({ page, browser }) => {
+    const handleSize = async (p: any) => {
+      await placeWithKey(p, "b", 0.5, 0.5);
+      // corner handles of the selected building
+      const sizes = await p.getByTestId("plan").locator("circle").evaluateAll((cs: any[]) => cs.map(c => Number(c.getAttribute("r"))).filter(r => r > 0));
+      return Math.max(...sizes);
+    };
+    const desktop = await handleSize(page);
+    const ctx = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 1600, height: 1000 } });
+    const touch = await ctx.newPage();
+    await stubNetwork(touch);
+    await touch.goto("/");
+    await expect(touch.getByText("Start your camera plan")).toBeVisible();
+    const fingers = await touch.evaluate(() => matchMedia("(pointer: coarse)").matches);
+    test.skip(!fingers, "this browser build doesn't emulate a coarse pointer");
+    const touchSize = await handleSize(touch);
+    expect(touchSize / desktop).toBeGreaterThan(1.3);
+    await ctx.close();
+  });
 });
+

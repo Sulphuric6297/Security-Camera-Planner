@@ -44,7 +44,11 @@ import {
   ZoomOut,
   Crosshair,
   Navigation2,
-  ChevronDown
+  ChevronDown,
+  Target,
+  RotateCcw,
+  ChevronUp,
+  Compass
 } from "lucide-react";
 import GridLayoutBase from "react-grid-layout";
 // react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
@@ -57,13 +61,16 @@ import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { StepPanel } from "./src/components/StepPanel";
+import { ToolPanel, type ToolDefaults } from "./src/components/ToolPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
 import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
+import { suggestCameras } from "./src/lib/suggest";
+import { estimateStorage } from "./src/lib/recording";
 import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
-import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
+import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
@@ -170,11 +177,20 @@ export default function SecurityPlanner() {
   // On-screen size of the plan SVG (for the scale bar and the floating action bar).
   const [planRect, setPlanRect] = useState({ width: 0, height: 0 });
   const [show3dMenu, setShow3dMenu] = useState(false);
+  // Layout: the workflow sidebar on the left can be hidden for more map.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // What the placing tools create (chosen in the tool panel before clicking).
+  const [toolDefaults, setToolDefaults] = useState<ToolDefaults>({ treeSize: "medium", treeType: "deciduous", vehicleType: "sedan", targetKind: "door" });
   // Inspector: rarely used settings stay folded away until asked for.
   const [showMoreOptions, setShowMoreOptions] = useState(false);
   // Coverage: blind-spot overlay and "aim this camera at the next click".
   const [showBlindSpots, setShowBlindSpots] = useState(false);
   const [aimingCameraId, setAimingCameraId] = useState<string | null>(null);
+  // Coverage at night: every camera limited to its infrared reach.
+  const [nightCoverage, setNightCoverage] = useState(false);
+  // Recorder storage estimate (Report step and the PDF).
+  const [recordDays, setRecordDays] = useState(30);
+  const [recordMode, setRecordMode] = useState<"continuous" | "motion">("continuous");
   // Set when a press already did its job (aimed a camera, placed an item on top of another), so the
   // click that follows doesn't also deselect or place again.
   const consumedClickRef = useRef(false);
@@ -1701,7 +1717,11 @@ export default function SecurityPlanner() {
     const newItem = createItem(kind, x, y, {
       unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
       cameraIndex: itemsRef.current.filter(i => i.type === "camera").length,
-      targetIndex: itemsRef.current.filter(i => i.type === "target").length
+      targetIndex: itemsRef.current.filter(i => i.type === "target").length,
+      treeSize: toolDefaults.treeSize,
+      treeType: toolDefaults.treeType,
+      vehicleType: toolDefaults.vehicleType,
+      targetKind: toolDefaults.targetKind
     });
 
     if (newItem.type === "camera") {
@@ -2665,6 +2685,7 @@ export default function SecurityPlanner() {
         recognizeFt: dori[1].distance,
         detectFt: dori[3].distance,
         blindSpotFt: Number.isFinite(ground.near) ? ground.near : null,
+        irRangeFt: cam.irRangeFt ?? DEFAULT_IR_RANGE_FT,
         notes: cam.description || "",
         covers: targetItems
           .filter(t => targetResults.get(t.id)?.best?.cameraId === cam.id)
@@ -2727,7 +2748,13 @@ export default function SecurityPlanner() {
         pickedViews: picked,
         cameras: buildReportCameras(picked.length === 0),
         spots: buildReportSpots(),
-        counts: { buildings: items.filter(i => i.type === "building").length }
+        counts: { buildings: items.filter(i => i.type === "building").length },
+        storage: (() => {
+          const widths = (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH);
+          if (!widths.length) return undefined;
+          const e = estimateStorage(widths, recordDays, recordMode);
+          return { days: recordDays, mode: recordMode, tb: e.tb, driveTb: e.driveTb };
+        })()
       },
       { autoPrint: true }
     );
@@ -3158,7 +3185,9 @@ export default function SecurityPlanner() {
     texture.colorSpace = THREE.SRGBColorSpace;
     const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
     const sprite = new THREE.Sprite(material);
-    sprite.scale.set(canvas.width / 10, canvas.height / 10, 1);
+    // Readable from the overview without dwarfing the scene: text height scales with the site.
+    const worldH = clamp(Math.max(canvasSize.width, canvasSize.height) / 90, 2.5, 16);
+    sprite.scale.set((canvas.width / canvas.height) * worldH, worldH, 1);
     return sprite;
   };
 
@@ -4266,7 +4295,7 @@ export default function SecurityPlanner() {
         // Camera label
         const camLabel = createTextSprite(cameraItem.label);
         if (camLabel) {
-          camLabel.position.set(cameraPos.x, cameraHeight + 18, cameraPos.y);
+          camLabel.position.set(cameraPos.x, cameraHeight + clamp(Math.max(canvasSize.width, canvasSize.height) / 60, 4, 24), cameraPos.y);
           group.add(camLabel);
         }
       }
@@ -4382,6 +4411,15 @@ export default function SecurityPlanner() {
     return copy as CanvasItem;
   };
 
+  // Choosing a placing tool clears the selection, so the right panel shows that tool (not the old item).
+  useEffect(() => {
+    if (mode !== "select") setSelectedId(null);
+  }, [mode]);
+  // Selecting something shows it in the inspector (even if plan settings were open).
+  useEffect(() => {
+    if (selectedId) setRightPanelMode("properties");
+  }, [selectedId]);
+
   // --- Plan view: zoom to fit / to the selection ---
   const itemPlanBounds = (item: CanvasItem): Bounds | null => {
     if (item.type === "building") return boundsOfPoints(getBuildingEdgePointsWorld(item as BuildingItem));
@@ -4442,7 +4480,7 @@ export default function SecurityPlanner() {
 
       // Single-key tools (shown in the toolbar tooltips)
       if (!mod && !event.altKey) {
-        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label" };
+        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label", m: "add-target" };
         const tool = toolKeys[event.key.toLowerCase()];
         if (tool) {
           event.preventDefault();
@@ -4453,6 +4491,8 @@ export default function SecurityPlanner() {
         if (event.key === "3") { setViewMode("iso3d"); return; }
         if (event.key === "?") { event.preventDefault(); setShowShortcuts(true); return; }
         if (viewMode === "plan" && event.key === "0") { event.preventDefault(); zoomToFit(); return; }
+        if (viewMode === "plan" && (event.key === "+" || event.key === "=")) { event.preventDefault(); zoomBy(1.25); return; }
+        if (viewMode === "plan" && event.key === "-") { event.preventDefault(); zoomBy(0.8); return; }
         if (viewMode === "plan" && event.key.toLowerCase() === "f") { event.preventDefault(); zoomToSelection(); return; }
         // Nudge the selection with the arrow keys (Shift = 10 ft)
         if (selectedId && event.key.startsWith("Arrow")) {
@@ -5003,8 +5043,9 @@ export default function SecurityPlanner() {
       const currentMode = modeRef.current;
       const currentSelectedId = selectedIdRef.current;
 
-      // Right-click = Rotate camera (always)
-      if (event.button === 2 && !isSpacePressedRef.current) {
+      // Right-drag, or Shift/Alt/Ctrl + drag = rotate (trackpads have no easy right-drag)
+      const rotateGesture = event.button === 2 || (event.button === 0 && (event.altKey || event.ctrlKey || (event.shiftKey && !isTerrainModeRef.current)));
+      if (rotateGesture && !isSpacePressedRef.current) {
         event.preventDefault();
         const start = { x: event.clientX, y: event.clientY };
         const moveHandler = (moveEvent: PointerEvent) => {
@@ -5422,8 +5463,8 @@ export default function SecurityPlanner() {
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      // FIXED: Scroll up (negative deltaY) = zoom in (larger zoom value)
-      const nextZoom = clamp(state.zoom * (event.deltaY < 0 ? 1.1 : 0.9), 0.1, 20.0);
+      // Smooth zoom for mouse wheels, trackpad scrolls and pinches (pinch = ctrlKey).
+      const nextZoom = clamp(state.zoom * Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015)), 0.1, 20.0);
       state.zoom = nextZoom;
       camera.zoom = state.zoom;
       camera.updateProjectionMatrix();
@@ -5982,24 +6023,37 @@ export default function SecurityPlanner() {
     }
   };
 
-  const handleSvgWheel = (e: React.WheelEvent) => {
+  // Wheel on the plan: pinch or mouse wheel zooms around the cursor; two-finger trackpad scroll pans.
+  // Registered natively (non-passive) so a pinch never zooms the whole page.
+  const planWheelRef = useRef<(e: WheelEvent) => void>(() => {});
+  planWheelRef.current = (e: WheelEvent) => {
     e.preventDefault();
     if (!svgRef.current) return;
     const CTM = svgRef.current.getScreenCTM();
     if (!CTM) return;
-
+    const lineMode = e.deltaMode !== 0;
+    const mouseWheel = lineMode || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+    if (!e.ctrlKey && !mouseWheel) {
+      // Trackpad scroll: move the map with the fingers
+      setPanOffset(prev => ({ x: prev.x - e.deltaX / CTM.a, y: prev.y - e.deltaY / CTM.d }));
+      return;
+    }
     const rawX = (e.clientX - CTM.e) / CTM.a;
     const rawY = (e.clientY - CTM.f) / CTM.d;
     const worldX = (rawX - panOffset.x) / zoom;
     const worldY = (rawY - panOffset.y) / zoom;
-
-    const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.3, MAX_ZOOM);
-    const nextPanX = rawX - worldX * nextZoom;
-    const nextPanY = rawY - worldY * nextZoom;
-
+    const delta = (lineMode ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.0015);
+    const nextZoom = clamp(zoom * Math.exp(-delta), 0.3, MAX_ZOOM);
     setZoom(nextZoom);
-    setPanOffset({ x: nextPanX, y: nextPanY });
+    setPanOffset({ x: rawX - worldX * nextZoom, y: rawY - worldY * nextZoom });
   };
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || viewMode !== "plan") return;
+    const handler = (e: WheelEvent) => planWheelRef.current(e);
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [viewMode]);
 
   useEffect(() => {
     const el = svgRef.current;
@@ -6022,6 +6076,81 @@ export default function SecurityPlanner() {
     return { x: offX + (panOffset.x + p.x * zoom) * scale, y: offY + (panOffset.y + p.y * zoom) * scale, scale };
   };
 
+  // Bottom-center tool dock over the map (2D and 3D): the placing tools, terrain, undo/redo.
+  const renderToolDock = () => {
+    const tools: { mode: ToolMode; icon: React.ComponentType<{ className?: string }>; label: string; key: string }[] = [
+      { mode: "select", icon: Move, label: "Select and move", key: "V" },
+      { mode: "add-camera", icon: Camera, label: "Add camera", key: "C" },
+      { mode: "add-target", icon: Target, label: "Mark a spot to protect", key: "M" },
+      { mode: "trace-building", icon: WandSparkles, label: "Trace a roof from the map", key: "R" },
+      { mode: "add-building", icon: Square, label: "Add building", key: "B" },
+      { mode: "add-tree", icon: Trees, label: "Add tree", key: "T" },
+      { mode: "add-parking", icon: Car, label: "Add vehicle", key: "P" },
+      { mode: "add-label", icon: Type, label: "Add text", key: "L" }
+    ];
+    const btn = (on: boolean) =>
+      `relative w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${on ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/30" : "text-slate-300 hover:text-white hover:bg-white/10"}`;
+    return (
+      <div role="toolbar" aria-label="Tools" className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 rounded-2xl border border-white/10 bg-zinc-900/95 p-1.5 shadow-2xl backdrop-blur">
+        {tools.map(t => (
+          <button
+            key={t.mode}
+            onClick={() => { setIsTerrainMode(false); setMode(mode === t.mode && t.mode !== "select" ? "select" : t.mode); }}
+            title={`${t.label} (${t.key})`}
+            aria-label={t.label}
+            aria-pressed={mode === t.mode && !isTerrainMode}
+            className={btn(mode === t.mode && !isTerrainMode)}
+          >
+            <t.icon className="w-5 h-5" />
+            <span className="absolute bottom-0.5 right-1 text-[8px] font-bold opacity-50">{t.key}</span>
+          </button>
+        ))}
+        <span className="w-px h-6 bg-white/10 mx-1" />
+        <button
+          onClick={() => { setMode("select"); setIsTerrainMode(v => !v); }}
+          title="Shape the terrain"
+          aria-label="Terrain"
+          aria-pressed={isTerrainMode}
+          className={btn(isTerrainMode)}
+        >
+          <Mountain className="w-5 h-5" />
+        </button>
+        <span className="w-px h-6 bg-white/10 mx-1" />
+        <button onClick={handleUndo} disabled={!canUndo} className={`${btn(false)} disabled:opacity-30`} title="Undo (Ctrl/⌘+Z)" aria-label="Undo">
+          <Undo className="w-5 h-5" />
+        </button>
+        <button onClick={handleRedo} disabled={!canRedo} className={`${btn(false)} disabled:opacity-30`} title="Redo (Ctrl/⌘+Shift+Z)" aria-label="Redo">
+          <Redo className="w-5 h-5" />
+        </button>
+      </div>
+    );
+  };
+
+  // 3D view: on-screen orbit controls (rotate, tilt, zoom, top-down, reset).
+  const nav3d = (action: "left" | "right" | "up" | "down" | "in" | "out" | "top") => {
+    const state = threeStateRef.current;
+    if (!state || !state.orbit) return;
+    const o = state.orbit;
+    if (action === "left") o.azimuth -= Math.PI / 8;
+    if (action === "right") o.azimuth += Math.PI / 8;
+    if (action === "up") o.polar = clamp(o.polar + 0.15, 0.1, Math.PI / 2.05);
+    if (action === "down") o.polar = clamp(o.polar - 0.15, 0.1, Math.PI / 2.05);
+    if (action === "top") o.polar = Math.PI / 2.05;
+    if (action === "in" || action === "out") {
+      state.zoom = clamp(state.zoom * (action === "in" ? 1.25 : 0.8), 0.1, 20);
+      state.camera.zoom = state.zoom;
+      state.camera.updateProjectionMatrix();
+    }
+    const { azimuth, polar, distance } = o;
+    state.camera.position.set(
+      state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance,
+      state.target.y + Math.sin(polar) * distance,
+      state.target.z + Math.sin(azimuth) * Math.cos(polar) * distance
+    );
+    state.camera.lookAt(state.target);
+    state.renderer.render(state.scene, state.camera);
+  };
+
   const renderPlanOverlays = () => {
     const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
     const pxPerFoot = (scale * zoom) / (planGeoRef?.unitsPerFoot ?? 1);
@@ -6033,7 +6162,7 @@ export default function SecurityPlanner() {
       const top = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.minY });
       const bottom = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.maxY });
       const above = top.y - (sel.type === "camera" ? 70 : 66);
-      const y = above > 70 ? above : bottom.y + (sel.type === "camera" ? 40 : 14);
+      const y = above > 56 ? above : bottom.y + (sel.type === "camera" ? 40 : 14);
       const x = clamp(top.x, 110, Math.max(110, planRect.width - 110));
       const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
       actionBar = (
@@ -6056,7 +6185,7 @@ export default function SecurityPlanner() {
     return (
       <>
         {actionBar}
-        <div className="absolute top-20 right-4 z-20 flex items-start gap-2">
+        <div className="absolute top-3 right-3 z-20 flex items-start gap-2">
           {bar && (
             <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
               <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
@@ -6083,7 +6212,9 @@ export default function SecurityPlanner() {
 
   // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
   // regardless of how many feet the site spans or how far you zoom.
-  const planUi = Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom;
+  // Bigger handles on touch screens (fingers need ~44 px targets).
+  const coarsePointer = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
+  const planUi = (Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom) * (coarsePointer ? 1.5 : 1);
 
   // Building inspector order: the everyday settings first, the rest folded under "More options".
   // (Other item types keep their natural order.)
@@ -6111,7 +6242,7 @@ export default function SecurityPlanner() {
         vFov: cam.vFov ?? vFovFromH(hFov, getCameraAspectValue(cam)),
         pitch: cam.pitch ?? DEFAULT_CAMERA_PITCH,
         heightFt: (cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT),
-        range: cam.range,
+        range: nightCoverage ? Math.min(cam.range, (cam.irRangeFt ?? DEFAULT_IR_RANGE_FT) * upf) : cam.range,
         camera: cam
       };
     });
@@ -6128,7 +6259,55 @@ export default function SecurityPlanner() {
     });
     return { cameras, obstacles, upf };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, planGeoRef]);
+  }, [items, planGeoRef, nightCoverage]);
+
+  // "Suggest cameras": add wall/pole cameras that cover the spots that aren't covered yet.
+  const handleSuggestCameras = () => {
+    const upf = coverageModel.upf;
+    const buildings = (items.filter(i => i.type === "building") as BuildingItem[]).map(b => ({
+      id: b.id,
+      points: getBuildingEdgePointsWorld(b),
+      heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf,
+      mountHeightFt: mountHeightForBuilding(b)
+    }));
+    const suggestions = suggestCameras({
+      targets: targetItems.map(t => ({ id: t.id, x: t.x, y: t.y, goal: t.goal })),
+      buildings,
+      obstacles: coverageModel.obstacles,
+      existing: coverageModel.cameras,
+      unitsPerFoot: upf
+    });
+    if (suggestions.length === 0) {
+      showExportNotice("Couldn't find a camera spot for the rest. Try a pole camera closer to them, or lower the detail needed.", "info");
+      return;
+    }
+    const startIndex = items.filter(i => i.type === "camera").length;
+    const added = suggestions.map((sug, i) => {
+      const base = createItem("camera", sug.x, sug.y, { unitsPerFoot: upf, cameraIndex: startIndex + i }) as CameraItem;
+      const covers = targetItems.filter(t => sug.covers.includes(t.id)).map(t => t.label);
+      return {
+        ...base,
+        rotation: sug.rotation,
+        pitch: sug.pitch,
+        hFov: sug.hFov,
+        fov: sug.hFov,
+        vFov: vFovFromH(sug.hFov, 16 / 9),
+        lensPreset: sug.lensId,
+        resolutionWidth: sug.resolutionWidth,
+        range: sug.range,
+        height: sug.heightFt,
+        mount: sug.mount
+          ? { type: "building" as const, buildingId: sug.mount.buildingId, edgeIndex: sug.mount.edgeIndex, edgeT: sug.mount.edgeT, height: sug.heightFt }
+          : { type: "free" as const, edgeT: 0.5, height: sug.heightFt },
+        description: `Suggested to cover ${covers.join(", ")}`
+      } as CameraItem;
+    });
+    const nextItems = [...items, ...added];
+    setItems(nextItems);
+    saveHistory(nextItems);
+    setSelectedId(null);
+    showExportNotice(`Added ${added.length} camera${added.length === 1 ? "" : "s"}. Adjust them as you like.`, "success", { label: "Undo", run: handleUndo });
+  };
   const targetItems = items.filter(i => i.type === "target") as TargetItem[];
   const targetResults = useMemo(
     () => new Map(evaluateTargets(coverageModel.cameras, targetItems, coverageModel.obstacles, coverageModel.upf).map(r => [r.targetId, r])),
@@ -6250,10 +6429,8 @@ export default function SecurityPlanner() {
   const mountEdgeIndex = selectedCamera?.mount?.edgeIndex ?? 0;
   const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
   const rightPanelOffset = isRightPanelOpen ? "lg:right-[22rem]" : "lg:right-4";
-  const workspaceRightPadding = isRightPanelOpen ? "pr-80" : "pr-6";
-  const workspaceLayoutClass = viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr"
-    ? "items-stretch justify-stretch pt-16 pl-20 pb-4"
-    : "items-center justify-center pt-20 pl-24 pb-6";
+  const workspaceRightPadding = "";
+  const workspaceLayoutClass = "items-stretch justify-stretch";
   const nvrGridWidth = Math.max(320, (nvrSize.width || canvasSize.width) - 32);
   const demOverlayTransform = demPreview ? {
     x: demTransform.x,
@@ -6275,8 +6452,10 @@ export default function SecurityPlanner() {
       : demAlignTool === "pan"
         ? "#94a3b8"
         : "#10b981";
-  const floatingPanelRight = isRightPanelOpen ? "right-96" : "right-4";
-  const showProjectSettings = rightPanelMode === "project";
+  const showProjectSettings = rightPanelMode === "project" && isRightPanelOpen;
+  // The right panel is an inspector: it shows only when there's something to inspect or set.
+  const inspectorVisible = !!selectedItem || showProjectSettings;
+  const floatingPanelRight = inspectorVisible ? "right-[21rem]" : "right-4";
   const exportNoticeTone = exportNotice?.tone ?? "success";
   const exportNoticeClass =
     exportNoticeTone === "error"
@@ -6288,7 +6467,7 @@ export default function SecurityPlanner() {
   return (
     <div className="relative h-screen bg-zinc-950 font-sans text-slate-200 overflow-hidden w-full selection:bg-indigo-500/30">
       {exportNotice && (
-        <div role="status" className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
+        <div role="status" className={`absolute bottom-24 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 px-4 py-2 rounded-full border text-sm font-semibold shadow-xl backdrop-blur ${exportNoticeClass} animate-in fade-in slide-in-from-bottom-2`}>
           <span>{exportNotice.message}</span>
           {exportNotice.action && (
             <button
@@ -6905,51 +7084,176 @@ export default function SecurityPlanner() {
           Click an edge to insert a vertex.
         </div>
       )}
-      {/* --- Left Vertical Toolbar --- */}
-      <div className="absolute left-4 top-4 bottom-4 w-14 flex flex-col items-center py-4 bg-zinc-900/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl z-50 gap-3 ring-1 ring-white/5">
-        <div className="flex flex-col gap-2 w-full px-2">
-          {[
-            { mode: "select", icon: Move, label: "Select / Move", key: "V" },
-            { mode: "add-camera", icon: Camera, label: "Place Camera", key: "C" },
-            { mode: "add-building", icon: Square, label: "Draw Building", key: "B" },
-            { mode: "trace-building", icon: WandSparkles, label: "Auto-trace a roof from the map", key: "R" },
-            { mode: "add-tree", icon: Trees, label: "Place Tree", key: "T" },
-            { mode: "add-parking", icon: Car, label: "Vehicles", key: "P" },
-            { mode: "add-label", icon: Type, label: "Text", key: "L" }
-          ].map(tool => (
+      {/* --- Left sidebar: the guided workflow (steps) --- */}
+      {sidebarOpen && (
+        <aside className="absolute top-14 left-0 bottom-0 w-[22rem] z-30 bg-zinc-900 border-r border-white/10 overflow-y-auto custom-scrollbar" aria-label="Steps panel">
+          <div className="p-5 flex flex-col gap-5">
+                          <StepPanel
+                step={activeStep}
+                items={items}
+                site={workflowStepsDone.site ? { label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
+                reportViews={exportList.length}
+                showAllCones={frustumSettings.showAll !== false}
+                onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
+                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onStep={handleWorkflowStep}
+                onImportSite={openElevationDialog}
+                onUploadBaseMap={() => fileInputRef.current?.click()}
+                onTool={tool => { if (viewMode === "nvr") setViewMode("plan"); setMode(tool); }}
+                onView={setViewMode}
+                onReportPdf={handleExportReportPdf}
+                onPlanPng={handleExportPng}
+                onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+                onMoreReportOptions={() => setShowExportPanel(true)}
+                onCamerasCsv={handleDownloadCamerasCsv}
+                storage={{
+                  widths: (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH),
+                  days: recordDays,
+                  mode: recordMode,
+                  onDays: setRecordDays,
+                  onMode: setRecordMode
+                }}
+                coverage={
+                  <CoveragePanel
+                    targets={targetItems}
+                    results={targetResults}
+                    cameras={items.filter(i => i.type === "camera") as CameraItem[]}
+                    onAdd={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-target"); }}
+                    onSelect={id => { setSelectedId(id); setMode("select"); }}
+                    onUpdate={(id, patch) => { updateItem(id, patch); setTimeout(() => saveHistory(), 50); }}
+                    onDelete={id => { deleteItem(id); setTimeout(() => saveHistory(), 50); }}
+                    showBlindSpots={showBlindSpots}
+                    onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
+                    coveredFraction={blindSpots?.coveredFraction ?? null}
+                    onSuggest={handleSuggestCameras}
+                    night={nightCoverage}
+                    onToggleNight={setNightCoverage}
+                  />
+                }
+              />
+              <button
+                onClick={() => {
+                  setRightPanelMode("project");
+                  setIsRightPanelOpen(true);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-300 text-left"
+              >
+                Plan settings (name, size, grid, labels)…
+              </button>
+          </div>
+        </aside>
+      )}
+
+      {/* --- Hidden file inputs --- */}
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
+      <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
+      <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
+      <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
+      <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
+
+      {/* --- Top Header --- */}
+      <AppHeader
+        className="absolute top-0 left-0 right-0"
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen(v => !v)}
+        projectName={projectName}
+        onRename={setProjectName}
+        onNew={handleNewProject}
+        onOpen={() => projectInputRef.current?.click()}
+        onSave={handleSaveProject}
+        stepsDone={workflowStepsDone}
+        activeStep={activeStep}
+        onStep={handleWorkflowStep}
+        viewMode={viewMode}
+        onViewMode={setViewMode}
+        onSettings={() => { setRightPanelMode("project"); setIsRightPanelOpen(true); }}
+        onUploadBaseMap={() => fileInputRef.current?.click()}
+        onAddOverlay={() => elementImageInputRef.current?.click()}
+        onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
+        onShortcuts={() => setShowShortcuts(true)}
+      />
+      {showShortcuts && <ShortcutsDialog onClose={() => setShowShortcuts(false)} />}
+
+      {demAlignMode && viewMode !== "plan" && demPreview && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
+          <span className="text-xs font-semibold">DEM Align is active. Editing uses the mini-map.</span>
+          <button
+            onClick={() => setViewMode("plan")}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
+          >
+            Go to Plan View
+          </button>
+        </div>
+      )}
+
+      {demAlignMode && demPreview && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
+          <span className="text-xs font-semibold text-slate-300 tracking-wide">DEM Align ({viewMode === "plan" ? "Plan" : "3D"})</span>
+          <div className="h-4 w-px bg-white/10" />
+          {([
+            { id: "move", label: "Move" },
+            { id: "scale", label: "Scale" },
+            { id: "rotate", label: "Rotate" },
+            { id: "pan", label: "Pan View" }
+          ] as { id: DemAlignTool; label: string }[]).map((tool) => (
             <button
-              key={tool.mode}
-              onClick={() => mode === tool.mode ? setMode("select") : setMode(tool.mode as any)}
-              title={`${tool.label} (${tool.key})`}
-              aria-label={tool.label}
-              className={`relative w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${mode === tool.mode ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"
+              key={tool.id}
+              onClick={() => setDemAlignTool(tool.id)}
+              className={`px-2 py-1 rounded-full text-[11px] font-semibold border ${demAlignTool === tool.id
+                ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
+                : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
                 }`}
             >
-              <tool.icon className="w-5 h-5" />
-              <span className="absolute bottom-0.5 right-1 text-[8px] font-bold opacity-50">{tool.key}</span>
+              {tool.label}
             </button>
           ))}
+          <div className="h-4 w-px bg-white/10" />
+          <button
+            onClick={() => {
+              if (!demPreview) return;
+              const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
+              const baseH = backgroundImg ? bgSettings.height : canvasSize.height;
+              const scale = Math.min(baseW / demPreview.width, baseH / demPreview.height);
+              const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
+              const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
+              setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
+            }}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+          >
+            Fit
+          </button>
+          <button
+            onClick={() => {
+              const centerX = canvasSize.width / 2;
+              const centerY = canvasSize.height / 2;
+              setDemTransform({ x: centerX, y: centerY, scale: 1, rotation: 0 });
+            }}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+          >
+            Reset
+          </button>
+          <button
+            onClick={() => setDemAlignMode(false)}
+            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-emerald-400/40 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
+          >
+            Done
+          </button>
         </div>
+      )}
 
-        <div className="w-8 h-px bg-white/10 my-1"></div>
-
-        <div className="flex flex-col gap-2 w-full px-2">
-
-
-
-          {(viewMode === "iso3d" || viewMode === "plan") && (
-            <div className="relative group">
-              <button
-                onClick={() => setIsTerrainMode(!isTerrainMode)}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-200 ${isTerrainMode ? "bg-emerald-600 text-white shadow-lg shadow-emerald-500/40 scale-105" : "text-slate-400 hover:text-white hover:bg-white/10"}`}
-                title={isTerrainMode ? "Exit Terrain Mode" : "Edit Terrain"}
-              >
-                <MapIcon className="w-5 h-5" />
-              </button>
-
-              {/* Terrain Controls Popup */}
-              {isTerrainMode && (
-                <div className="absolute left-14 top-1/2 -translate-y-1/2 mt-6 ml-4 w-64 max-h-[calc(100vh-8rem)] overflow-y-auto bg-zinc-900/95 backdrop-blur-xl border border-white/10 p-4 rounded-xl shadow-2xl z-50 animate-in fade-in slide-in-from-left-2 ring-1 ring-white/10 custom-scrollbar">
+      <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen ? 352 : 0, right: 0 }}>
+        {(viewMode === "plan" || viewMode === "iso3d") && renderToolDock()}
+        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || mode !== "select") && (
+          <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
+              {isTerrainMode ? (
+                <div className="flex flex-col gap-4" data-testid="terrain-panel">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-bold text-lg text-slate-100">Terrain</h2>
+                    <button onClick={() => setIsTerrainMode(false)} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg" title="Done" aria-label="Done">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex flex-col gap-0">
                   <h3 className="text-sm font-bold text-slate-200 mb-3 flex items-center gap-2">
                     <MapIcon className="w-4 h-4 text-emerald-500" />
                     Terrain Tools
@@ -7361,120 +7665,21 @@ export default function SecurityPlanner() {
                     </div>
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-auto flex flex-col gap-2 w-full px-2">
-          <button onClick={handleUndo} disabled={!canUndo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:hover:bg-transparent" title="Undo (Ctrl/⌘+Z)">
-            <Undo className="w-5 h-5" />
-          </button>
-          <button onClick={handleRedo} disabled={!canRedo} className="w-10 h-10 rounded-xl flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30 disabled:hover:bg-transparent" title="Redo (Ctrl/⌘+Shift+Z)">
-            <Redo className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
-
-      {/* --- Hidden file inputs --- */}
-      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
-      <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
-      <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
-      <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
-      <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
-
-      {/* --- Top Header --- */}
-      <AppHeader
-        className={`absolute top-4 left-24 right-4 ${rightPanelOffset} transition-all duration-300`}
-        projectName={projectName}
-        onRename={setProjectName}
-        onNew={handleNewProject}
-        onOpen={() => projectInputRef.current?.click()}
-        onSave={handleSaveProject}
-        stepsDone={workflowStepsDone}
-        activeStep={activeStep}
-        onStep={handleWorkflowStep}
-        viewMode={viewMode}
-        onViewMode={setViewMode}
-        onSettings={() => { setRightPanelMode("project"); setIsRightPanelOpen(true); }}
-        onUploadBaseMap={() => fileInputRef.current?.click()}
-        onAddOverlay={() => elementImageInputRef.current?.click()}
-        onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
-        onShortcuts={() => setShowShortcuts(true)}
-      />
-      {showShortcuts && <ShortcutsDialog onClose={() => setShowShortcuts(false)} />}
-
-      {demAlignMode && viewMode !== "plan" && demPreview && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
-          <span className="text-xs font-semibold">DEM Align is active. Editing uses the mini-map.</span>
-          <button
-            onClick={() => setViewMode("plan")}
-            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
-          >
-            Go to Plan View
-          </button>
-        </div>
-      )}
-
-      {demAlignMode && demPreview && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
-          <span className="text-xs font-semibold text-slate-300 tracking-wide">DEM Align ({viewMode === "plan" ? "Plan" : "3D"})</span>
-          <div className="h-4 w-px bg-white/10" />
-          {([
-            { id: "move", label: "Move" },
-            { id: "scale", label: "Scale" },
-            { id: "rotate", label: "Rotate" },
-            { id: "pan", label: "Pan View" }
-          ] as { id: DemAlignTool; label: string }[]).map((tool) => (
-            <button
-              key={tool.id}
-              onClick={() => setDemAlignTool(tool.id)}
-              className={`px-2 py-1 rounded-full text-[11px] font-semibold border ${demAlignTool === tool.id
-                ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
-                : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-                }`}
-            >
-              {tool.label}
-            </button>
-          ))}
-          <div className="h-4 w-px bg-white/10" />
-          <button
-            onClick={() => {
-              if (!demPreview) return;
-              const baseW = backgroundImg ? bgSettings.width : canvasSize.width;
-              const baseH = backgroundImg ? bgSettings.height : canvasSize.height;
-              const scale = Math.min(baseW / demPreview.width, baseH / demPreview.height);
-              const centerX = (backgroundImg ? bgSettings.x : 0) + baseW / 2;
-              const centerY = (backgroundImg ? bgSettings.y : 0) + baseH / 2;
-              setDemTransform({ x: centerX, y: centerY, scale, rotation: 0 });
-            }}
-            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-          >
-            Fit
-          </button>
-          <button
-            onClick={() => {
-              const centerX = canvasSize.width / 2;
-              const centerY = canvasSize.height / 2;
-              setDemTransform({ x: centerX, y: centerY, scale: 1, rotation: 0 });
-            }}
-            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-          >
-            Reset
-          </button>
-          <button
-            onClick={() => setDemAlignMode(false)}
-            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-emerald-400/40 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
-          >
-            Done
-          </button>
-        </div>
-      )}
-
-      <div className="absolute inset-0 z-0 overflow-hidden">
+                </div>
+              ) : mode !== "select" ? (
+                <ToolPanel
+                  mode={mode}
+                  defaults={toolDefaults}
+                  onDefaults={patch => setToolDefaults(prev => ({ ...prev, ...patch }))}
+                  onDone={() => setMode("select")}
+                  hasSatellite={!!backgroundImg}
+                />
+              ) : null}
+          </div>
+        )}
         {/* --- Main Workspace --- */}
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
-          <div className={`shadow-2xl bg-zinc-900 relative ring-1 ring-white/10 rounded-lg overflow-hidden ${(viewMode === "iso3d" || viewMode === "plan" || viewMode === "nvr") ? "w-full h-full" : ""}`}>
+          <div className="bg-zinc-900 relative overflow-hidden w-full h-full">
             {viewMode === "plan" ? (
               <>
               <svg
@@ -7502,7 +7707,6 @@ export default function SecurityPlanner() {
                   handlePlanTerrainMouseDown(e);
                 }}
                 onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
-                onWheel={handleSvgWheel}
                 onClick={handleSvgClick}
                 xmlns="http://www.w3.org/2000/svg"
               >
@@ -7758,11 +7962,18 @@ export default function SecurityPlanner() {
                             y={-b.height / 2}
                             width={b.width}
                             height={b.height}
+                            rx={isParking ? Math.min(b.width, b.height) * 0.3 : 0}
                             fill={b.color}
-                            stroke={isSelected ? "#3b82f6" : isParking ? "#94a3b8" : "#334155"}
-                            strokeWidth={isSelected ? 4 : 1}
-                            strokeDasharray={isParking ? "4" : "0"}
+                            stroke={isSelected ? "#3b82f6" : isParking ? "#475569" : "#334155"}
+                            strokeWidth={(isSelected ? 2.5 : 1) * planUi}
                           />
+                          {isParking && (
+                            <>
+                              {/* windshield and rear window, so the car reads as a car */}
+                              <rect x={-b.width * 0.36} y={-b.height * 0.3} width={b.width * 0.72} height={b.height * 0.17} rx={b.width * 0.1} fill="rgba(15,23,42,0.6)" pointerEvents="none" />
+                              <rect x={-b.width * 0.34} y={b.height * 0.2} width={b.width * 0.68} height={b.height * 0.11} rx={b.width * 0.08} fill="rgba(15,23,42,0.45)" pointerEvents="none" />
+                            </>
+                          )}
                           {!isParking && (
                             <text
                               x="0"
@@ -7779,14 +7990,14 @@ export default function SecurityPlanner() {
                           )}
                           {isSelected && (
                             <g className="cursor-alias">
-                              <line x1="0" y1={-b.height / 2} x2="0" y2={-b.height / 2 - 25} stroke="#3b82f6" strokeWidth="2" />
+                              <line x1="0" y1={-b.height / 2} x2="0" y2={-b.height / 2 - 18 * planUi} stroke="#3b82f6" strokeWidth={1.5 * planUi} />
                               <circle
                                 cx="0"
-                                cy={-b.height / 2 - 25}
-                                r="6"
+                                cy={-b.height / 2 - 18 * planUi}
+                                r={6 * planUi}
                                 fill="#fff"
                                 stroke="#3b82f6"
-                                strokeWidth="2"
+                                strokeWidth={2 * planUi}
                                 onMouseDown={e => {
                                   e.stopPropagation();
                                   handleMouseDown(e, b.id, "rotate");
@@ -7810,30 +8021,13 @@ export default function SecurityPlanner() {
                           style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
                         >
                           <circle
-                            r={t.radius}
+                            r={t.radius * (t.width ?? 1)}
                             fill={t.color}
-                            fillOpacity="0.6"
-                            stroke={isSelected ? "#3b82f6" : t.color}
-                            strokeWidth={isSelected ? 3 : 0}
+                            fillOpacity="0.7"
+                            stroke={isSelected ? "#3b82f6" : "rgba(0,0,0,0.25)"}
+                            strokeWidth={(isSelected ? 2.5 : 1) * planUi}
                           />
-                          {isSelected && (
-                            <g className="cursor-alias">
-                              <line x1="0" y1={-t.radius} x2="0" y2={-t.radius - 20} stroke="#3b82f6" strokeWidth="2" />
-                              <circle
-                                cx="0"
-                                cy={-t.radius - 20}
-                                r="6"
-                                fill="#fff"
-                                stroke="#3b82f6"
-                                strokeWidth="2"
-                                onMouseDown={e => {
-                                  e.stopPropagation();
-                                  handleMouseDown(e, t.id, "rotate");
-                                }}
-                              />
-                            </g>
-                          )}
-                          <circle r={t.radius * 0.5} fill="black" fillOpacity="0.1" />
+                          <circle r={t.radius * (t.width ?? 1) * 0.45} fill="black" fillOpacity="0.12" pointerEvents="none" />
                         </g>
                       );
                     }
@@ -8381,14 +8575,16 @@ export default function SecurityPlanner() {
                     </svg>
                   </div>
                 )}
-                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-30 pointer-events-none">
-                  <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-300 shadow border border-white/10 pointer-events-auto">
-                    Drag to pan · Right-click to rotate · Scroll to zoom
+                <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+                  <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-medium text-slate-300 shadow border border-white/10">
+                    Drag to move · Shift-drag or right-drag to rotate · Scroll or pinch to zoom
                   </div>
-                  <div className="flex items-center gap-2 pointer-events-auto">
+                </div>
+                <div className="absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+                  <div className="flex items-center gap-2">
                     <button
                       onClick={handleReset3dView}
-                      className="px-3 py-1.5 rounded-full border border-white/10 bg-zinc-800/90 text-xs font-semibold text-slate-200 hover:bg-zinc-700 hover:text-white shadow-sm transition-colors"
+                      className="px-3 py-1.5 rounded-lg border border-white/10 bg-zinc-900/90 text-xs font-semibold text-slate-200 hover:bg-zinc-800 shadow"
                     >
                       Reset view
                     </button>
@@ -8401,7 +8597,7 @@ export default function SecurityPlanner() {
                         <Camera className="w-3.5 h-3.5" /> Snapshot <ChevronDown className="w-3 h-3" />
                       </button>
                       {show3dMenu && (
-                        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setShow3dMenu(false)}>
+                        <div className="absolute top-full mt-2 right-0 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setShow3dMenu(false)}>
                           {[
                             { label: "Download as image", action: handleExportCurrent3d },
                             { label: "Add to the report", action: add3dToExportList },
@@ -8416,7 +8612,29 @@ export default function SecurityPlanner() {
                       )}
                     </div>
                   </div>
+                  <div className="grid grid-cols-3 gap-0.5 rounded-xl border border-white/10 bg-zinc-900/90 p-1 shadow" role="group" aria-label="3D view controls">
+                    {([
+                      ["", null, ""],
+                      ["Tilt up", "up", <ChevronUp key="u" className="w-4 h-4" />],
+                      ["", null, ""],
+                      ["Rotate left", "left", <RotateCcw key="l" className="w-4 h-4" />],
+                      ["Look straight down", "top", <Compass key="t" className="w-4 h-4" />],
+                      ["Rotate right", "right", <RotateCw key="r" className="w-4 h-4" />],
+                      ["Zoom out", "out", <ZoomOut key="o" className="w-4 h-4" />],
+                      ["Tilt down", "down", <ChevronDown key="d" className="w-4 h-4" />],
+                      ["Zoom in", "in", <ZoomIn key="i" className="w-4 h-4" />]
+                    ] as [string, Parameters<typeof nav3d>[0] | null, React.ReactNode][]).map(([label, act, icon], i) =>
+                      act ? (
+                        <button key={i} onClick={() => nav3d(act)} title={label} aria-label={label} className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10">
+                          {icon}
+                        </button>
+                      ) : (
+                        <span key={i} />
+                      )
+                    )}
+                  </div>
                 </div>
+
               </div>
             ) : (
               <div ref={nvrContainerRef} className="relative bg-zinc-950 flex flex-col overflow-hidden w-full h-full">
@@ -8474,7 +8692,7 @@ export default function SecurityPlanner() {
             )}
 
             {viewMode === "plan" && toolHint && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
                 <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
                   {toolHint}
                 </div>
@@ -8591,7 +8809,7 @@ export default function SecurityPlanner() {
 
         {/* Camera Preview Panel - Picture-in-Picture style */}
         {selectedCamera && showCameraPreview && (
-          <div className={`absolute bottom-4 ${floatingPanelRight} w-80 bg-zinc-900/90 backdrop-blur-xl rounded-xl shadow-2xl overflow-hidden border border-white/10 z-40 ring-1 ring-black/50`}>
+          <div className={`absolute bottom-24 ${floatingPanelRight} w-80 bg-zinc-900/90 backdrop-blur-xl rounded-xl shadow-2xl overflow-hidden border border-white/10 z-40 ring-1 ring-black/50`}>
             <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5">
               <div className="flex items-center gap-2">
                 <Camera className="w-4 h-4 text-emerald-400" />
@@ -8640,8 +8858,8 @@ export default function SecurityPlanner() {
 
         {maximizedCamId && (
           <div
-            className="fixed left-0 top-0 bottom-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200"
-            style={{ right: isRightPanelOpen ? "22rem" : "0" }}
+            className="fixed left-0 bottom-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200"
+            style={{ right: inspectorVisible ? "20rem" : "0", top: 56 }}
           >
             <div
               className="absolute left-4 top-16 bottom-4 lg:left-20 lg:top-20 lg:bottom-8"
@@ -8678,7 +8896,7 @@ export default function SecurityPlanner() {
         {selectedCamera && !showCameraPreview && (
           <button
             onClick={() => setShowCameraPreview(true)}
-            className={`absolute bottom-4 ${floatingPanelRight} px-4 py-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors z-40 flex items-center gap-2`}
+            className={`absolute bottom-24 ${floatingPanelRight} px-4 py-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors z-40 flex items-center gap-2`}
           >
             <Camera className="w-4 h-4" />
             <span className="text-sm font-medium">Show Camera View</span>
@@ -8686,13 +8904,13 @@ export default function SecurityPlanner() {
         )}
 
         {/* --- Properties Sidebar (Docked) --- */}
-        <div className={`absolute right-0 top-0 bottom-0 w-80 bg-zinc-900/90 backdrop-blur-xl border-l border-white/10 overflow-y-auto shadow-2xl z-40 custom-scrollbar ${isRightPanelOpen ? "hidden lg:block" : "hidden"}`}>
+        <div className={`absolute right-0 top-14 bottom-0 w-80 bg-zinc-900/95 backdrop-blur border-l border-white/10 shadow-2xl overflow-y-auto z-40 custom-scrollbar ${inspectorVisible ? "block" : "hidden"}`} aria-label="Inspector">
           {selectedItem && !showProjectSettings ? (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
                 <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {getItemTypeLabel(selectedItem.type)}</h2>
                 <button
-                  onClick={() => setIsRightPanelOpen(false)}
+                  onClick={() => setSelectedId(null)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
                   title="Close Panel"
                 >
@@ -9540,7 +9758,7 @@ export default function SecurityPlanner() {
                   <h2 className="font-bold text-lg text-slate-200">Plan Settings</h2>
                 </div>
                 <button
-                  onClick={() => setIsRightPanelOpen(false)}
+                  onClick={() => setRightPanelMode("properties")}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
                   title="Close Panel"
                 >
@@ -9917,59 +10135,7 @@ export default function SecurityPlanner() {
               </div>
             </div>
           ) : (
-            <div className="p-6 flex flex-col gap-5">
-              <div className="flex justify-end -mb-4">
-                <button
-                  onClick={() => setIsRightPanelOpen(false)}
-                  className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                  title="Close Panel"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <StepPanel
-                step={activeStep}
-                items={items}
-                site={workflowStepsDone.site ? { label: siteLocation?.label, widthFt: canvasSize.width / (planGeoRef?.unitsPerFoot ?? 1), heightFt: canvasSize.height / (planGeoRef?.unitsPerFoot ?? 1), imagery: !!backgroundImg } : null}
-                reportViews={exportList.length}
-                showAllCones={frustumSettings.showAll !== false}
-                onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
-                onSelect={id => { setSelectedId(id); setMode("select"); }}
-                onStep={handleWorkflowStep}
-                onImportSite={openElevationDialog}
-                onUploadBaseMap={() => fileInputRef.current?.click()}
-                onTool={tool => { if (viewMode === "nvr") setViewMode("plan"); setMode(tool); }}
-                onView={setViewMode}
-                onReportPdf={handleExportReportPdf}
-                onPlanPng={handleExportPng}
-                onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
-                onMoreReportOptions={() => setShowExportPanel(true)}
-                onCamerasCsv={handleDownloadCamerasCsv}
-                coverage={
-                  <CoveragePanel
-                    targets={targetItems}
-                    results={targetResults}
-                    cameras={items.filter(i => i.type === "camera") as CameraItem[]}
-                    onAdd={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-target"); }}
-                    onSelect={id => { setSelectedId(id); setMode("select"); }}
-                    onUpdate={(id, patch) => { updateItem(id, patch); setTimeout(() => saveHistory(), 50); }}
-                    onDelete={id => { deleteItem(id); setTimeout(() => saveHistory(), 50); }}
-                    showBlindSpots={showBlindSpots}
-                    onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
-                    coveredFraction={blindSpots?.coveredFraction ?? null}
-                  />
-                }
-              />
-              <button
-                onClick={() => {
-                  setRightPanelMode("project");
-                  setIsRightPanelOpen(true);
-                }}
-                className="text-xs text-slate-500 hover:text-slate-300 text-left"
-              >
-                Plan settings (name, size, grid, labels)…
-              </button>
-            </div>
+            null
           )}
         </div>
       </div>

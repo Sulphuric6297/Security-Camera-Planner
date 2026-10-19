@@ -2,9 +2,18 @@
 
 Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no backend.
 
-## The testing rule (mandatory after every change)
+## How to work: speed and accuracy first, then tests
 
-**Every change, however small, must pass the full check before it is committed:**
+- **Edit directly.** Use the editor's exact find-and-replace edits on the files. Don't write
+  long scripts to make changes, and don't re-read or re-check things that haven't changed.
+- **Make all the changes for the task, then test once at the end.** Don't run tests, builds or
+  screenshots after each small edit; `npm run typecheck` is fine as a quick sanity check.
+- Then run the full check below and fix whatever it points out.
+
+## The testing rule
+
+Work through a batch of related changes first; you don't need to run tests after every small edit.
+**Before committing or pushing, the whole batch must pass the full check:**
 
 ```bash
 npm run check   # typecheck + production build + full end-to-end suite (all app areas)
@@ -18,7 +27,7 @@ npm run check   # typecheck + production build + full end-to-end suite (all app 
   Change a test only when the intended behaviour changed, and say so in the commit message.
 - **Every bug fix adds a test that fails without the fix. Every new feature adds a test for
   it.** Put it in the spec for that area (see the table below).
-- Before calling a change done, check for flakiness: `npx playwright test --repeat-each=3`.
+- For larger batches, also check for flakiness: `npx playwright test --repeat-each=3`.
 - CI runs the same `npm run check` on every push and pull request. Deploy to GitHub Pages
   runs only if it passes.
 
@@ -46,10 +55,11 @@ Useful commands:
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
 | `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), photo-textured roofs + roof picker, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
-| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu |
-| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall |
+| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens |
+| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid (pure logic) |
-| `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions (pure logic) |
+| `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions, recorder storage estimate (pure logic) |
+| `suggest.spec.ts` | "Suggest cameras": wall mounts that meet each spot's goal, one camera for nearby spots, nothing for covered spots, pole fallback (pure logic) |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
 | `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |

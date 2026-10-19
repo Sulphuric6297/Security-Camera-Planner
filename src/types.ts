@@ -90,6 +90,8 @@ export interface CameraItem extends BaseItem {
   resolutionWidth?: number; // horizontal pixels (e.g. 2688 for 4 MP); drives DORI distances
   mountPreset?: string;
   lensPreset?: string;
+  /** Night vision (infrared) reach in feet; undefined = the typical 100 ft. */
+  irRangeFt?: number;
 }
 
 export interface BuildingItem extends BaseItem {
