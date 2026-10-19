@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Map as MapIcon, Moon, Pause, Play, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Map as MapIcon, Moon, Pause, Play, Plus, SlidersHorizontal } from "lucide-react";
 
 export type LookCamera = { id: string; number: number; label: string; color: string; thumb?: string };
 
@@ -15,6 +15,9 @@ type Props = {
   /** Night: the picture as the camera's infrared sees it. */
   night: boolean;
   onNight: (on: boolean) => void;
+  /** The camera's settings panel beside the picture (hidden by default so the picture is big). */
+  settingsOpen?: boolean;
+  onSettings?: () => void;
   /** Width covered on the right (the inspector): the picture sits left of it. */
   rightInset?: number;
 };
@@ -26,7 +29,7 @@ const two = (n: number) => String(n).padStart(2, "0");
  * with a recorder-style stamp, the camera's details, every camera's thumbnail to switch to, and
  * the way back to the map. Drag the picture to aim, scroll to zoom the lens.
  */
-export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onExit, onAddToReport, night, onNight, rightInset = 0 }: Props) {
+export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onExit, onAddToReport, night, onNight, settingsOpen = false, onSettings, rightInset = 0 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 1, h: 1 });
   const [now, setNow] = useState(() => new Date());
@@ -102,6 +105,11 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
         <button className={`${btn} ${night ? "!bg-indigo-600 !border-indigo-400/40" : ""}`} onClick={() => onNight(!night)} aria-pressed={night} title="Night: what the camera's infrared sees (N)">
           <Moon className="w-3.5 h-3.5" /> Night
         </button>
+        {onSettings && (
+          <button className={`${btn} ${settingsOpen ? "!bg-sky-700 !border-sky-400/40" : ""}`} onClick={onSettings} aria-pressed={settingsOpen} title="Lens, mount and aim settings, next to the picture (S)">
+            <SlidersHorizontal className="w-3.5 h-3.5" /> Settings
+          </button>
+        )}
         <button className={btn} onClick={onAddToReport} title="Add this view to the report">
           <Plus className="w-3.5 h-3.5" /> Report
         </button>
@@ -121,7 +129,7 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
 
       {/* Hint */}
       <div className="absolute rounded-full bg-black/60 px-3 py-1 text-[11px] text-slate-200" style={{ right: size.w - frame.left - frame.width + 12, bottom: size.h - frame.top - frame.height + 12 + (cameras.length > 1 ? 92 : 0) }}>
-        Drag to aim · scroll to zoom the lens · ← → other cameras · N night · Esc map
+        Drag to aim · scroll to zoom the lens · ← → other cameras · N night · S settings · Esc map
       </div>
 
       {/* Every camera, to jump between them */}

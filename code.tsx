@@ -114,6 +114,8 @@ export default function SecurityPlanner() {
   const [pickerDrawing, setPickerDrawing] = useState(false);
   const [importBuildings, setImportBuildings] = useState(true);
   const [importTreesCars, setImportTreesCars] = useState(true);
+  // Parked cars from the photo: experimental (many false finds around homes), off unless turned on.
+  const [importCars, setImportCars] = useState(false);
   const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
   const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
   // Lining the found footprints up with the photo: automatic, with manual nudges as a fallback.
@@ -379,6 +381,8 @@ export default function SecurityPlanner() {
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
   const [povCamId, setPovCamId] = useState<string | null>(null);
+  // Looking through a camera fills the window; its settings slide in only when asked for.
+  const [povSettings, setPovSettings] = useState(false);
   // Which plan this is, so starting or opening another keeps it in "Recent plans".
   const [planId, setPlanId] = useState(() => generateId());
   const [recentPlans, setRecentPlans] = useState<PlanMeta[]>([]);
@@ -1167,16 +1171,17 @@ export default function SecurityPlanner() {
         }
       }
 
-      // Trees and parked cars found on the photo (replacing ones found by an earlier import).
+      // Trees (and, if turned on, parked cars) found on the photo, replacing ones found by an earlier import.
       let objectsText = "";
-      if (importTreesCars && imagery === "satellite" && importedImage) {
-        setElevationStatus({ state: "loading", message: "Finding trees and parked cars on the photo…" });
+      if ((importTreesCars || importCars) && imagery === "satellite" && importedImage) {
+        setElevationStatus({ state: "loading", message: importCars ? "Finding trees and parked cars on the photo…" : "Finding trees on the photo…" });
         const buildingsNow = currentItemsRef.current.filter(i => i.type === "building") as BuildingItem[];
-        const found = await detectSiteObjects(importedImage, { x: 0, y: 0, width: canvas.width, height: canvas.height }, unitsPerFoot, buildingsNow).catch(err => {
+        const found = await detectSiteObjects(importedImage, { x: 0, y: 0, width: canvas.width, height: canvas.height }, unitsPerFoot, buildingsNow, importCars).catch(err => {
           console.warn("Tree/car detection failed", err);
           return null;
         });
         if (found) {
+          if (!importTreesCars) found.trees = [];
           setItems(prev => [...prev.filter(i => !((i.type === "tree" || i.type === "parking") && (i as TreeItem | ParkingItem).importSource === "photo")), ...found.trees, ...found.vehicles]);
           const parts = [
             found.trees.length ? `${found.trees.length} tree${found.trees.length === 1 ? "" : "s"}` : "",
@@ -3421,6 +3426,7 @@ export default function SecurityPlanner() {
       const i = cameraItems.findIndex(c => c.id === povCamId);
       if (e.key === "Escape" || e.key === "Enter") setPovCamId(null);
       else if (e.key === "n" || e.key === "N") setPovNight(v => !v);
+      else if (e.key === "s" || e.key === "S") setPovSettings(v => !v);
       else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && cameraItems.length > 1) {
         const next = cameraItems[(i + (e.key === "ArrowRight" ? 1 : -1) + cameraItems.length) % cameraItems.length];
         lookThrough(next.id);
@@ -3745,7 +3751,7 @@ export default function SecurityPlanner() {
         : "#10b981";
   const showProjectSettings = rightPanelMode === "project" && isRightPanelOpen;
   // The right panel is an inspector: it shows only when there's something to inspect or set.
-  const inspectorVisible = !!selectedItem || showProjectSettings;
+  const inspectorVisible = (!!selectedItem || showProjectSettings) && (!povCamId || povSettings);
   const exportNoticeTone = exportNotice?.tone ?? "success";
   const exportNoticeClass =
     exportNoticeTone === "error"
@@ -4139,11 +4145,21 @@ export default function SecurityPlanner() {
                     </p>
                   </div>
 
-                  <label className="flex items-center justify-between gap-2 cursor-pointer" title="Trees and parked cars are found on the satellite photo and placed for you. Check them after importing.">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Trees and parked cars</span>
+                  <label className="flex items-center justify-between gap-2 cursor-pointer" title="Trees are found on the satellite photo and placed for you. Check them after importing.">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Trees</span>
                     <span className="flex items-center gap-2 text-xs text-slate-300">
                       Place from the photo
-                      <input type="checkbox" checked={importTreesCars} onChange={e => setImportTreesCars(e.target.checked)} className="accent-emerald-500" aria-label="Place trees and parked cars from the photo" />
+                      <input type="checkbox" checked={importTreesCars} onChange={e => setImportTreesCars(e.target.checked)} className="accent-emerald-500" aria-label="Place trees from the photo" />
+                    </span>
+                  </label>
+                  <label className="flex items-center justify-between gap-2 cursor-pointer" title="Experimental: finds most cars in parking lots, but around homes it also takes walls, curbs and shadows for cars. Check them after importing.">
+                    <span className="flex items-center gap-1.5 whitespace-nowrap text-[10px] uppercase font-bold text-slate-400">
+                      Parked cars
+                      <span className="rounded bg-amber-500/20 px-1 py-px text-[9px] font-semibold normal-case text-amber-300">Experimental</span>
+                    </span>
+                    <span className="flex items-center gap-2 whitespace-nowrap text-xs text-slate-300">
+                      From the photo
+                      <input type="checkbox" checked={importCars} onChange={e => setImportCars(e.target.checked)} className="accent-emerald-500" aria-label="Place parked cars from the photo (experimental)" />
                     </span>
                   </label>
                   <div className="space-y-2">
@@ -4385,7 +4401,7 @@ export default function SecurityPlanner() {
         </div>
       )}
       {/* --- Left sidebar: the guided workflow (steps) --- */}
-      {sidebarOpen && (
+      {sidebarOpen && !povCamId && (
         <aside className="absolute top-14 left-0 bottom-0 w-[22rem] z-30 bg-zinc-900 border-r border-white/10 overflow-y-auto custom-scrollbar" aria-label="Steps panel">
           <div className="p-5 flex flex-col gap-5">
                           <StepPanel
@@ -4546,7 +4562,7 @@ export default function SecurityPlanner() {
         </div>
       )}
 
-      <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen ? 352 : 0, right: 0 }}>
+      <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen && !povCamId ? 352 : 0, right: 0 }}>
         {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
         {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure")) && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
@@ -5014,6 +5030,8 @@ export default function SecurityPlanner() {
                   onAddToReport={() => addCameraViewToExportList(povCamera, povNight)}
                   night={povNight}
                   onNight={setPovNight}
+                  settingsOpen={inspectorVisible}
+                  onSettings={() => setPovSettings(v => !v)}
                   rightInset={inspectorVisible ? 320 : 0}
                 />
               )}

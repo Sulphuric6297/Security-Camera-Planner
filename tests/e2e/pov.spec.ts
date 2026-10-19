@@ -31,6 +31,34 @@ test.describe("looking through a camera", () => {
     await expect(page.getByRole("toolbar", { name: "Tools" })).toBeVisible();
   });
 
+  test("the picture fills the window; Settings (S) brings the lens panel beside it", async ({ page }) => {
+    await placeWithKey(page, "c", 0.5, 0.5);
+    await expect(page.getByRole("complementary", { name: "Steps panel" })).toBeVisible();
+    const window = page.viewportSize()!;
+    await page.keyboard.press("Enter");
+    const look = page.getByTestId("camera-look");
+    await expect(look).toBeVisible();
+    // Side panels step aside: the camera's picture gets the whole window
+    await expect(page.getByRole("complementary", { name: "Steps panel" })).toHaveCount(0);
+    await expect(page.getByLabel("Inspector")).toBeHidden();
+    const full = (await look.boundingBox())!;
+    expect(full.width).toBeGreaterThan(window.width - 4);
+    // Settings slides the camera's panel in; changing the lens there changes the picture
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page.getByLabel("Inspector")).toBeVisible();
+    expect((await look.boundingBox())!.width).toBeLessThan(window.width - 300);
+    const [cam] = await itemsOfType(page, "camera");
+    await page.getByLabel("Inspector").getByRole("button", { name: /^12mm/ }).click();
+    await expect.poll(async () => (await itemsOfType(page, "camera"))[0].hFov).toBeLessThan(cam.hFov);
+    await expect(look).toBeVisible();
+    // S hides it again; Esc brings the map and its panels back
+    await page.keyboard.press("s");
+    await expect(page.getByLabel("Inspector")).toBeHidden();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("complementary", { name: "Steps panel" })).toBeVisible();
+    await expect(page.getByLabel("Inspector")).toBeVisible();
+  });
+
   test("arrow keys and thumbnails switch between cameras", async ({ page }) => {
     await placeWithKey(page, "c", 0.3, 0.5);
     await placeWithKey(page, "c", 0.7, 0.5);

@@ -30,7 +30,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ["Q / E", "Turn the view"],
       ["N", "North up"],
       ["0 / F", "Fit the site / the selection"],
-      ["Enter", "Look through the selected camera (Esc: back, ← →: other cameras, N: night)"],
+      ["Enter", "Look through the selected camera (Esc: back, ← →: other cameras, N: night, S: settings)"],
       ["?", "This list"]
     ]
   },

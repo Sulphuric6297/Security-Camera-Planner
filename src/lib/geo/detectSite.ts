@@ -30,7 +30,8 @@ export const findSiteObjects = (
   rect: SiteRect,
   unitsPerFoot: number,
   buildings: BuildingItem[],
-  creditPx = 0
+  creditPx = 0,
+  cars = true
 ): { trees: TreeItem[]; vehicles: ParkingItem[] } => {
   const { width: w, height: h } = data;
   const widthM = rect.width / unitsPerFoot / FT_PER_M;
@@ -68,7 +69,7 @@ export const findSiteObjects = (
   const exclude = (x: number, y: number) => y >= creditTop || excludeMask[y * w + x] === 1;
 
   const foundTrees = detectTrees(data, { metersPerPx: mpp, exclude, maxTrees: 150 });
-  const foundCars = detectVehicles(data, { metersPerPx: mpp, exclude, maxVehicles: 40 });
+  const foundCars = cars ? detectVehicles(data, { metersPerPx: mpp, exclude, maxVehicles: 40 }) : [];
 
   const trees = foundTrees.map(t => {
     const p = toPlan(t.x, t.y);
@@ -91,12 +92,14 @@ export const findSiteObjects = (
 /**
  * @param rect where the photo sits on the plan (plan units)
  * @param unitsPerFoot plan units per foot
+ * @param cars also look for parked cars (experimental: many false finds around homes)
  */
 export const detectSiteObjects = async (
   url: string,
   rect: SiteRect,
   unitsPerFoot: number,
-  buildings: BuildingItem[]
+  buildings: BuildingItem[],
+  cars = false
 ): Promise<{ trees: TreeItem[]; vehicles: ParkingItem[] }> => {
   const img = await loadImage(url);
   const widthM = rect.width / unitsPerFoot / FT_PER_M;
@@ -110,5 +113,5 @@ export const detectSiteObjects = async (
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return { trees: [], vehicles: [] };
   ctx.drawImage(img, 0, 0, w, h);
-  return findSiteObjects(ctx.getImageData(0, 0, w, h), rect, unitsPerFoot, buildings, creditHeightPx(img.naturalWidth) * (h / img.naturalHeight));
+  return findSiteObjects(ctx.getImageData(0, 0, w, h), rect, unitsPerFoot, buildings, creditHeightPx(img.naturalWidth) * (h / img.naturalHeight), cars);
 };

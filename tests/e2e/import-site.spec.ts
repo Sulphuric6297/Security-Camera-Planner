@@ -18,6 +18,12 @@ test.describe("Import Site", () => {
     await mapped.click({ force: true });
     await expect(page.getByText("2 of 2 buildings will be added")).toBeVisible();
 
+    // Parked cars from the photo are experimental: off unless turned on (turned on here)
+    const cars = page.getByLabel("Place parked cars from the photo (experimental)");
+    await expect(cars).not.toBeChecked();
+    await expect(page.getByText("Experimental", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Place trees from the photo")).toBeChecked();
+    await cars.check();
     await page.locator("div.fixed button", { hasText: "Import Site" }).last().click();
     const done = page.getByText(/^Site imported\./);
     await expect(done).toBeVisible({ timeout: 60_000 });
@@ -80,7 +86,16 @@ test.describe("Import Site", () => {
     await expect(page.getByText(/400 × 280 ft/)).toHaveCount(0);
   });
 
+  test("by default import places trees from the photo but no parked cars", async ({ page }) => {
+    const summary = (await importSite(page)) ?? "";
+    expect(summary).toMatch(/Placed 1 tree found on the photo/);
+    expect(summary).not.toContain("parked car");
+    expect(await itemsOfType(page, "tree")).toHaveLength(1);
+    expect(await itemsOfType(page, "parking")).toHaveLength(0);
+  });
+
   test("re-import keeps edited building heights and mounted cameras", async ({ page }) => {
+    test.setTimeout(180_000); // two full imports
     await importSite(page);
     // Edit an imported building's height through the store's UI path: select and use the slider
     const before = await itemsOfType(page, "building");

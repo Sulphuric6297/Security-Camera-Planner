@@ -275,9 +275,11 @@ export async function importSite(page: Page) {
   await page.getByRole("button", { name: /123 Main St/ }).click();
   await expect(page.getByText(/of \d+ buildings will be added/)).toBeVisible();
   await page.locator("div.fixed button", { hasText: "Import Site" }).last().click();
+  // Read the summary the moment it shows (it fades by itself; a slow machine can miss it in between)
   const done = page.getByText(/^Site imported\./);
-  await expect(done).toBeVisible({ timeout: 60_000 });
-  return done.textContent();
+  let text = "";
+  await expect.poll(async () => (text = (await done.allTextContents())[0] ?? ""), { timeout: 60_000 }).toMatch(/^Site imported\./);
+  return text;
 }
 
 type Fixtures = { errors: string[] };
