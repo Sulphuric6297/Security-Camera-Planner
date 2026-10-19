@@ -94,7 +94,7 @@ test.describe("3D, camera views and report", () => {
     await expect.poll(scene).toEqual({ walls: true, doors: 0 });
     // Mark the front door 3 ft out from the south wall
     await page.locator('nav[aria-label="Steps"] button').nth(2).click();
-    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    await page.getByRole("button", { name: /Mark another spot/ }).click();
     const at = await page.evaluate(([x, y]) => (window as any).__scpView.toClient(x, y), [house.x, house.y + 21] as const);
     await page.mouse.click(at.x, at.y);
     await page.keyboard.press("Escape");
@@ -181,7 +181,7 @@ test.describe("3D, camera views and report", () => {
 
   test("PDF report includes the coverage checklist; camera list downloads as CSV", async ({ page, context }) => {
     await page.locator('nav[aria-label="Steps"] button').nth(2).click();
-    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    await page.getByRole("button", { name: /Mark another spot/ }).click();
     const box = (await page.getByTestId("plan").boundingBox())!;
     await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.45);
     await page.keyboard.press("Escape");

@@ -3,7 +3,7 @@ import { test, expect, drag, itemsOfType, placeWithKey, planPoint, screenOf } fr
 // The empty plan is 1000 x 700 ft. These helpers place things by fraction of the plan's box.
 const markSpot = async (page: any, fx: number, fy: number) => {
   await page.locator('nav[aria-label="Steps"] button').nth(2).click();
-  await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+  await page.getByRole("button", { name: /Mark another spot/ }).click();
   const p = await planPoint(page, fx, fy);
   await page.mouse.click(p.x, p.y);
   await page.keyboard.press("Escape");
@@ -133,7 +133,7 @@ test.describe("what to protect and coverage", () => {
     const front = b.y + b.height / 2; // the south wall
     // A door just inside the south wall, a camera 25 ft south of the house looking at it
     await page.locator('nav[aria-label="Steps"] button').nth(2).click();
-    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    await page.getByRole("button", { name: /Mark another spot/ }).click();
     const spot = await screenOf(page, b.x, front - 2 * upf);
     await page.mouse.click(spot.x, spot.y);
     await page.keyboard.press("Escape");

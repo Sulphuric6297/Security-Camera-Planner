@@ -138,7 +138,7 @@ test("plans", async ({ page }) => {
   await importSite(page);
   await page.keyboard.press("Escape");
   await page.locator('nav[aria-label="Steps"] button').nth(2).click();
-  await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+  await page.getByRole("button", { name: /Mark another spot/ }).click();
   const plan = (await page.getByTestId("plan").boundingBox())!;
   await page.mouse.click(plan.x + plan.width * 0.45, plan.y + plan.height * 0.4);
   await page.keyboard.press("Escape");
@@ -267,4 +267,125 @@ test("windows and doors", async ({ page }) => {
   await shot(page, "30-openings");
   await page.keyboard.press("Escape");
   await shot(page, "31-openings-3d");
+});
+
+test("stories and gables", async ({ page }) => {
+  // A two-story house: a gable on one end, hip on the other, then a one-story wing off the front
+  await placeWithKey(page, "b", 0.5, 0.42);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  const shape = page.getByLabel("Inspector").getByTestId("building-shape");
+  await shape.getByRole("button", { name: "2", exact: true }).click();
+  await shape.getByRole("button", { name: "hip", exact: true }).click();
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 20 * upf, maxX: b.x + b.width / 2 + 20 * upf, minY: b.y - b.height / 2 - 10 * upf, maxY: b.y + b.height / 2 + 30 * upf }, { animate: false }), [b, upf] as const);
+  await page.waitForTimeout(500);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  await shot(page, "32-two-story-hip");
+  // Click the roof-end toggle of the left wall (edge 3)
+  await page.locator('[data-handle="gable"][data-index="3"]').click();
+  await page.waitForTimeout(300);
+  await shot(page, "33-gable-one-end");
+  // A wing off the front wall
+  await shape.getByRole("button", { name: "+ Add a wing" }).click();
+  const p = await page.evaluate(([x, y]) => (window as any).__scpView.toClient(x, y, 0), [b.x - 6 * upf, b.y + b.height / 2 + 2 * upf] as const) as { x: number; y: number };
+  await page.mouse.click(p.x, p.y);
+  await page.waitForTimeout(400);
+  await shot(page, "34-wing");
+  await page.keyboard.press("Escape");
+  await shot(page, "35-wing-3d");
+});
+
+test("right click", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.42);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
+  const eave = b.wallHeight ?? 14 * upf;
+  const at = (x: number, y: number, lift = 0) => page.evaluate(([x, y, lift]) => (window as any).__scpView.toClient(x, y, lift), [x, y, lift] as const) as Promise<{ x: number; y: number }>;
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 15 * upf, maxX: b.x + b.width / 2 + 15 * upf, minY: b.y - b.height / 2 - 10 * upf, maxY: b.y + b.height / 2 + 25 * upf }, { animate: false }), [b, upf] as const);
+  await page.waitForTimeout(500);
+  const front = b.y + b.height / 2;
+  // Right-click the front wall: the building's menu
+  let p = await at(b.x + 8 * upf, front, 5 * upf);
+  await page.mouse.click(p.x, p.y, { button: "right" });
+  await page.waitForTimeout(300);
+  await shot(page, "36-menu-wall");
+  // Set a porch into the house along the front wall (from the menu), then a door on its back wall
+  await page.getByRole("menuitem", { name: "Porch set in" }).click();
+  await page.waitForTimeout(400);
+  p = await at(b.x - 4 * upf, front - 8 * upf, 4 * upf);
+  await page.mouse.click(p.x, p.y, { button: "right" });
+  await page.waitForTimeout(300);
+  await shot(page, "37-menu-porch-wall");
+  await page.getByRole("menuitem", { name: "Add a door here" }).click();
+  await page.waitForTimeout(400);
+  // Right-click the porch's front side: steps and railing
+  p = await at(b.x + 12 * upf, front, 0);
+  await page.mouse.click(p.x, p.y, { button: "right" });
+  await page.waitForTimeout(300);
+  await shot(page, "38-menu-porch-side");
+  await page.getByRole("menuitem", { name: "Put steps here" }).click();
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Escape");
+  await shot(page, "39-porch-door-steps");
+  void eave;
+});
+
+test("quick edit", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.45);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 15 * upf, maxX: b.x + b.width / 2 + 15 * upf, minY: b.y - b.height / 2 - 15 * upf, maxY: b.y + b.height / 2 + 10 * upf }, { animate: false }), [b, upf] as const);
+  await page.waitForTimeout(500);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  await page.getByLabel("Inspector").getByRole("button", { name: "Edit the windows and doors" }).click();
+  await page.waitForTimeout(400);
+  await shot(page, "40-house-bar");
+  await page.locator('[data-handle="opening"]').nth(9).click();
+  await page.waitForTimeout(500);
+  await shot(page, "41-window-picked");
+  await page.getByRole("button", { name: "Apply to…" }).click();
+  await shot(page, "42-apply-to");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  await shot(page, "43-apply-closed");
+  await page.evaluate(() => (window as any).__scpProject().setField("siteLocation", { lat: 39.78, lon: -89.68, label: "Springfield IL" }));
+  await page.getByTitle("Sun and shadows: pick the date and time").click();
+  await page.waitForTimeout(300);
+  await shot(page, "44-sun");
+});
+
+test("paving", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.4);
+  await placeWithKey(page, "w", 0.6, 0.6);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  // A driveway from the house's south wall, a walkway to the front door and a patio out back
+  await page.evaluate(b => {
+    const s = (window as any).__scpProject();
+    const pv = s.items.find((i: any) => i.type === "paving");
+    const walk = { ...pv, id: "walk", kind: "walkway", surface: "concrete", label: "Walkway", width: 4, height: 24, points: [{ x: -2, y: -12 }, { x: 2, y: -12 }, { x: 2, y: 12 }, { x: -2, y: 12 }], x: b.x - 8, y: b.y + b.height / 2 + 12.5 };
+    const patio = { ...pv, id: "patio", kind: "patio", surface: "pavers", label: "Patio", width: 16, height: 14, points: [{ x: -8, y: -7 }, { x: 8, y: -7 }, { x: 8, y: 7 }, { x: -8, y: 7 }], x: b.x, y: b.y - b.height / 2 - 7.5 };
+    const drive = { ...pv, x: b.x + b.width / 2 - 8, y: b.y + b.height / 2 + 20.5, points: [{ x: -6, y: -20 }, { x: 6, y: -20 }, { x: 6, y: 20 }, { x: -6, y: 20 }] };
+    const car = { id: "car1", type: "parking", x: drive.x, y: drive.y - 6, rotation: 0, width: 6.6, height: 16.2, vehicleHeight: 5.9, color: "#94a3b8", vehicleType: "suv" };
+    s.setField("items", (prev: any[]) => [...prev.filter((i: any) => i.type !== "paving"), drive, walk, patio, car]);
+  }, b);
+  await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 50, maxX: b.x + 50, minY: b.y - 40, maxY: b.y + 70 }, { animate: false }), b);
+  await shot(page, "45-paving-2d");
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 45, maxX: b.x + 45, minY: b.y - 35, maxY: b.y + 65 }, { animate: false }), b);
+  await shot(page, "46-paving-3d");
+  const [drive] = (await itemsOfType(page, "paving")).filter((p: any) => p.kind === "driveway");
+  await page.evaluate(id => (window as any).__scpSelect(id), drive.id);
+  await shot(page, "47-paving-selected");
 });

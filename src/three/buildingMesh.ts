@@ -6,11 +6,11 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import { DEFAULT_BUILDING } from "../constants";
 import type { BuildingItem } from "../types";
 import { buildingLocalPoints } from "../lib/planGeom";
-import { FACADE_BAY_FT, FACADE_STOREY_FT, applyPhotoUVs, buildFacadeWallPieces, buildFacadeWalls, buildRoof, chooseRoof, type PhotoRect } from "./buildings";
-import { attachEdge, clipToPart, enclosedWalls, hasRailing, insetParts, openPartPosts, openPartsOf, openStretches, partRoof } from "../lib/openParts";
+import { FACADE_BAY_FT, FACADE_STOREY_FT, applyPhotoUVs, orientedRect, buildFacadeWallPieces, buildFacadeWalls, buildRoof, chooseRoof, type PhotoRect } from "./buildings";
+import { attachEdge, clipToPart, snapPartToWalls, enclosedWalls, hasRailing, insetParts, openPartPosts, openPartsOf, partEntries, partRoof, partSides } from "../lib/openParts";
 import { getEdgeOutwardNormal } from "../lib/geometry";
 import type { Opening, OpenPart } from "../types";
-import { isDoor, openingPlace } from "../lib/openings";
+import { isDoor, openingPlace, storiesOf, wallPieces } from "../lib/openings";
 
 export type RoofPhoto = { texture: THREE.Texture; rect: PhotoRect } | null;
 
@@ -177,6 +177,31 @@ const createDoor = (d: { x: number; y: number; nx: number; ny: number }, upf: nu
   return door;
 };
 
+/** The walls whose roof end is a gable: as chosen, or for a "gable" roof its two ends (the walls
+ * across the long axis). */
+export const gableWallsOf = (b: BuildingItem, unitsPerFoot = 1): number[] => {
+  if (b.gableWalls) return b.gableWalls;
+  if (buildingRoofKind(b, unitsPerFoot) !== "gable") return [];
+  const pts = buildingLocalPoints(b);
+  const r = orientedRect(pts);
+  return pts.flatMap((_, i) => {
+    const n = getEdgeOutwardNormal(pts, i);
+    return Math.abs(n.x * Math.cos(r.angle) + n.y * Math.sin(r.angle)) > 0.5 ? [i] : [];
+  });
+};
+export const isGableWall = (b: BuildingItem, i: number, unitsPerFoot = 1) => gableWallsOf(b, unitsPerFoot).includes(i);
+
+/** Switch one wall's roof end between gable and hip. On a plain rectangle a gable on a wall the
+ * other way round turns the ridge, so gables on the crossing walls give way. */
+export const toggleGableWall = (b: BuildingItem, i: number, unitsPerFoot = 1): number[] => {
+  const cur = gableWallsOf(b, unitsPerFoot);
+  if (cur.includes(i)) return cur.filter(k => k !== i);
+  const pts = buildingLocalPoints(b);
+  const n = getEdgeOutwardNormal(pts, i);
+  const keep = pts.length === 4 ? cur.filter(k => { const m = getEdgeOutwardNormal(pts, k); return Math.abs(m.x * n.x + m.y * n.y) > 0.5; }) : cur;
+  return [...keep, i].sort((x, y) => x - y);
+};
+
 export const buildingRoofKind = (b: BuildingItem, unitsPerFoot = 1) => {
   const h = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * unitsPerFoot;
   return !b.roofType || b.roofType === "auto" ? chooseRoof(buildingLocalPoints(b), h, unitsPerFoot) : b.roofType;
@@ -256,7 +281,8 @@ const openPartModel = (outline: Q[], part: OpenPart, wallHeight: number, upf: nu
   const floor = Math.max(0, Math.min(part.floor, wallHeight - 7 * upf));
   const trim = mix(color, "#f3f1ec", 0.6);
   // Floor: set into the house, only the part under its roof; attached, the whole part
-  const area = roof === "main" ? clipToPart(outline, part.pts) : part.pts;
+  const pts = roof === "main" ? snapPartToWalls(outline, part.pts) : part.pts;
+  const area = roof === "main" ? clipToPart(outline, pts) : pts;
   if (area.length >= 3) {
     const shape = new THREE.Shape(area.map(p => new THREE.Vector2(p.x, -p.y)));
     const thick = floor > 0.2 * upf ? floor : 0.35 * upf;
@@ -272,12 +298,10 @@ const openPartModel = (outline: Q[], part: OpenPart, wallHeight: number, upf: nu
   // The open sides: set into the house, the outline's stretches through it; attached, every side
   // but the one against the house.
   const ai = roof === "main" ? -1 : attachEdge(outline, part.pts);
-  const sides = roof === "main"
-    ? openStretches(outline, [part.pts])
-    : part.pts.map((a, i) => ({ a, b: part.pts[(i + 1) % part.pts.length], i })).filter(e => e.i !== ai);
+  const sides = partSides(outline, part);
   const frameParts: THREE.BufferGeometry[] = [];
   if (roof === "main") {
-    frameParts.push(postsAndBeams(openPartPosts(outline, [part.pts], 10 * upf), sides, wallHeight, upf, floor));
+    frameParts.push(postsAndBeams(openPartPosts(outline, [pts], 10 * upf), sides, wallHeight, upf, floor));
   } else if (roof === "own" && part.pts.length === 4) {
     // Its own roof: from just under the house's eaves, sloping away at about 3/12, with posts and a
     // beam along the far side.
@@ -287,7 +311,7 @@ const openPartModel = (outline: Q[], part: OpenPart, wallHeight: number, upf: nu
     const away = { x: -n.x, y: -n.y };
     const depth = Math.abs((far.a.x - a.x) * away.x + (far.a.y - a.y) * away.y);
     const high = wallHeight - 0.6 * upf;
-    const low = Math.max(floor + 7.5 * upf, high - depth * 0.25);
+    const low = Math.max(floor + 7 * upf, high - depth * ((part.pitch ?? 3) / 12));
     const slope = depth > 0 ? (high - low) / depth : 0;
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     const u = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
@@ -330,23 +354,29 @@ const openPartModel = (outline: Q[], part: OpenPart, wallHeight: number, upf: nu
   if (hasRailing(part, upf) && floor > 0.2 * upf && sides.length) {
     const bars: THREE.BufferGeometry[] = [];
     const railH = 3 * upf, gap = 4 * upf;
-    const L = (s: { a: Q; b: Q }) => Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y);
-    // Steps go in the middle of the longest open side
-    const longest = sides.reduce((best, s) => (L(s) > L(best) ? s : best));
+    const entries = partEntries(outline, part);
+    const noRail = new Set(part.noRail ?? []);
     const c = part.pts.reduce((m, p) => ({ x: m.x + p.x / part.pts.length, y: m.y + p.y / part.pts.length }), { x: 0, y: 0 });
-    for (const s of sides) {
-      const len = L(s);
-      if (len < 0.01) continue;
+    sides.forEach((s, si) => {
+      const len = Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y);
+      if (len < 0.01) return;
       const dir = { x: (s.b.x - s.a.x) / len, y: (s.b.y - s.a.y) / len };
       const at = (t: number) => ({ x: s.a.x + dir.x * t, y: s.a.y + dir.y * t });
-      const runs: [number, number][] = s === longest && len > gap + 2 * upf ? [[0, len / 2 - gap / 2], [len / 2 + gap / 2, len]] : [[0, len]];
-      for (const [t0, t1] of runs) {
-        bars.push(barBox(at(t0), at(t1), 0.25 * upf, floor + railH - 0.25 * upf, floor + railH));
-        bars.push(barBox(at(t0), at(t1), 0.15 * upf, floor + 0.3 * upf, floor + 0.45 * upf));
-        for (let t = t0 + 0.5 * upf; t < t1 - 0.2 * upf; t += 0.5 * upf) bars.push(barBox(at(t), at(t + 0.12 * upf), 0.12 * upf, floor + 0.45 * upf, floor + railH - 0.25 * upf));
+      // The entries on this side: gaps in the railing, with steps down
+      const gaps = entries.filter(e => e.side === si).map(e => Math.max(gap / 2, Math.min(len - gap / 2, e.at * len))).sort((x, y) => x - y);
+      if (!noRail.has(si)) {
+        const runs: [number, number][] = [];
+        let from = 0;
+        for (const g of gaps) { if (g - gap / 2 > from + 0.3 * upf) runs.push([from, g - gap / 2]); from = g + gap / 2; }
+        if (len > from + 0.3 * upf) runs.push([from, len]);
+        for (const [t0, t1] of runs) {
+          bars.push(barBox(at(t0), at(t1), 0.25 * upf, floor + railH - 0.25 * upf, floor + railH));
+          bars.push(barBox(at(t0), at(t1), 0.15 * upf, floor + 0.3 * upf, floor + 0.45 * upf));
+          for (let t = t0 + 0.5 * upf; t < t1 - 0.2 * upf; t += 0.5 * upf) bars.push(barBox(at(t), at(t + 0.12 * upf), 0.12 * upf, floor + 0.45 * upf, floor + railH - 0.25 * upf));
+        }
       }
-      if (s === longest) {
-        const mid = at(len / 2);
+      for (const g of gaps) {
+        const mid = at(g);
         const out = { x: dir.y, y: -dir.x };
         // Outward is away from the part's middle
         if ((mid.x - c.x) * out.x + (mid.y - c.y) * out.y < 0) { out.x = -out.x; out.y = -out.y; }
@@ -363,7 +393,7 @@ const openPartModel = (outline: Q[], part: OpenPart, wallHeight: number, upf: nu
           bars.push(stepGeo);
         }
       }
-    }
+    });
     const rail = merged(bars);
     if (rail) {
       const m = new THREE.Mesh(rail, new THREE.MeshStandardMaterial({ color: trim, roughness: 0.85, metalness: 0 }));
@@ -411,21 +441,47 @@ export const createBuildingModel = (
   walls.receiveShadow = true;
   walls.userData.itemId = b.id;
   group.add(walls);
+  // A trim band at each upper floor, so the stories read from outside
+  const stories = storiesOf(wallHeight, upf);
+  if (!b.openSides && stories > 1) {
+    const bands: THREE.BufferGeometry[] = [];
+    for (let k = 1; k < stories; k++) {
+      const y = (wallHeight * k) / stories;
+      pts.forEach((a, i) => {
+        const c = pts[(i + 1) % pts.length];
+        const n = getEdgeOutwardNormal(pts, i);
+        const off = 0.1 * upf;
+        bands.push(barBox({ x: a.x + n.x * off, y: a.y + n.y * off }, { x: c.x + n.x * off, y: c.y + n.y * off }, 0.25 * upf, y - 0.35 * upf, y + 0.35 * upf));
+      });
+    }
+    const band = merged(bands);
+    if (band) {
+      const m = new THREE.Mesh(band, new THREE.MeshStandardMaterial({ color: mix(b.color, "#f3f1ec", 0.7), roughness: 0.8 }));
+      m.name = "building-floor-trim";
+      m.castShadow = true;
+      group.add(m);
+    }
+  }
 
   // Windows and doors the user placed (then the walls are plain siding), or a door at each marked
   // door spot on the automatic walls
   if (!b.openSides && b.openings) {
+    const pieces = wallPieces(pts, insetParts(pts, partList));
     b.openings.forEach(o => {
-      const place = openingPlace(pts, o);
+      const place = openingPlace(pts, o, pieces);
       if (place) group.add(createOpening(o, place, upf, b.color));
     });
   } else if (!b.openSides) (opts.doors ?? []).forEach(d => group.add(createDoor(d, upf)));
-  // Open parts (porch, carport): posts and beams carry the roof where the outer walls are left out.
   // Open parts (porch, carport, patio): floors, posts and railings where the outer walls are left out.
   partList.forEach(part => group.add(openPartModel(pts, part, wallHeight, upf, b.color)));
 
   const kind = buildingRoofKind(b, upf);
-  const parts = buildRoof(pts, kind, { pitch: 0.45, eave: 1.5 * upf, maxRise: Math.min(12 * upf, wallHeight * 0.6) });
+  const parts = buildRoof(pts, kind, {
+    pitch: b.roofPitch ? b.roofPitch / 12 : 0.45,
+    eave: 1.5 * upf,
+    maxRise: b.roofPitch ? 40 * upf : Math.min(12 * upf, wallHeight * 0.6),
+    gableWalls: kind === "flat" ? undefined : b.gableWalls
+  });
   const photo = opts.photo ?? null;
   if (photo) applyPhotoUVs(parts.roof, { x: b.x, y: b.y, rotation: b.rotation }, photo.rect);
   // Roofs clearly darker than the walls, so the roof shape reads from above.

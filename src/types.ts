@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder" | "add-open-part" | "add-opening";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder" | "add-open-part" | "add-opening" | "add-wing" | "add-paving";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
@@ -64,6 +64,8 @@ export interface BaseItem {
   y: number;
   rotation: number; // in degrees
   selected?: boolean;
+  /** Locked in place: it can be picked and looked at, but not moved, reshaped or deleted. */
+  locked?: boolean;
 }
 
 export interface CameraItem extends BaseItem {
@@ -92,6 +94,10 @@ export interface CameraItem extends BaseItem {
   lensPreset?: string;
   /** Night vision (infrared) reach in feet; undefined = the typical 100 ft. */
   irRangeFt?: number;
+  /** The real camera model (an id in the camera list), when one was picked. */
+  model?: string;
+  /** Zoom position of a zoom lens, 0 (widest) to 1 (fully zoomed). */
+  zoom?: number;
 }
 
 export type OpenPartKind = "porch" | "deck" | "carport" | "patio";
@@ -108,15 +114,28 @@ export interface OpenPart {
    * sloping away from the house ("own", an attached porch), or none (a deck). Unset: "main" when
    * it lies inside the house's outline, else "own" for porches and carports, "none" otherwise. */
   roof?: "main" | "own" | "none";
+  /** Entries (steps down, a gap in the railing): on which open side (see partSides) and how far
+   * along it (0..1). Unset: one in the middle of the longest side. */
+  entries?: { side: number; at: number }[];
+  /** Open sides (see partSides) left without a railing. */
+  noRail?: number[];
+  /** Slope of its own roof (attached parts), inches of rise per foot. Unset: 3 in 12. */
+  pitch?: number;
 }
 
 export type OpeningKind = "window" | "picture-window" | "door" | "double-door" | "slider" | "garage-door";
 /** A window or door in one of a building's outer walls (like a home-design program's openings). */
 export interface Opening {
+  /** Stable name (protect spots follow it). */
+  id?: string;
   kind: OpeningKind;
-  /** Outline edge it sits in, and its middle's distance from that edge's start (plan units). */
-  edge: number;
-  at: number;
+  /** Where its middle is, on a wall, in the building's frame (plan units). It sits in the wall
+   * nearest that point: an outer wall, or a wall around a porch set into the house. */
+  x?: number;
+  y?: number;
+  /** Older saves: the outline edge it sits in and its middle's distance from that edge's start. */
+  edge?: number;
+  at?: number;
   /** Size and the height of its bottom above the ground (plan units). */
   width: number;
   height: number;
@@ -136,6 +155,15 @@ export interface BuildingItem extends BaseItem {
   openParts?: OpenPart[];
   /** Windows and doors placed by the user. Unset: automatic windows (one per bay on every wall). */
   openings?: Opening[];
+  /** Walls (outline edge indices) whose roof end is a gable; the other ends are hips. Unset: from the roof type. */
+  gableWalls?: number[];
+  /** Roof slope, inches of rise per foot (like "6 in 12"). Unset: about 5 in 12, capped for big roofs. */
+  roofPitch?: number;
+  /** Which of its parts become spots to protect (your buildings): doors, ground-floor windows,
+   * driveways (parked cars near it). Unset: doors and driveways. */
+  protect?: { doors?: boolean; windows?: boolean; driveways?: boolean };
+  /** Protect spots from it the user deleted (their link keys). */
+  protectSkip?: string[];
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)
@@ -187,6 +215,20 @@ export interface ImageItem extends BaseItem {
 
 
 
+export type PavingKind = "driveway" | "walkway" | "patio";
+export type PavingSurface = "asphalt" | "concrete" | "gravel" | "pavers";
+/** A driveway, walkway or patio: a paved shape lying on the ground (it follows the terrain). */
+export interface PavingItem extends BaseItem {
+  type: "paving";
+  kind: PavingKind;
+  surface: PavingSurface;
+  label: string;
+  /** Size of its starting rectangle; its shape is `points` (corners in its own frame, plan units). */
+  width: number;
+  height: number;
+  points?: { x: number; y: number }[];
+}
+
 /** A spot the user wants covered (a door, gate, driveway...) and how much detail they need there. */
 export type TargetKind = "door" | "gate" | "driveway" | "window" | "yard" | "other";
 export interface TargetItem extends BaseItem {
@@ -194,6 +236,8 @@ export interface TargetItem extends BaseItem {
   kind: TargetKind;
   goal: "identify" | "recognize" | "observe" | "detect";
   label: string;
+  /** A spot made from a building's door, window or driveway (it follows it): its key. */
+  link?: string;
 }
 
 /** The video recorder (NVR) every camera's cable runs back to. One per plan. */
@@ -202,4 +246,4 @@ export interface RecorderItem extends BaseItem {
   label: string;
 }
 
-export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | TargetItem | RecorderItem;
+export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | TargetItem | RecorderItem | PavingItem;

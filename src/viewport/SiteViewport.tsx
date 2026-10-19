@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Box, Camera, ChevronDown, Copy, Crosshair, Eye, Maximize2, RotateCcw, RotateCw, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { Box, Camera, ChevronDown, Copy, Crosshair, Eye, Lock, LockOpen, Maximize2, RotateCcw, RotateCw, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import { clamp } from "../constants";
 import { niceScaleBar } from "../lib/view";
 import { SiteView } from "./SiteView";
@@ -15,7 +15,7 @@ type Props = {
   poseSignal: number;
   hidden?: boolean;
   /** Selection actions for the floating bar (rotate only where turning makes sense; look for cameras). */
-  actions: { duplicate: () => void; rotate?: () => void; remove: () => void; zoomTo: () => void; look?: () => void } | null;
+  actions: { duplicate: () => void; rotate?: () => void; remove?: () => void; zoomTo: () => void; look?: () => void; locked?: boolean; toggleLock?: () => void; extra?: React.ReactNode; /** Only `extra` (a part of the item is being edited, e.g. a window). */ only?: boolean } | null;
   snapshot: { download: () => void; addToReport: () => void };
   /** Looking through this camera: the view shows its picture and the map controls step aside. */
   povId?: string | null;
@@ -94,7 +94,9 @@ export function SiteViewport(props: Props) {
   if (props.actions && box && info && !props.hidden && !props.povId) {
     const above = box.y - 56;
     const y = above > 8 ? above : Math.min(info.height - 48, box.y + box.height + 14);
-    const x = clamp(box.x + box.width / 2, 110, Math.max(110, info.width - inset - 110));
+    // Clear of the map's corner controls (top right) when it sits up there
+    const rightRoom = y < 180 ? 330 : 190;
+    const x = clamp(box.x + box.width / 2, 190, Math.max(190, info.width - inset - rightRoom));
     const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
     actionBar = (
       <div
@@ -108,11 +110,29 @@ export function SiteViewport(props: Props) {
             <Eye className="w-4 h-4" /> Look through
           </button>
         )}
+        {props.actions.extra}
+        {!props.actions.only && <>
         <button className={btn} title="Duplicate (Ctrl/⌘+D)" aria-label="Duplicate" onClick={props.actions.duplicate}><Copy className="w-4 h-4" /></button>
         {props.actions.rotate && <button className={btn} title="Rotate 15° clockwise" aria-label="Rotate" onClick={props.actions.rotate}><RotateCw className="w-4 h-4" /></button>}
         <button className={btn} title="Zoom to it (F)" aria-label="Zoom to selection" onClick={props.actions.zoomTo}><Crosshair className="w-4 h-4" /></button>
-        <span className="w-px h-5 bg-white/10 mx-0.5" />
-        <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={props.actions.remove}><Trash2 className="w-4 h-4" /></button>
+        {props.actions.toggleLock && (
+          <button
+            className={`${btn} ${props.actions.locked ? "!text-amber-300 bg-amber-500/15" : ""}`}
+            title={props.actions.locked ? "Locked in place: click to unlock" : "Lock in place, so it can't be moved by mistake"}
+            aria-label={props.actions.locked ? "Unlock" : "Lock"}
+            aria-pressed={!!props.actions.locked}
+            onClick={props.actions.toggleLock}
+          >
+            {props.actions.locked ? <Lock className="w-4 h-4" /> : <LockOpen className="w-4 h-4" />}
+          </button>
+        )}
+        {props.actions.remove && (
+          <>
+            <span className="w-px h-5 bg-white/10 mx-0.5" />
+            <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={props.actions.remove}><Trash2 className="w-4 h-4" /></button>
+          </>
+        )}
+        </>}
       </div>
     );
   }

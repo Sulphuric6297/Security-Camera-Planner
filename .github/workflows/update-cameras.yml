@@ -1,0 +1,55 @@
+name: Update camera list
+
+# Keeps the UniFi Protect cameras in the app's camera list up to date: once a week (and on demand
+# from the Actions tab) it reads Ubiquiti's tech specs pages, and if any camera is new or changed it
+# commits the list to main and puts the same file on the live site straight away. If the pages
+# can't be read it fails (GitHub emails you) and leaves the list as it was.
+
+on:
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-cameras
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read Ubiquiti's camera specs
+        run: node scripts/update-camera-catalog.mjs
+
+      - name: Commit and publish the list if it changed
+        run: |
+          if git diff --quiet -- public/cameras.json src/data/cameras.json; then
+            echo "No camera changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/cameras.json src/data/cameras.json
+          git commit -m "Camera list: latest UniFi Protect specs"
+          git push origin HEAD:main
+          # The live site reads cameras.json at start-up: update that file there too
+          git fetch --depth 1 origin gh-pages
+          git worktree add ../site FETCH_HEAD
+          cp public/cameras.json ../site/cameras.json
+          cd ../site
+          git add cameras.json
+          git commit -m "Camera list: latest UniFi Protect specs"
+          git push origin HEAD:gh-pages

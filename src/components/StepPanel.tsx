@@ -16,7 +16,8 @@ import {
   Square,
   Trees,
   Upload,
-  Wand2
+  Wand2,
+  Route
 } from "lucide-react";
 import type { BuildingItem, CameraItem, CanvasItem } from "../types";
 import type { WorkflowStepId } from "./AppHeader";
@@ -52,7 +53,7 @@ type Props = {
   onNext: (from: WorkflowStepId, to: WorkflowStepId) => void;
   onImportSite: () => void;
   onUploadBaseMap: () => void;
-  onTool: (tool: "add-building" | "trace-building" | "add-tree" | "add-parking" | "add-camera") => void;
+  onTool: (tool: "add-building" | "trace-building" | "add-tree" | "add-parking" | "add-paving" | "add-camera") => void;
   onView: (view: "plan" | "iso3d" | "nvr") => void;
   onReportPdf: () => void;
   onPlanPng: () => void;
@@ -145,6 +146,9 @@ export function StepPanel(props: Props) {
             </button>
             <button onClick={() => props.onTool("add-parking")} className={action}>
               <Car className="w-4 h-4 text-slate-400" /> Add vehicle <span className={kbd}>P</span>
+            </button>
+            <button onClick={() => props.onTool("add-paving")} className={`${action} col-span-2`} title="A driveway, walkway or patio on the ground">
+              <Route className="w-4 h-4 text-slate-400" /> Add a driveway or path <span className={kbd}>W</span>
             </button>
           </div>
           <div className={card}>

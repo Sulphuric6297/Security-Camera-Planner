@@ -40,6 +40,9 @@ type Props = {
   onFix: (id: string) => void;
   night: boolean;
   onToggleNight: (on: boolean) => void;
+  /** Spots made from your buildings: which kinds (null when you have no buildings). */
+  protectFrom?: { doors: boolean; windows: boolean; driveways: boolean } | null;
+  onProtectFrom?: (patch: Partial<{ doors: boolean; windows: boolean; driveways: boolean }>) => void;
 };
 
 /** "What to protect": the checklist that turns camera cones into a yes/no answer. */
@@ -139,8 +142,20 @@ export function CoveragePanel(props: Props) {
           <Wand2 className="w-4 h-4" /> Suggest cameras for the rest
         </button>
       )}
+      {props.protectFrom && props.onProtectFrom && (
+        <div className="rounded-lg bg-black/20 border border-white/10 p-2 space-y-1" data-testid="protect-from">
+          <div className="text-[11px] font-semibold text-slate-300">From your buildings</div>
+          {([["doors", "Doors and garage doors"], ["windows", "Ground-floor windows"], ["driveways", "Driveways (parked cars)"]] as const).map(([k, label]) => (
+            <label key={k} className="flex items-center justify-between gap-2 text-xs text-slate-300 cursor-pointer">
+              <span>{label}</span>
+              <input type="checkbox" checked={props.protectFrom![k]} onChange={e => props.onProtectFrom!({ [k]: e.target.checked })} className="accent-rose-500" aria-label={`Protect ${label.toLowerCase()}`} />
+            </label>
+          ))}
+          <p className="text-[10px] text-slate-500">Spots follow the doors and windows you place on your buildings (Edit Building → Windows and doors) and the cars in the driveway.</p>
+        </div>
+      )}
       <button onClick={props.onAdd} className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-dashed border-white/20 text-sm text-slate-200 hover:bg-white/5">
-        <Target className="w-4 h-4 text-rose-300" /> Mark a door, gate or driveway
+        <Target className="w-4 h-4 text-rose-300" /> Mark another spot (gate, yard…)
       </button>
       <label className="flex items-center justify-between gap-2 text-xs text-slate-300 cursor-pointer">
         <span>

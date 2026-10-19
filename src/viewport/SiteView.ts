@@ -23,15 +23,17 @@ import {
   toBuildingLocal,
   wallSnapDistance
 } from "../lib/planGeom";
-import { pointInPolygonXY } from "../lib/geometry";
-import { openingPlace, wallAt } from "../lib/openings";
-import { movePartEdge, nearestEdge, openPartEdges, openPartsOf, partFromCorners, partRoof } from "../lib/openParts";
+import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
+import { isOwnBuilding } from "../lib/items";
+import { openingPlace, snapToWall, wallPieces } from "../lib/openings";
+import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
-import { createBuildingModel } from "../three/buildingMesh";
+import { buildingRoofKind, createBuildingModel, isGableWall } from "../three/buildingMesh";
 import { doorsOnWalls } from "../three/buildings";
 import { createCameraModel } from "../three/cameraModel";
+import { createPaving } from "../three/paving";
 import { disposeObjectDeep } from "../three/dispose";
-import type { BuildingItem, CameraItem, CanvasItem, ImageItem, LabelItem, ParkingItem, RecorderItem, TargetItem, TreeItem } from "../types";
+import type { BuildingItem, CameraItem, CanvasItem, Opening, ImageItem, LabelItem, ParkingItem, PavingItem, RecorderItem, TargetItem, TreeItem } from "../types";
 import { Ground } from "./ground";
 import { buildCoverageFan, buildFrustumLines } from "./coverage";
 import type { P, ViewCallbacks, ViewDoc, ViewInfo, ViewTool } from "./types";
@@ -40,6 +42,8 @@ CameraControls.install({ THREE });
 const { ACTION } = CameraControls;
 
 const DEG = Math.PI / 180;
+const SUN_INTENSITY = 2.4;
+const HEMI_INTENSITY = 0.9;
 const CLICK_PX = 4;
 const TILT_TOP = 8 * DEG;
 const DEFAULT_TILT = 52 * DEG;
@@ -84,7 +88,14 @@ const STYLE = `
 .scp-h[data-handle=aim]{width:20px;height:20px;border-radius:50%;background:#3b82f6;border:3px solid #fff;cursor:crosshair;box-shadow:0 1px 4px rgba(0,0,0,.55)}
 .scp-h[data-handle=fov-l],.scp-h[data-handle=fov-r],.scp-h[data-handle=range],.scp-h[data-handle=radius]{width:15px;height:15px;border-radius:50%;background:var(--c,#3b82f6);border:2.5px solid #fff;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=range]{cursor:ns-resize}
-.scp-h[data-handle=opening]{width:14px;height:14px;border-radius:50%;background:#0ea5e9;border:2.5px solid #fff;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+.scp-h[data-handle=opening-size]{width:11px;height:11px;border-radius:2px;background:#fff;border:2px solid #0ea5e9;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+.scp-h[data-handle=opening-size][data-index="2"]{cursor:ns-resize}
+.scp-h[data-handle=opening]{width:10px;height:10px;border-radius:50%;background:#0ea5e9;border:2px solid #fff;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5);opacity:.55;transition:opacity .15s,scale .15s}
+.scp-h[data-handle=opening]:hover,.scp-h[data-handle=opening][data-picked="1"]{opacity:1;scale:1.25}
+.scp-h[data-handle=gable]{width:22px;height:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
+.scp-h[data-handle=gable]::before{content:"";width:20px;height:14px;background:#fff;clip-path:polygon(0 100%,100% 100%,100% 45%,50% 0,0 45%);border:0}
+.scp-h[data-handle=gable][data-gable="1"]::before{background:#a855f7;clip-path:polygon(0 100%,100% 100%,50% 0)}
+.scp-h[data-handle=part-steps]{width:18px;height:12px;border-radius:2px;background:repeating-linear-gradient(180deg,#fff 0 3px,#f59e0b 3px 4px);border:2px solid #f59e0b;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=part-edge]{width:13px;height:13px;border-radius:3px;background:#fff;border:2.5px solid #f59e0b;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=part-floor]{width:22px;height:22px;cursor:ns-resize;display:flex;align-items:center;justify-content:center}
 .scp-h[data-handle=part-floor]::before{content:"";width:18px;height:10px;border-radius:4px;background:#fff;border:2.5px solid #f59e0b;box-shadow:0 1px 3px rgba(0,0,0,.5)}
@@ -98,7 +109,7 @@ export class SiteView {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
   readonly controls: CameraControls;
-  private sun = new THREE.DirectionalLight(0xfff6e5, 2.4);
+  private sun = new THREE.DirectionalLight(0xfff6e5, SUN_INTENSITY);
   private ground: Ground;
   private itemsGroup = new THREE.Group();
   private coverageGroup = new THREE.Group();
@@ -127,7 +138,7 @@ export class SiteView {
   private heightsRef: unknown = null;
   private selectedId: string | null = null;
   private hoverId: string | null = null;
-  private tool: ViewTool = { mode: "select", terrain: false, terrainTool: "sculpt", brushRadius: 40, aimingCameraId: null, vertexInsert: false, mapMove: false, preview: null };
+  private tool: ViewTool = { mode: "select", terrain: false, terrainTool: "sculpt", brushRadius: 40, aimingCameraId: null, vertexInsert: false, mapMove: false, preview: null, opening: null };
   private raycaster = new THREE.Raycaster();
   private dirty = true;
   private shadowsDirty = true;
@@ -155,7 +166,7 @@ export class SiteView {
   private povRect = { x: 0, y: 0, width: 1, height: 1 };
   private povInset = 0;
   private povNight = false;
-  private hemi = new THREE.HemisphereLight(0xeef4ff, 0x6b6250, 0.9);
+  private hemi = new THREE.HemisphereLight(0xeef4ff, 0x6b6250, HEMI_INTENSITY);
   private irLight = new THREE.SpotLight(0xffffff, 0, 0, 0.6, 0.5, 2);
   private groundTone: { src: unknown; color: THREE.Color } | null = null;
 
@@ -320,7 +331,7 @@ export class SiteView {
     this.syncHandles();
     this.updateLimits();
     this.placeSun();
-    if (groundChanged || !prev || prev.items !== doc.items) this.shadowsDirty = true;
+    if (groundChanged || !prev || prev.items !== doc.items || prev.sun !== doc.sun) this.shadowsDirty = true;
     if (!this.fitted && this.size.width > 1) {
       this.fitted = true;
       this.fitSite(false);
@@ -600,8 +611,141 @@ export class SiteView {
     return this.lens;
   }
 
+  // ------------------------------------------------------------------ trees in the way
+
+  /** Trees fading: how see-through each is now and where it's heading (1 = solid). */
+  private treeFade = new Map<THREE.Object3D, { cur: number; target: number }>();
+
+  /** Show a tree at an opacity: solid materials at 1, faded copies (see-through, no depth) below. */
+  private applyTreeOpacity(obj: THREE.Object3D, opacity: number) {
+    obj.traverse(o => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (opacity >= 0.999) {
+        if (mesh.userData.solidMat) mesh.material = mesh.userData.solidMat;
+        return;
+      }
+      if (!mesh.userData.solidMat) {
+        mesh.userData.solidMat = mesh.material;
+        const fade = (m: THREE.Material) => {
+          const c = m.clone();
+          c.transparent = true;
+          c.depthWrite = false;
+          return c;
+        };
+        mesh.userData.fadeMat = Array.isArray(mesh.material) ? mesh.material.map(fade) : fade(mesh.material);
+      }
+      const mats = (Array.isArray(mesh.userData.fadeMat) ? mesh.userData.fadeMat : [mesh.userData.fadeMat]) as THREE.Material[];
+      mats.forEach(m => { m.opacity = opacity; });
+      mesh.material = mesh.userData.fadeMat;
+    });
+  }
+
+  /** Ease every tree toward its target opacity (about a quarter second); true while any is moving. */
+  private stepTreeFades(dt: number) {
+    let moving = false;
+    const k = 1 - Math.exp(-Math.min(dt, 0.1) * 12);
+    for (const [obj, f] of this.treeFade) {
+      if (!obj.parent) { this.treeFade.delete(obj); continue; }
+      if (Math.abs(f.cur - f.target) < 0.01) {
+        if (f.cur !== f.target) { f.cur = f.target; this.applyTreeOpacity(obj, f.cur); }
+        if (f.target >= 0.999) this.treeFade.delete(obj);
+        continue;
+      }
+      f.cur += (f.target - f.cur) * k;
+      this.applyTreeOpacity(obj, f.cur);
+      moving = true;
+    }
+    return moving;
+  }
+
+  private fadeKey = "";
+  private fadeTreesInTheWay() {
+    const doc = this.doc;
+    if (!doc) return;
+    const eye = this.camera.position;
+    const key = `${eye.x.toFixed(1)},${eye.y.toFixed(1)},${eye.z.toFixed(1)}|${this.selectedId}|${this.objects.size}`;
+    if (key === this.fadeKey && this.fadeItems === doc.items) return;
+    this.fadeKey = key;
+    this.fadeItems = doc.items;
+    // What should stay visible: points over your buildings' walls and roofs (fade fully), a ring
+    // just outside them (fade partway, so a tree eases out as it comes over the house), and what's
+    // selected
+    const targets: THREE.Vector3[] = [];
+    const halo: THREE.Vector3[] = [];
+    const sel = this.item(this.selectedId);
+    for (const it of doc.items) {
+      if (it.type !== "building" || !(isOwnBuilding(it as BuildingItem) || it.id === this.selectedId)) continue;
+      const b = it as BuildingItem;
+      const base = buildingBaseHeight(b, doc.heights, doc.gridSize);
+      const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight;
+      const pts = buildingWorldPoints(b);
+      pts.forEach((p, i) => {
+        const q = pts[(i + 1) % pts.length];
+        for (const t of [0.1, 0.5, 0.9]) for (const hy of [0.2, 0.6, 1]) targets.push(new THREE.Vector3(p.x + (q.x - p.x) * t, base + wall * hy, p.y + (q.y - p.y) * t));
+        // and across the roof, toward the middle
+        targets.push(new THREE.Vector3(p.x + (b.x - p.x) * 0.5, base + wall * 1.2, p.y + (b.y - p.y) * 0.5));
+        // the ring: 8 ft out from the walls, and over the eaves
+        const out = 8 * this.upf();
+        const dx = p.x - b.x, dy = p.y - b.y, dl = Math.hypot(dx, dy) || 1;
+        for (const hy of [0.3, 1.1]) halo.push(new THREE.Vector3(p.x + (dx / dl) * out, base + wall * hy, p.y + (dy / dl) * out));
+        const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, ml = Math.hypot(mx - b.x, my - b.y) || 1;
+        for (const hy of [0.3, 1.1]) halo.push(new THREE.Vector3(mx + ((mx - b.x) / ml) * out, base + wall * hy, my + ((my - b.y) / ml) * out));
+      });
+      targets.push(new THREE.Vector3(b.x, base + wall * 1.3, b.y));
+    }
+    if (sel && sel.type !== "building") {
+      const p = itemPoint(sel, doc.items);
+      targets.push(new THREE.Vector3(p.x, this.h(p.x, p.y) + 3 * this.upf(), p.y));
+    }
+    const trees: THREE.Object3D[] = [];
+    for (const it of doc.items) if (it.type === "tree") { const e = this.objects.get(it.id); if (e) trees.push(e.obj); }
+    // Each tree's target opacity: 0.15 over the house, 0.55 just next to it, else solid
+    const want = new Map<THREE.Object3D, number>();
+    if (targets.length && trees.length) {
+      // The trees each sight line from the view to those points passes through (before the point)
+      const ray = new THREE.Raycaster();
+      const dir = new THREE.Vector3();
+      const treeOf = (o: THREE.Object3D | null) => { while (o && !trees.includes(o)) o = o.parent; return o; };
+      const cast = (points: THREE.Vector3[], opacity: number) => {
+        for (const p of points) {
+          dir.subVectors(p, eye);
+          const far = dir.length() - 0.5 * this.upf();
+          if (far <= 0) continue;
+          ray.set(eye, dir.normalize());
+          ray.far = far;
+          for (const hit of ray.intersectObjects(trees.filter(t => (want.get(t) ?? 1) > opacity), true)) {
+            const tree = treeOf(hit.object);
+            if (tree) want.set(tree, Math.min(want.get(tree) ?? 1, opacity));
+          }
+        }
+      };
+      cast(targets, 0.15);
+      cast(halo, 0.55);
+    }
+    // Set where each tree is heading; the frame loop eases them there
+    for (const [obj, f] of this.treeFade) if (!want.has(obj)) f.target = 1;
+    for (const [obj, target] of want) {
+      const f = this.treeFade.get(obj);
+      if (f) f.target = target;
+      else this.treeFade.set(obj, { cur: 1, target });
+    }
+  }
+  private fadeItems: CanvasItem[] | null = null;
+
   /** Renders a camera's view into a rectangle of the canvas (CSS px), in camera-view dress. */
   private drawCameraView(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }, night = this.povNight) {
+    // A camera's picture shows the trees as they are (faded trees are only for editing)
+    const faded = [...this.treeFade].filter(([, f]) => f.cur < 0.999);
+    faded.forEach(([obj]) => this.applyTreeOpacity(obj, 1));
+    try {
+      this.drawCameraViewInner(cam, rect, night);
+    } finally {
+      faded.forEach(([obj, f]) => this.applyTreeOpacity(obj, f.cur));
+    }
+  }
+
+  private drawCameraViewInner(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }, night: boolean) {
     const doc = this.doc!;
     const upf = this.upf();
     const aspect = rect.width / rect.height;
@@ -760,6 +904,7 @@ export class SiteView {
     this.raf = requestAnimationFrame(this.loop);
     const dt = this.clock.getDelta();
     if (this.controls.update(dt)) this.dirty = true;
+    if (this.treeFade.size && !this.povId && this.stepTreeFades(dt)) this.dirty = true;
     if (!this.dirty || this.size.width <= 1) return;
     this.dirty = false;
     this.render();
@@ -797,6 +942,7 @@ export class SiteView {
       this.shadowsDirty = false;
     }
     this.camera.updateMatrixWorld();
+    this.fadeTreesInTheWay();
     this.renderer.render(this.scene, this.camera);
     this.layout();
     const info = this.viewInfo();
@@ -839,7 +985,18 @@ export class SiteView {
     if (!doc) return;
     const span = this.siteSpan();
     const center = new THREE.Vector3(doc.canvas.width / 2, 0, doc.canvas.height / 2);
-    this.sun.position.copy(center).add(new THREE.Vector3(-0.45, 1, 0.55).normalize().multiplyScalar(span * 1.5));
+    // The real sun for the chosen time (north is up the plan, -y), else a soft afternoon light.
+    // Below the horizon it stays low and dim (dusk), never lighting from underground.
+    let dir = new THREE.Vector3(-0.45, 1, 0.55).normalize();
+    let strength = 1;
+    if (doc.sun) {
+      const az = doc.sun.azimuth * DEG, alt = Math.max(4, doc.sun.altitude) * DEG;
+      dir = new THREE.Vector3(Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt));
+      strength = doc.sun.altitude <= 0 ? 0.08 : Math.min(1, 0.35 + doc.sun.altitude / 25);
+    }
+    this.sun.intensity = SUN_INTENSITY * strength;
+    this.hemi.intensity = HEMI_INTENSITY * (0.45 + 0.55 * Math.min(1, strength * 1.2));
+    this.sun.position.copy(center).add(dir.multiplyScalar(span * 1.5));
     this.sun.target.position.copy(center);
     const cam = this.sun.shadow.camera;
     cam.left = -span * 0.8;
@@ -953,7 +1110,7 @@ export class SiteView {
 
   /** Doors drawn on a building: wherever a "door" spot is marked next to one of its walls. */
   private doorsFor(b: BuildingItem) {
-    const doors = this.doc!.items.filter(i => i.type === "target" && (i as TargetItem).kind === "door").map(t => toBuildingLocal(b, t));
+    const doors = this.doc!.items.filter(i => i.type === "target" && (i as TargetItem).kind === "door" && !(i as TargetItem).link).map(t => toBuildingLocal(b, t));
     return doors.length ? doorsOnWalls(buildingLocalPoints(b), doors, this.upf()) : [];
   }
 
@@ -963,10 +1120,14 @@ export class SiteView {
       case "building": {
         const b = item as BuildingItem;
         const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, b.gableWalls ?? null, b.roofPitch ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
+      case "paving": {
+        const pv = item as PavingItem;
+        return JSON.stringify([pv.x, pv.y, pv.rotation, pv.points, pv.width, pv.height, pv.surface, this.heightsVersion, doc.gridSize, doc.unitsPerFoot]);
+      }
       case "camera": return `${(item as CameraItem).color}|${doc.unitsPerFoot}`;
       case "image": return `${(item as ImageItem).src.length}|${(item as ImageItem).src.slice(-32)}|${(item as ImageItem).width}|${(item as ImageItem).height}`;
       default: return "";
@@ -982,6 +1143,7 @@ export class SiteView {
       }
       case "tree": return create3dTree(item as TreeItem);
       case "parking": return create3dCar(item as ParkingItem);
+      case "paving": return createPaving(item as PavingItem, (x, y) => this.h(x, y), doc.gridSize, doc.unitsPerFoot);
       case "camera": return createCameraModel((item as CameraItem).color, doc.unitsPerFoot);
       case "image": {
         const img = item as ImageItem;
@@ -1006,6 +1168,10 @@ export class SiteView {
       obj.position.copy(this.cameraWorld(cam));
       obj.rotation.order = "YZX";
       obj.rotation.set(0, -cam.rotation * DEG, (cam.pitch ?? DEFAULT_CAMERA_PITCH) * DEG);
+    } else if (item.type === "paving") {
+      // Built where it lies (its corners follow the ground)
+      obj.position.set(0, 0, 0);
+      obj.rotation.set(0, 0, 0);
     } else if (item.type === "image") {
       obj.position.set(item.x, this.h(item.x, item.y) + 0.25 * doc.unitsPerFoot, item.y);
       obj.rotation.set(0, -item.rotation * DEG, 0);
@@ -1250,6 +1416,21 @@ export class SiteView {
         parts.name = "open-part-outline";
         group.add(parts);
       }
+    } else if (item.type === "paving") {
+      // Its outline on the ground, following the slope
+      const pts = buildingWorldPoints(item as unknown as BuildingItem);
+      const line: THREE.Vector3[] = [];
+      pts.forEach((p, i) => {
+        const q = pts[(i + 1) % pts.length];
+        const steps = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / (doc.gridSize || 20) * 2));
+        for (let k = 0; k < steps; k++) {
+          const x = p.x + ((q.x - p.x) * k) / steps, y = p.y + ((q.y - p.y) * k) / steps;
+          line.push(new THREE.Vector3(x, this.h(x, y) + 0.2, y));
+        }
+      });
+      const loop = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(line), mat);
+      loop.renderOrder = 12;
+      group.add(loop);
     } else if (item.type !== "label") {
       const p = itemPoint(item, doc.items);
       const r = item.type === "tree" ? (item as TreeItem).radius * ((item as TreeItem).width ?? 1)
@@ -1400,14 +1581,16 @@ export class SiteView {
   private syncHandles() {
     const doc = this.doc;
     if (!doc) return;
-    const sel = this.tool.mode === "select" && !this.tool.terrain ? this.item(this.selectedId) : null;
-    const key = sel ? `${sel.id}|${sel.type}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).length}|${(sel as BuildingItem).openings?.length ?? -1}` : ""}` : "";
+    const picked = this.tool.mode === "select" && !this.tool.terrain ? this.item(this.selectedId) : null;
+    // A locked item has no handles: nothing on it can be dragged
+    const sel = picked && !picked.locked ? picked : null;
+    const key = sel ? `${sel.id}|${sel.type}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).map(p => `${p.kind}${p.floor > 0}${p.railing}${p.entries?.length ?? -1}`).join(",")}|${(sel as BuildingItem).openings?.length ?? -1}|${this.tool.opening ?? -1}` : sel.type === "paving" ? buildingLocalPoints(sel as unknown as BuildingItem).length : ""}` : "";
     if (key === this.handleKey) return;
     this.handleKey = key;
     this.handles.forEach(h => h.el.remove());
     this.handles = [];
     if (!sel) return;
-    const add = (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts: { index?: number; title?: string; color?: string; text?: string; visible?: () => boolean } = {}) => {
+    const add = (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts: { index?: number; title?: string; color?: string; text?: string; picked?: boolean; visible?: () => boolean } = {}) => {
       const el = document.createElement("div");
       el.className = "scp-h";
       el.dataset.handle = kind;
@@ -1416,14 +1599,17 @@ export class SiteView {
       if (opts.title) el.title = opts.title;
       if (opts.color) el.style.setProperty("--c", opts.color);
       if (opts.text) el.textContent = opts.text;
+      if (opts.picked) el.dataset.picked = "1";
       this.handlesLayer.appendChild(el);
       this.handles.push({ el, kind, index: opts.index, world, start, visible: opts.visible });
     };
     const id = sel.id;
+    if (sel.type === "paving") this.buildingHandles(id, add);
     if (sel.type === "building") {
       this.buildingHandles(id, add);
       this.openPartHandles(id, add);
       this.openingHandles(id, add);
+      this.gableHandles(id, add);
     }
     else if (sel.type === "camera") this.cameraHandles(id, add);
     else if (sel.type === "tree") {
@@ -1434,7 +1620,7 @@ export class SiteView {
         return new THREE.Vector3(t.x + r, this.h(t.x + r, t.y) + 0.2, t.y);
       }, e => this.planeDrag(e, id, (p, t: TreeItem) => ({ radius: Math.max(1 * this.upf(), Math.hypot(p.x - t.x, p.y - t.y) / (t.width ?? 1)) })), { title: "Drag to resize the crown", color: "#16a34a" });
     }
-    if (sel.type === "building" || sel.type === "parking" || sel.type === "image") this.rotateHandle(id, add);
+    if (sel.type === "building" || sel.type === "parking" || sel.type === "image" || sel.type === "paving") this.rotateHandle(id, add);
   }
 
   private planeDrag<T extends CanvasItem>(e: PointerEvent, id: string, patch: (p: P, item: T, ev: PointerEvent) => Partial<CanvasItem> | null, y?: number): Drag | null {
@@ -1490,13 +1676,18 @@ export class SiteView {
     }, { title: "Drag to rotate (Shift snaps to 15°)", text: "↻" });
   }
 
+  /** Corners and edge middles of an outline: a building's, or a driveway's or patio's (flat on the ground). */
   private buildingHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
     const b0 = this.item(id) as BuildingItem;
+    const flat = b0.type !== "building";
     const n = buildingLocalPoints(b0).length;
     const base = () => {
       const b = this.item(id) as BuildingItem | null;
-      return b ? buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) : 0;
+      if (!b) return 0;
+      return flat ? this.h(b.x, b.y) : buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize);
     };
+    // Handles sit on the ground under each corner for flat things (a sloping driveway)
+    const at = (p: { x: number; y: number }) => new THREE.Vector3(p.x, flat ? this.h(p.x, p.y) : base(), p.y);
     // Works on its own copy of the outline, so a corner added at the start of the drag can't be
     // lost while the app catches up.
     const cornerDrag = (index: number, start: { x: number; y: number }[]): Drag | null => {
@@ -1525,7 +1716,7 @@ export class SiteView {
         const b = this.item(id) as BuildingItem | null;
         if (!b) return null;
         const p = buildingWorldPoints(b)[i];
-        return p ? new THREE.Vector3(p.x, base(), p.y) : null;
+        return p ? at(p) : null;
       }, e => {
         const b = this.item(id) as BuildingItem | null;
         if (!b) return null;
@@ -1550,7 +1741,7 @@ export class SiteView {
         const pts = buildingWorldPoints(b);
         const p = pts[i];
         const q = pts[(i + 1) % pts.length];
-        return p && q ? new THREE.Vector3((p.x + q.x) / 2, base(), (p.y + q.y) / 2) : null;
+        return p && q ? at({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }) : null;
       }, e => {
         // Pulling an edge's middle adds a corner there and drags it.
         const b = this.item(id) as BuildingItem | null;
@@ -1574,6 +1765,7 @@ export class SiteView {
         }
       });
     }
+    if (flat) return;
     add("height", () => {
       const b = this.item(id) as BuildingItem | null;
       if (!b) return null;
@@ -1589,6 +1781,46 @@ export class SiteView {
     });
   }
 
+  /** On each wall, above its middle: a toggle between a gable end and a hip end (pitched roofs). */
+  private gableHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+    const b0 = this.item(id) as BuildingItem;
+    const n = buildingLocalPoints(b0).length;
+    for (let i = 0; i < n; i++) {
+      add("gable", () => {
+        const b = this.item(id) as BuildingItem | null;
+        if (!b || b.openSides || buildingRoofKind(b, this.upf()) === "flat") return null;
+        const pts = buildingLocalPoints(b);
+        const a = pts[i], c = pts[(i + 1) % pts.length];
+        if (!a || !c) return null;
+        const nrm = getEdgeOutwardNormal(pts, i);
+        const off = 4 * this.upf();
+        const r = rotatePoint({ x: (a.x + c.x) / 2 + nrm.x * off, y: (a.y + c.y) / 2 + nrm.y * off }, b.rotation);
+        return new THREE.Vector3(b.x + r.x, buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + (b.wallHeight ?? DEFAULT_BUILDING.wallHeight), b.y + r.y);
+      }, () => {
+        this.cb.onToggleGable(id, i);
+        return null;
+      }, {
+        index: i,
+        title: "Click to switch this end of the roof between a gable (a peaked wall) and a hip (a sloped end)",
+        text: "",
+        visible: () => {
+          const b = this.item(id) as BuildingItem | null;
+          const el = this.handles.find(h => h.kind === "gable" && h.index === i)?.el;
+          // Shows ▲ for a gable end, ◣ for a hip end
+          if (el && b) el.dataset.gable = isGableWall(b, i, this.upf()) ? "1" : "0";
+          // Never over the height handle (that one wins)
+          const hh = this.handles.find(h => h.kind === "height");
+          const hw = hh?.world(), mw = this.handles.find(h => h.kind === "gable" && h.index === i)?.world();
+          if (hw && mw && (!hh!.visible || hh!.visible())) {
+            const a = this.project(hw), c = this.project(mw);
+            if (a && c && Math.hypot(a.x - c.x, a.y - c.y) < 40) return false;
+          }
+          return true;
+        }
+      });
+    }
+  }
+
   /** A handle on each window and door: drag it along the walls (onto another wall too); picking it
    * shows it in the inspector. */
   private openingHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
@@ -1598,7 +1830,8 @@ export class SiteView {
         const b = this.item(id) as BuildingItem | null;
         const o = b?.openings?.[k];
         if (!b || !o) return null;
-        const place = openingPlace(buildingLocalPoints(b), o);
+        const outline = buildingLocalPoints(b);
+        const place = openingPlace(outline, o, wallPieces(outline, insetParts(outline, openPartsOf(b))));
         if (!place) return null;
         const r = rotatePoint({ x: place.x + place.normal.x * 0.5 * this.upf(), y: place.y + place.normal.y * 0.5 * this.upf() }, b.rotation);
         return { b, o, world: new THREE.Vector3(b.x + r.x, buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + o.sill + o.height / 2, b.y + r.y) };
@@ -1610,6 +1843,7 @@ export class SiteView {
         const y = w.world.y;
         const pose = { x: w.b.x, y: w.b.y, rotation: w.b.rotation };
         const outline = buildingLocalPoints(w.b);
+        const pieces = wallPieces(outline, insetParts(outline, openPartsOf(w.b)));
         let moved = false;
         return {
           move: ev => {
@@ -1617,14 +1851,66 @@ export class SiteView {
             const b = this.item(id) as BuildingItem | null;
             const o = b?.openings?.[k];
             if (!hit || !b || !o) return;
-            const at = wallAt(outline, toBuildingLocal(pose, { x: hit.x, y: hit.z }));
+            const at = snapToWall(pieces, toBuildingLocal(pose, { x: hit.x, y: hit.z }), o.width);
+            if (!at) return;
             moved = true;
-            const next = b.openings!.map((q, j) => (j === k ? { ...q, edge: at.edge, at: Math.max(q.width / 2, Math.min(at.len - q.width / 2, at.at)) } : q));
+            const next = b.openings!.map((q, j) => (j === k ? { ...q, x: at.x, y: at.y, edge: undefined, at: undefined } : q));
             this.cb.onChange(id, { openings: next } as Partial<CanvasItem>);
           },
           end: () => { if (moved) this.cb.onCommit(); }
         };
-      }, { index: k, title: "Drag along the walls to move it · click to edit it" });
+      }, { index: k, picked: k === this.tool.opening, title: "Drag along the walls to move it · click to edit it" });
+      if (k !== this.tool.opening) return;
+      // The picked one: drag its sides to make it wider or narrower, its top for its height
+      const edgePoint = (side: number, top = false) => {
+        const w = where();
+        if (!w) return null;
+        const outline = buildingLocalPoints(w.b);
+        const place = openingPlace(outline, w.o, wallPieces(outline, insetParts(outline, openPartsOf(w.b))));
+        if (!place) return null;
+        const off = 0.4 * this.upf();
+        const lx = place.x + place.dir.x * (top ? 0 : side * w.o.width / 2) + place.normal.x * off;
+        const ly = place.y + place.dir.y * (top ? 0 : side * w.o.width / 2) + place.normal.y * off;
+        const r = rotatePoint({ x: lx, y: ly }, w.b.rotation);
+        const base = buildingBaseHeight(w.b, this.doc!.heights, this.doc!.gridSize);
+        return new THREE.Vector3(w.b.x + r.x, base + (top ? w.o.sill + w.o.height : w.o.sill + w.o.height / 2), w.b.y + r.y);
+      };
+      const setOpening = (patch: Partial<Opening>) => {
+        const b = this.item(id) as BuildingItem | null;
+        if (!b?.openings) return;
+        this.cb.onChange(id, { openings: b.openings.map((q, j) => (j === k ? { ...q, ...patch } : q)) } as Partial<CanvasItem>);
+      };
+      [-1, 1].forEach(side => add("opening-size", () => edgePoint(side), () => {
+        const w = where();
+        if (!w) return null;
+        const y = w.world.y;
+        const pose = { x: w.b.x, y: w.b.y, rotation: w.b.rotation };
+        const outline = buildingLocalPoints(w.b);
+        const place = openingPlace(outline, w.o, wallPieces(outline, insetParts(outline, openPartsOf(w.b))));
+        if (!place) return null;
+        return {
+          move: ev => {
+            const hit = this.planeAt(ev.clientX, ev.clientY, y);
+            if (!hit) return;
+            const l = toBuildingLocal(pose, { x: hit.x, y: hit.z });
+            // Symmetric about its middle, in half-foot steps
+            const half = Math.abs((l.x - place.x) * place.dir.x + (l.y - place.y) * place.dir.y);
+            const width = Math.max(1 * this.upf(), Math.min(place.len - 0.5 * this.upf(), Math.round((half * 2) / (0.5 * this.upf())) * 0.5 * this.upf()));
+            setOpening({ width });
+          },
+          end: () => this.cb.onCommit()
+        };
+      }, { index: side, title: "Drag to make it wider or narrower" }));
+      add("opening-size", () => edgePoint(0, true), e => {
+        const w = where();
+        if (!w) return null;
+        const o = w.o;
+        return this.heightDrag(e, () => edgePoint(0, true), () => o.height, h => {
+          const b = this.item(id) as BuildingItem | null;
+          const wall = b?.wallHeight ?? DEFAULT_BUILDING.wallHeight;
+          setOpening({ height: Math.round(clamp(h, 1 * this.upf(), wall - o.sill) / (0.25 * this.upf())) * 0.25 * this.upf() });
+        });
+      }, { index: 2, title: "Drag up or down to make it taller or shorter" });
     });
   }
 
@@ -1682,6 +1968,41 @@ export class SiteView {
           setPart(b, k, { floor: Math.round(clamp(h, 0, max) / (0.5 * this.upf())) * 0.5 * this.upf() });
         });
       }, { index: k, title: "Drag up or down to raise or lower the floor", visible: () => this.controls.polarAngle > 15 * DEG });
+      // Each entry (steps down): drag it along the open sides
+      if (hasRailing(parts0[k], this.upf()) && parts0[k].floor > 0.2 * this.upf()) {
+        partEntries(buildingLocalPoints(b0), parts0[k]).forEach((_, e) => {
+          const spot = () => {
+            const cur = part(k);
+            if (!cur?.part) return null;
+            const outline = buildingLocalPoints(cur.b);
+            const en = partEntries(outline, cur.part)[e];
+            const side = en && partSides(outline, cur.part)[en.side];
+            if (!side) return null;
+            const w = toWorld(cur.b, { x: side.a.x + (side.b.x - side.a.x) * en.at, y: side.a.y + (side.b.y - side.a.y) * en.at });
+            return { cur, outline, y: buildingBaseHeight(cur.b, this.doc!.heights, this.doc!.gridSize) + cur.part.floor, w };
+          };
+          add("part-steps", () => { const s = spot(); return s ? new THREE.Vector3(s.w.x, s.y, s.w.y) : null; }, () => {
+            const s = spot();
+            if (!s) return null;
+            const pose = { x: s.cur.b.x, y: s.cur.b.y, rotation: s.cur.b.rotation };
+            const list = partEntries(s.outline, s.cur.part).map(x => ({ ...x }));
+            let moved = false;
+            return {
+              move: ev => {
+                const hit = this.planeAt(ev.clientX, ev.clientY, s.y);
+                const b = this.item(id) as BuildingItem | null;
+                if (!hit || !b) return;
+                const near = nearestSide(s.outline, s.cur.part, toBuildingLocal(pose, { x: hit.x, y: hit.z }));
+                if (near.side < 0) return;
+                list[e] = { side: near.side, at: near.at };
+                moved = true;
+                setPart(b, k, { entries: list.map(x => ({ ...x })) });
+              },
+              end: () => { if (moved) this.cb.onCommit(); }
+            };
+          }, { index: k * 100 + e, title: "Steps: drag along the railing to move them · right-click for more" });
+        });
+      }
     });
   }
 
@@ -1866,12 +2187,14 @@ export class SiteView {
     const sy = clientY - r.top;
     let best: { id: string; score: number } | null = null;
     for (const item of doc.items) {
-      if (item.type === "building" || item.type === "label" || item.type === "image") continue;
-      const a = this.itemAnchor(item);
+      if (item.type === "building" || item.type === "label" || item.type === "image" || item.type === "paving") continue;
+      // A see-through tree (in front of the house): only its trunk at the ground picks it
+      const faded = item.type === "tree" && this.isTreeFaded(item.id);
+      const a = faded ? new THREE.Vector3(item.x, this.h(item.x, item.y) + 1.5 * this.upf(), item.y) : this.itemAnchor(item);
       const s = this.project(a);
       if (!s) continue;
       const upp = this.upp(a);
-      const real = item.type === "tree" ? (item as TreeItem).radius * ((item as TreeItem).width ?? 1)
+      const real = item.type === "tree" ? (faded ? 1.5 * this.upf() : (item as TreeItem).radius * ((item as TreeItem).width ?? 1))
         : item.type === "parking" ? Math.max((item as ParkingItem).width, (item as ParkingItem).height) / 2
         : 0;
       const radius = Math.max(item.type === "camera" ? 16 : 13, real / upp);
@@ -1887,9 +2210,18 @@ export class SiteView {
     for (const hit of hits) {
       let o: THREE.Object3D | null = hit.object;
       while (o && !o.userData.itemId) o = o.parent;
+      // Clicks go through see-through trees to what's behind them
+      if (o?.userData.itemId && this.isTreeFaded(o.userData.itemId)) continue;
       if (o?.userData.itemId) return o.userData.itemId;
     }
     return null;
+  }
+
+  /** Whether a tree is (or is turning) see-through because it's in front of the house. */
+  private isTreeFaded(id: string) {
+    const obj = this.objects.get(id)?.obj;
+    const f = obj && this.treeFade.get(obj);
+    return !!f && f.target < 0.999;
   }
 
   // ------------------------------------------------------------------ pointer input
@@ -2021,6 +2353,27 @@ export class SiteView {
     };
   }
 
+  private contextAt(ev: PointerEvent, target: HTMLElement) {
+    const handleEl = target.closest?.("[data-handle]") as HTMLElement | null;
+    const h = handleEl ? this.handles.find(x => x.el === handleEl) : null;
+    const domItem = (target.closest?.("[data-item-id]") as HTMLElement | null)?.dataset.itemId ?? null;
+    const itemId = h ? this.selectedId : domItem ?? this.pick(ev.clientX, ev.clientY);
+    const g = this.groundAt(ev.clientX, ev.clientY);
+    let local: P | null = null, height: number | null = null;
+    const item = this.item(itemId);
+    if (item?.type === "building") {
+      const b = item as BuildingItem;
+      const base = buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize);
+      const obj = this.objects.get(b.id)?.obj;
+      this.ray(ev.clientX, ev.clientY);
+      const hit = obj ? this.raycaster.intersectObject(obj, true).find(x => x.object.name === "building-walls") : undefined;
+      const p = hit?.point ?? this.planeAt(ev.clientX, ev.clientY, base + (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / 2);
+      if (p) local = toBuildingLocal(b, { x: p.x, y: p.z });
+      if (hit) height = hit.point.y - base;
+    }
+    this.cb.onContextMenu({ clientX: ev.clientX, clientY: ev.clientY, itemId, handle: h ? { kind: h.kind, index: h.index } : null, ground: g ? { x: g.x, y: g.z } : null, local, height });
+  }
+
   private onPointerDown(e: PointerEvent) {
     const target = e.target as HTMLElement;
     if (!this.doc) return;
@@ -2031,8 +2384,18 @@ export class SiteView {
       this.povAim(e);
       return;
     }
-    // Rotate / tilt: right-drag (camera-controls), or Ctrl/Alt/Shift + left-drag.
-    if (e.button === 2) return;
+    // Rotate / tilt: right-drag (camera-controls), or Ctrl/Alt/Shift + left-drag. A right-click
+    // that doesn't drag opens a menu of actions for what's under it.
+    if (e.button === 2) {
+      const x0 = e.clientX, y0 = e.clientY, id = e.pointerId;
+      const up = (ev: PointerEvent) => {
+        if (ev.pointerId !== id) return;
+        window.removeEventListener("pointerup", up, true);
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) this.contextAt(ev, target);
+      };
+      window.addEventListener("pointerup", up, true);
+      return;
+    }
     const handleEl = target.closest?.("[data-handle]") as HTMLElement | null;
     if (handleEl && e.button === 0) {
       e.stopPropagation();
@@ -2124,6 +2487,22 @@ export class SiteView {
       this.gesture(e, { click: groundClick(p => this.cb.onTrace(p)), drag: panOrNothing });
       return;
     }
+    if (tool.mode === "add-wing") {
+      stop();
+      const b = this.item(this.selectedId);
+      if (b?.type === "building") this.gesture(e, {
+        click: ev => {
+          const bb = b as BuildingItem;
+          const hit = this.planeAt(ev.clientX, ev.clientY, buildingBaseHeight(bb, this.doc!.heights, this.doc!.gridSize));
+          if (!hit) return;
+          const local = toBuildingLocal(bb, { x: hit.x, y: hit.z });
+          const near = nearestEdge(buildingLocalPoints(bb), local);
+          if (near.dist < 30 * this.upf()) this.cb.onWing(bb.id, near.index, local);
+        },
+        drag: panOrNothing
+      });
+      return;
+    }
     if (tool.mode === "add-opening") {
       stop();
       const b = this.item(this.selectedId);
@@ -2204,8 +2583,9 @@ export class SiteView {
       return;
     }
     const item = this.item(hit);
-    // Big things (buildings) move only once selected, so dragging across the map still pans.
-    if (item?.type === "building" && hit !== this.selectedId) {
+    // Big things (buildings) move only once selected, so dragging across the map still pans; a
+    // locked item never moves (dragging it pans).
+    if (((item?.type === "building" || item?.type === "paving") && hit !== this.selectedId) || item?.locked) {
       stop();
       this.gesture(e, { click: () => this.cb.onSelect(hit), drag: panOrNothing });
       return;
@@ -2512,7 +2892,7 @@ export class SiteView {
     let c = "grab";
     if (this.povId) c = "move";
     else if (t.terrain || t.mode !== "select" || t.aimingCameraId || t.vertexInsert) c = "crosshair";
-    else if (this.hoverId) c = this.item(this.hoverId)?.type === "building" && this.hoverId !== this.selectedId ? "pointer" : "move";
+    else if (this.hoverId) c = (this.item(this.hoverId)?.type === "building" || this.item(this.hoverId)?.type === "paving") && this.hoverId !== this.selectedId ? "pointer" : "move";
     this.container.style.cursor = c;
   }
 
@@ -2547,7 +2927,8 @@ export class SiteView {
         item = { ...item, x: wall.point.x, y: wall.point.y, rotation: wall.rotation, mount: { type: "building", buildingId: wall.buildingId, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, height }, height } as CameraItem;
       }
     }
-    const key = `${preview.type}|${preview.id}|${JSON.stringify((item as CameraItem).mount ?? null)}|${item.rotation}`;
+    // Paving is built where it lies (draped on the ground), so its preview is rebuilt as it moves
+    const key = `${preview.type}|${preview.id}|${JSON.stringify((item as CameraItem).mount ?? null)}|${item.rotation}|${item.type === "paving" ? `${Math.round(at.x)},${Math.round(at.z)}` : ""}`;
     if (key !== this.ghostKey) {
       if (this.ghost) {
         this.fx.remove(this.ghost);

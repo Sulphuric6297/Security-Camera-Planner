@@ -1,6 +1,6 @@
 // The printed site plan (report and PNG export): a clean top-down drawing as an SVG string.
 import { DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_PITCH } from "../constants";
-import type { BuildingItem, CameraItem, CanvasItem, ImageItem, LabelItem, ParkingItem, TargetItem, TreeItem } from "../types";
+import type { BuildingItem, CameraItem, CanvasItem, ImageItem, LabelItem, ParkingItem, PavingItem, TargetItem, TreeItem } from "../types";
 import { getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, vFovFromH } from "./camera";
 import { buildingLocalPoints, cameraPlanPosition, visibilityPolygon } from "./planGeom";
 
@@ -42,6 +42,15 @@ export const planSvg = (input: PlanSvgInput) => {
 
   const obstacles = items.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
   const buildings = items.filter(i => i.type === "building") as BuildingItem[];
+
+  // Driveways, walkways and patios lie on the ground, under everything
+  const PAVING_FILL: Record<PavingItem["surface"], string> = { asphalt: "#4b5056", concrete: "#c9c5bd", gravel: "#b3aa96", pavers: "#b98a6c" };
+  items.forEach(item => {
+    if (item.type !== "paving") return;
+    const pv = item as PavingItem;
+    const pts = buildingLocalPoints(pv as unknown as BuildingItem).map(p => `${f(p.x)},${f(p.y)}`).join(" ");
+    out.push(`<polygon transform="translate(${f(pv.x)} ${f(pv.y)}) rotate(${f(pv.rotation)})" points="${pts}" fill="${PAVING_FILL[pv.surface]}" fill-opacity="${bg?.url ? 0.8 : 1}" stroke="rgba(30,41,59,0.45)" stroke-width="${f(0.8 * ui)}"/>`);
+  });
 
   // Coverage first, so everything else sits on top of it.
   if (input.showCones) {

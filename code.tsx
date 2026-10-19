@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
@@ -32,7 +33,9 @@ import {
   MapPin,
   SquareDashed,
   ChevronDown,
-  Target
+  Target,
+  Sun,
+  Route
 } from "lucide-react";
 import GridLayoutBase from "react-grid-layout";
 // react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
@@ -61,7 +64,7 @@ import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, 
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, doriLevelAt, getCameraAspectValue, getCameraHFov, getCameraResolution, getDoriDistances, getGroundCoverage, hFovForDensity, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
-import { TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, SITE_MAX_WIDTH_FT, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
@@ -69,20 +72,24 @@ import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { OPEN_PART_DEFAULTS, hasRailing, openPartsOf, partAlongEdge, partRoof } from "./src/lib/openParts";
-import { OPENING_DEFAULTS, autoOpenings, isDoor, openingAt, placeOpening } from "./src/lib/openings";
+import { OPEN_PART_DEFAULTS, hasRailing, insetParts, nearestEdge, nearestSide, openPartsOf, partAlongEdge, partEntries, partRoof, partSides } from "./src/lib/openParts";
+import { spotsFromBuildings, protectFrom, type ProtectFrom } from "./src/lib/protectSpots";
+import { findModel, loadCatalog } from "./src/lib/cameraCatalog";
+import { sunPosition } from "./src/lib/sun";
+import { OPENING_DEFAULTS, STORY_PRESETS, autoOpenings, isDoor, openingAt, openingPlace, openingPoint, placeOpening, storiesOf, wallPieces } from "./src/lib/openings";
 import { doorsOnWalls } from "./src/three/buildings";
-import { getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
+import { buildingRoofKind, gableWallsOf, toggleGableWall } from "./src/three/buildingMesh";
+import { getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, type PlanMeta, idbGet, idbSet, listPlans, loadPlan, removePlan, storePlan } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { getItemTypeLabel, resolveVehicleType } from "./src/three/models";
 import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
-import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
+import type { ContextInfo, ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
 import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
-import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, Opening, OpeningKind, OpenPart, OpenPartKind, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
+import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, Opening, OpeningKind, OpenPart, OpenPartKind, ParkingItem, PavingItem, PavingKind, PavingSurface, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
@@ -190,17 +197,57 @@ export default function SecurityPlanner() {
   const openingKindRef = useRef<OpeningKind>("window");
   openingKindRef.current = openingKind;
   const [selectedOpening, setSelectedOpening] = useState<{ id: string; index: number } | null>(null);
+  // Spots to protect made from your buildings' doors, windows and driveways follow them
+  useEffect(() => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const desired = new Map(spotsFromBuildings(items, upf).map(d => [d.key, d]));
+    let changed = false;
+    const next: CanvasItem[] = [];
+    let index = items.filter(i => i.type === "target").length;
+    for (const it of items) {
+      const link = it.type === "target" ? (it as TargetItem).link : undefined;
+      if (!link) { next.push(it); continue; }
+      const d = desired.get(link);
+      desired.delete(link);
+      if (!d) { changed = true; continue; }
+      const t = it as TargetItem;
+      if (Math.abs(t.x - d.x) > 0.01 || Math.abs(t.y - d.y) > 0.01 || t.label !== d.label || t.kind !== d.kind) {
+        next.push({ ...t, x: d.x, y: d.y, label: d.label, kind: d.kind });
+        changed = true;
+      } else next.push(it);
+    }
+    desired.forEach(d => {
+      const t = createItem("target", d.x, d.y, { unitsPerFoot: upf, targetKind: d.kind, targetIndex: index++ }) as TargetItem;
+      next.push({ ...t, label: d.label, link: d.key });
+      changed = true;
+    });
+    if (changed) setItems(next);
+  }, [items, planGeoRef]);
+
+  // The latest camera list from the site (models added since this version was built)
+  useEffect(() => { void loadCatalog(); }, []);
+  // The sun: for a chosen moment (ms) or now (null), at the site, for real shadows
+  const [sunTime, setSunTime] = useState<number | null>(null);
+  const [sunOpen, setSunOpen] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (sunTime !== null) return;
+    const t = window.setInterval(() => setNowTick(Date.now()), 60000);
+    return () => window.clearInterval(t);
+  }, [sunTime]);
+  // The right-click menu: where it opened and what it is for
+  const [ctxMenu, setCtxMenu] = useState<ContextInfo | null>(null);
   // A building's windows and doors as an editable list: the automatic ones (and a door at each
   // marked door spot) until the user has placed their own.
   const openingsOf = (b: BuildingItem): Opening[] => {
     if (b.openings) return b.openings;
     const upf = planGeoRef?.unitsPerFoot ?? 1;
     const outline = buildingLocalPoints(b);
-    const spots = currentItemsRef.current.filter(i => i.type === "target" && (i as TargetItem).kind === "door").map(t => toBuildingLocal(b, t));
+    const spots = currentItemsRef.current.filter(i => i.type === "target" && (i as TargetItem).kind === "door" && !(i as TargetItem).link).map(t => toBuildingLocal(b, t));
     const doors = doorsOnWalls(outline, spots, upf).map(d => ({ x: d.x, y: d.y }));
     return autoOpenings(outline, b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf, upf, doors);
   };
-  const [toolDefaults, setToolDefaults] = useState<ToolDefaults>({ treeSize: "medium", treeType: "deciduous", vehicleType: "sedan", targetKind: "door" });
+  const [toolDefaults, setToolDefaults] = useState<ToolDefaults>({ treeSize: "medium", treeType: "deciduous", vehicleType: "sedan", targetKind: "door", pavingKind: "driveway" });
   // Inspector: rarely used settings stay folded away until asked for.
   const [showMoreOptions, setShowMoreOptions] = useState(false);
   // Coverage: blind-spot overlay and "aim this camera at the next click".
@@ -1533,7 +1580,7 @@ export default function SecurityPlanner() {
   // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
   // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
   const placeNewItemAt = (type: ToolMode, x: number, y: number) => {
-    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder" } as Partial<Record<ToolMode, NewItemKind>>)[type];
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder", "add-paving": "paving" } as Partial<Record<ToolMode, NewItemKind>>)[type];
     if (!kind) return null;
     // One recorder per plan: placing it again moves it.
     const existingRecorder = kind === "recorder" ? itemsRef.current.find(i => i.type === "recorder") : undefined;
@@ -1550,7 +1597,8 @@ export default function SecurityPlanner() {
       treeSize: toolDefaults.treeSize,
       treeType: toolDefaults.treeType,
       vehicleType: toolDefaults.vehicleType,
-      targetKind: toolDefaults.targetKind
+      targetKind: toolDefaults.targetKind,
+      pavingKind: toolDefaults.pavingKind
     });
 
     if (newItem.type === "camera" && lastCameraSettingsRef.current) {
@@ -1719,7 +1767,11 @@ export default function SecurityPlanner() {
 
   const deleteItem = (id: string) => {
     const removed = items.find(i => i.id === id);
-    const nextItems = items.filter(i => i.id !== id);
+    // A spot made from a building's door or driveway: remember it was removed, so it stays gone
+    const link = removed?.type === "target" ? (removed as TargetItem).link : undefined;
+    const nextItems = items
+      .filter(i => i.id !== id)
+      .map(i => (link && i.type === "building" && link.startsWith(`${i.id}:`) ? { ...i, protectSkip: [...((i as BuildingItem).protectSkip ?? []), link] } as CanvasItem : i));
     setItems(nextItems);
     setSelectedId(prev => (prev === id ? null : prev));
     saveHistory(nextItems);
@@ -2383,6 +2435,7 @@ export default function SecurityPlanner() {
         heightFt,
         mount: building ? `on ${building.label?.trim() || "building"}` : "free-standing",
         lensLabel: LENS_PRESETS.find(l => l.id === cam.lensPreset)?.label ?? `${Math.round(hFov)}°`,
+        modelLabel: (() => { const m = findModel(cam.model); return m ? `${m.brand} ${m.name}` : undefined; })(),
         hFov,
         resolutionLabel: RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`,
         tiltDeg: pitch,
@@ -2904,7 +2957,7 @@ export default function SecurityPlanner() {
   // Choosing a placing tool clears the selection, so the right panel shows that tool (not the old item).
   // Drawing a porch or carport part works on the selected building, so that one keeps it.
   useEffect(() => {
-    if (mode !== "select" && mode !== "add-open-part" && mode !== "add-opening") setSelectedId(null);
+    if (mode !== "select" && mode !== "add-open-part" && mode !== "add-opening" && mode !== "add-wing") setSelectedId(null);
   }, [mode]);
   // Selecting something shows it in the inspector (even if plan settings were open).
   useEffect(() => {
@@ -2981,7 +3034,7 @@ export default function SecurityPlanner() {
 
       // Single-key tools (shown in the toolbar tooltips)
       if (!mod && !event.altKey) {
-        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label", m: "add-target", d: "measure" };
+        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", w: "add-paving", l: "add-label", m: "add-target", d: "measure" };
         const tool = toolKeys[event.key.toLowerCase()];
         if (tool) {
           event.preventDefault();
@@ -3001,7 +3054,7 @@ export default function SecurityPlanner() {
         // Nudge the selection with the arrow keys (Shift = 10 ft)
         if (selectedId && event.key.startsWith("Arrow")) {
           const item = items.find(i => i.id === selectedId);
-          if (item && !(item.type === "camera" && (item as CameraItem).mount?.type === "building")) {
+          if (item && !item.locked && !(item.type === "camera" && (item as CameraItem).mount?.type === "building")) {
             event.preventDefault();
             const step = event.shiftKey ? 10 : 1;
             const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
@@ -3015,8 +3068,18 @@ export default function SecurityPlanner() {
       }
 
 
+      if ((event.key === "Delete" || event.key === "Backspace") && selectedId && items.find(i => i.id === selectedId)?.locked && selectedOpening?.id !== selectedId) {
+        event.preventDefault();
+        showExportNotice("It's locked in place: unlock it first (the lock on its bar, or right-click)", "info");
+        return;
+      }
       if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
         event.preventDefault();
+        // A window or door picked on the selected building: just that one goes
+        if (selectedOpening?.id === selectedId) {
+          removeOpening(selectedId, selectedOpening.index);
+          return;
+        }
         deleteItem(selectedId);
         setTimeout(() => saveHistory(), 50);
       }
@@ -3095,7 +3158,7 @@ export default function SecurityPlanner() {
           return;
         }
         // Esc while drawing a porch or carport part only stops drawing (the building stays selected).
-        if (mode === "add-open-part" || mode === "add-opening") {
+        if (mode === "add-open-part" || mode === "add-opening" || mode === "add-wing") {
           setMode("select");
           return;
         }
@@ -3107,7 +3170,7 @@ export default function SecurityPlanner() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId, mode]);
+  }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId, mode, selectedOpening]);
 
 
   // Refs to track current items and mode in 3D event handlers
@@ -3259,6 +3322,7 @@ export default function SecurityPlanner() {
       { mode: "add-building", icon: Square, label: "Add building", key: "B" },
       { mode: "add-tree", icon: Trees, label: "Add tree", key: "T" },
       { mode: "add-parking", icon: Car, label: "Add vehicle", key: "P" },
+      { mode: "add-paving", icon: Route, label: "Add a driveway, walkway or patio", key: "W" },
       { mode: "add-label", icon: Type, label: "Add text", key: "L" },
       { mode: "measure", icon: Ruler, label: "Measure a distance", key: "D" }
     ];
@@ -3574,6 +3638,12 @@ export default function SecurityPlanner() {
   };
 
   // --- What the map view shows, and what it reports back ---
+  const sunMoment = new Date(sunTime ?? nowTick);
+  const sunNow = useMemo(
+    () => (siteLocation ? sunPosition(new Date(sunTime ?? nowTick), siteLocation.lat, siteLocation.lon) : null),
+    // Recomputed each minute for "now", and whenever the chosen time changes
+    [siteLocation, sunTime, nowTick]
+  );
   const viewDoc = useMemo<ViewDoc>(() => ({
     items,
     canvas: canvasSize,
@@ -3597,13 +3667,14 @@ export default function SecurityPlanner() {
     targetStatus: Object.fromEntries(targetItems.map(t => [t.id, targetStatus(targetResults.get(t.id))])),
     blindSpots: blindSpots ? { runs: blindSpots.runs, area: blindSpots.area } : null,
     roofPhoto,
-    geo: !!planGeoRef
+    geo: !!planGeoRef,
+    sun: sunNow
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto]);
+  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto, sunNow]);
 
   // A sample of what a click would place, for the preview under the cursor.
   const placePreview = useMemo(() => {
-    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder" } as Partial<Record<ToolMode, NewItemKind>>)[mode];
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder", "add-paving": "paving" } as Partial<Record<ToolMode, NewItemKind>>)[mode];
     if (!kind) return null;
     return createItem(kind, 0, 0, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, ...toolDefaults });
   }, [mode, toolDefaults, planGeoRef]);
@@ -3655,8 +3726,9 @@ export default function SecurityPlanner() {
     aimingCameraId,
     vertexInsert: vertexInsertMode,
     mapMove: mapMoveMode && !!backgroundImg,
-    preview: placePreview
-  }), [mode, isTerrainMode, terrainTool, gridSize, terrainBrushSize, aimingCameraId, vertexInsertMode, mapMoveMode, backgroundImg, placePreview]);
+    preview: placePreview,
+    opening: selectedOpening && selectedOpening.id === selectedId ? selectedOpening.index : null
+  }), [mode, isTerrainMode, terrainTool, gridSize, terrainBrushSize, aimingCameraId, vertexInsertMode, mapMoveMode, backgroundImg, placePreview, selectedOpening, selectedId]);
 
   // 2D / 3D tabs are poses of the same view. A tilt done in the view switches the tab to match.
   const [poseSignal, setPoseSignal] = useState(0);
@@ -3670,9 +3742,339 @@ export default function SecurityPlanner() {
     setPoseSignal(s => s + 1);
   }, [viewMode]);
 
+  // --- Right-click menu: the actions for what was clicked, where it was clicked ---
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = (e: Event) => { if (!(e.target as HTMLElement)?.closest?.("[data-context-menu]")) setCtxMenu(null); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
+    window.addEventListener("pointerdown", close, true);
+    window.addEventListener("wheel", close, true);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("pointerdown", close, true); window.removeEventListener("wheel", close, true); window.removeEventListener("keydown", esc); };
+  }, [ctxMenu]);
+  const renderContextMenu = (info: ContextInfo) => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    // Nothing picked, but next to a porch or deck (its railing, its steps): that building
+    const byPorch = !info.itemId && info.ground
+      ? (items.filter(i => i.type === "building") as BuildingItem[]).find(bb => {
+        const local = toBuildingLocal(bb, info.ground!);
+        return openPartsOf(bb).some(part => nearestSide(buildingLocalPoints(bb), part, local).dist < 4 * upf);
+      })
+      : undefined;
+    const item = info.itemId ? items.find(i => i.id === info.itemId) : byPorch ?? null;
+    const close = () => setCtxMenu(null);
+    type Entry = { label: string; run: () => void; danger?: boolean } | { group: string } | { row: { label: string; run: () => void; on?: boolean }[] };
+    const entries: Entry[] = [];
+    const b = item?.type === "building" ? (item as BuildingItem) : null;
+    if (b && info.handle?.kind === "opening" && info.handle.index !== undefined && b.openings?.[info.handle.index]) {
+      const k = info.handle.index, o = b.openings[k];
+      const set = (patch: Partial<Opening>) => { updateItem(b.id, { openings: b.openings!.map((q, j) => (j === k ? { ...q, ...patch } : q)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); };
+      entries.push({ group: OPENING_DEFAULTS[o.kind].label });
+      entries.push({ row: (Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(kind => ({ label: OPENING_DEFAULTS[kind].label, on: kind === o.kind, run: () => { const d = OPENING_DEFAULTS[kind]; set({ kind, width: d.widthFt * upf, height: d.heightFt * upf, sill: d.sillFt * upf }); } })) });
+      if (!isDoor(o.kind)) entries.push({ label: o.shutters ? "Remove the shutters" : "Add shutters", run: () => set({ shutters: !o.shutters }) });
+      entries.push({ label: `Delete this ${OPENING_DEFAULTS[o.kind].label.toLowerCase()}`, danger: true, run: () => removeOpening(b.id, k) });
+    } else if (b && (info.handle?.kind === "part-edge" || info.handle?.kind === "part-floor" || info.handle?.kind === "part-steps") && info.handle.index !== undefined) {
+      const k = info.handle.kind === "part-edge" ? Math.floor(info.handle.index / 4) : info.handle.kind === "part-steps" ? Math.floor(info.handle.index / 100) : info.handle.index;
+      const parts = openPartsOf(b);
+      const part = parts[k];
+      if (part) {
+        entries.push({ group: `${OPEN_PART_DEFAULTS[part.kind].label} ${k + 1}` });
+        entries.push({ row: (["porch", "deck", "carport", "patio"] as OpenPartKind[]).map(kind => ({ label: OPEN_PART_DEFAULTS[kind].label, on: kind === part.kind, run: () => { updateItem(b.id, { openParts: parts.map((p, j) => (j === k ? { ...p, kind, floor: OPEN_PART_DEFAULTS[kind].floorFt * upf, railing: undefined } : p)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } })) });
+        if (info.handle.kind === "part-steps") {
+          const e = info.handle.index % 100;
+          const list = partEntries(buildingLocalPoints(b), part);
+          entries.push({ label: "Remove these steps", run: () => { updateItem(b.id, { openParts: parts.map((p, j) => (j === k ? { ...p, entries: list.filter((_, x) => x !== e) } : p)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
+        }
+        entries.push({ label: `Delete this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, danger: true, run: () => { const rest = parts.filter((_, j) => j !== k); updateItem(b.id, { openParts: rest.length ? rest : undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
+      }
+    } else if (b) {
+      const outline = buildingLocalPoints(b);
+      const p = info.local;
+      // Right on a window or door (placed ones, or the automatic windows): its own menu first
+      if (p && !b.openSides) {
+        const list = openingsOf(b);
+        const hitIndex = list.findIndex(o => {
+          const op = openingPoint(outline, o);
+          if (!op || Math.hypot(op.x - p.x, op.y - p.y) > o.width / 2 + 0.75 * upf) return false;
+          return info.height === null ? o.sill < 6 * upf : info.height >= o.sill - 0.75 * upf && info.height <= o.sill + o.height + 0.75 * upf;
+        });
+        if (hitIndex >= 0) {
+          const o = list[hitIndex];
+          // Placing by hand from here on: the automatic windows become the list
+          const set = (next: Opening[]) => { updateItem(b.id, { openings: next } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); };
+          entries.push({ group: OPENING_DEFAULTS[o.kind].label });
+          entries.push({ row: (Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(kind => ({ label: OPENING_DEFAULTS[kind].label, on: kind === o.kind, run: () => { const d = OPENING_DEFAULTS[kind]; set(list.map((q, j) => (j === hitIndex ? { ...q, kind, width: d.widthFt * upf, height: d.heightFt * upf, sill: d.sillFt * upf } : q))); } })) });
+          if (!isDoor(o.kind)) entries.push({ label: o.shutters ? "Remove the shutters" : "Add shutters", run: () => set(list.map((q, j) => (j === hitIndex ? { ...q, shutters: !q.shutters } : q))) });
+          entries.push({ label: `Delete this ${OPENING_DEFAULTS[o.kind].label.toLowerCase()}`, danger: true, run: () => { set(list.filter((_, j) => j !== hitIndex)); setSelectedOpening(null); showExportNotice("Removed it", "info", { label: "Undo", run: handleUndo }); } });
+        }
+      }
+      // On (or next to) a porch or deck: its railing and entries
+      const g = info.ground ? toBuildingLocal(b, info.ground) : null;
+      const parts = openPartsOf(b);
+      const onPart = g ? parts.map((part, k) => ({ part, k, near: nearestSide(outline, part, g) })).filter(x => x.near.side >= 0 && x.near.dist < 4 * upf).sort((x, y) => x.near.dist - y.near.dist)[0] : undefined;
+      if (onPart) {
+        const { part, k, near } = onPart;
+        const setPart = (patch: Partial<OpenPart>) => { updateItem(b.id, { openParts: parts.map((q, j) => (j === k ? { ...q, ...patch } : q)) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); };
+        const list = partEntries(outline, part);
+        const sideLen = (() => { const s2 = partSides(outline, part)[near.side]; return s2 ? Math.hypot(s2.b.x - s2.a.x, s2.b.y - s2.a.y) : 1; })();
+        const here = list.findIndex(e => e.side === near.side && Math.abs(e.at - near.at) * sideLen < 3 * upf);
+        const noRail = part.noRail ?? [];
+        entries.push({ group: `${OPEN_PART_DEFAULTS[part.kind].label} ${k + 1}: this side` });
+        if (part.floor > 0.2 * upf) {
+          if (here >= 0) entries.push({ label: "Remove these steps", run: () => setPart({ entries: list.filter((_, j) => j !== here) }) });
+          else entries.push({ label: "Put steps here", run: () => setPart({ entries: [...list, { side: near.side, at: near.at }], railing: hasRailing(part, upf) ? part.railing : true }) });
+          entries.push(noRail.includes(near.side)
+            ? { label: "Railing on this side", run: () => setPart({ noRail: noRail.filter(x => x !== near.side), railing: true }) }
+            : { label: "No railing on this side", run: () => setPart({ noRail: [...noRail, near.side] }) });
+        }
+        entries.push({ label: `Delete this ${OPEN_PART_DEFAULTS[part.kind].label.toLowerCase()}`, danger: true, run: () => { const rest = parts.filter((_, j) => j !== k); updateItem(b.id, { openParts: rest.length ? rest : undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } });
+      }
+      entries.push({ group: b.label || "Building" });
+      if (p) {
+        const add = (kind: OpeningKind) => () => addOpening(b.id, p, info.height, kind);
+        entries.push({ label: "Add a window here", run: add("window") });
+        entries.push({ label: "Add a door here", run: add("door") });
+        entries.push({ row: (["picture-window", "double-door", "slider", "garage-door"] as OpeningKind[]).map(kind => ({ label: OPENING_DEFAULTS[kind].label, run: add(kind) })) });
+        const near = nearestEdge(outline, p);
+        const porch = (kind: OpenPartKind, outside: boolean) => () => { openPartKindRef.current = kind; setOpenPartKind(kind); viewCallbacks.onOpenPart(b.id, { edge: near.index, outside }); };
+        entries.push({ label: "Attach a porch to this wall", run: porch("porch", true) });
+        entries.push({ row: [{ label: "Deck", run: porch("deck", true) }, { label: "Carport", run: porch("carport", true) }, { label: "Patio", run: porch("patio", true) }, { label: "Porch set in", run: porch("porch", false) }] });
+        entries.push({ label: "Add a wing on this wall", run: () => viewCallbacks.onWing(b.id, near.index, p) });
+        if (!b.openSides && buildingRoofKind(b, upf) !== "flat") {
+          const gable = gableWallsOf(b, upf).includes(near.index);
+          entries.push({ label: gable ? "Make this end of the roof a hip" : "Make this end of the roof a gable", run: () => viewCallbacks.onToggleGable(b.id, near.index) });
+        }
+      }
+      const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+      entries.push({ row: STORY_PRESETS.map(sp => ({ label: `${sp.label} ${sp.label === "1" ? "story" : "st."}`, on: Math.abs(sp.wallFt * upf - wall) < 0.6 * upf, run: () => { updateItem(b.id, { wallHeight: sp.wallFt * upf }); setTimeout(() => saveHistory(), 50); } })) });
+      entries.push({ label: b.locked ? "Unlock (let it move again)" : "Lock in place", run: () => toggleLock(b.id) });
+      entries.push({ label: "Duplicate", run: duplicateSelected });
+      if (!b.locked) entries.push({ label: "Delete this building", danger: true, run: () => { deleteItem(b.id); setTimeout(() => saveHistory(), 50); } });
+    } else if (item) {
+      entries.push({ group: (item as any).label || getItemTypeLabel(item.type) });
+      if (item.type === "camera") entries.push({ label: "Look through this camera", run: () => lookThrough(item.id) });
+      entries.push({ label: item.locked ? "Unlock (let it move again)" : "Lock in place", run: () => toggleLock(item.id) });
+      if (item.type !== "recorder") entries.push({ label: "Duplicate", run: duplicateSelected });
+      if (!item.locked) entries.push({ label: "Delete", danger: true, run: () => { deleteItem(item.id); setTimeout(() => saveHistory(), 50); } });
+    } else if (info.ground) {
+      const g = info.ground;
+      const place = (tool: ToolMode) => () => { if (placeNewItemAt(tool, g.x, g.y)) setTimeout(() => saveHistory(), 50); };
+      entries.push({ group: "Add here" });
+      entries.push({ label: "Camera", run: place("add-camera") });
+      entries.push({ label: "Building", run: place("add-building") });
+      entries.push({ label: "Tree", run: place("add-tree") });
+      entries.push({ label: "Car", run: place("add-parking") });
+      entries.push({ label: "Driveway or walkway", run: place("add-paving") });
+      entries.push({ label: "Spot to protect (door, gate, driveway)", run: place("add-target") });
+    }
+    if (!entries.length) return null;
+    // Keep it on screen
+    const left = Math.min(info.clientX, window.innerWidth - 250), top = Math.min(info.clientY, window.innerHeight - 40 - entries.length * 30);
+    return (
+      <div
+        data-context-menu
+        role="menu"
+        aria-label="Actions"
+        className="fixed z-[200] w-60 rounded-xl border border-white/15 bg-zinc-900 shadow-2xl py-1 text-sm"
+        style={{ left, top: Math.max(8, top) }}
+        onContextMenu={e => e.preventDefault()}
+      >
+        {entries.map((e, i) =>
+          "group" in e ? (
+            <div key={i} className="px-3 pt-1.5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{e.group}</div>
+          ) : "row" in e ? (
+            <div key={i} className="px-2 py-1 flex flex-wrap gap-1">
+              {e.row.map(r => (
+                <button key={r.label} role="menuitem" onClick={() => { close(); r.run(); }} className={`px-2 py-1 rounded-md text-[11px] font-semibold border ${r.on ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"}`}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <button key={i} role="menuitem" onClick={() => { close(); e.run(); }} className={`w-full text-left px-3 py-1.5 hover:bg-white/10 ${e.danger ? "text-red-300" : "text-slate-100"}`}>
+              {e.label}
+            </button>
+          )
+        )}
+      </div>
+    );
+  };
+
+  const toggleLock = (id: string) => {
+    const it = currentItemsRef.current.find(i => i.id === id);
+    if (!it) return;
+    updateItem(id, { locked: !it.locked });
+    setTimeout(() => saveHistory(), 50);
+    showExportNotice(it.locked ? "Unlocked: it can be moved again" : "Locked in place", "info");
+  };
+
+  /** The house's main edits right on the map: stories, roof, and adding windows, doors, porches, wings. */
+  const [quickAdd, setQuickAdd] = useState(false);
+  /** Copy a window's or door's size to others like it: on the same wall, on the house, or on all your buildings. */
+  const applyOpeningSize = (b: BuildingItem, index: number, scope: "wall" | "house" | "all") => {
+    const src = b.openings?.[index];
+    if (!src) return;
+    const outline = buildingLocalPoints(b);
+    const pieces = wallPieces(outline, insetParts(outline, openPartsOf(b)));
+    const piece = openingPlace(outline, src, pieces)?.piece;
+    const size = { width: src.width, height: src.height, sill: src.sill, shutters: src.shutters };
+    let count = 0;
+    setItems(prev => prev.map(it => {
+      if (it.type !== "building") return it;
+      const bb = it as BuildingItem;
+      if (scope !== "all" && bb.id !== b.id) return it;
+      if (scope === "all" && !isOwnBuilding(bb)) return it;
+      const list = bb.id === b.id ? b.openings! : bb.openings;
+      if (!list) return it;
+      const next = list.map((o, j) => {
+        if (o.kind !== src.kind || (bb.id === b.id && j === index)) return o;
+        if (scope === "wall" && openingPlace(outline, o, pieces)?.piece !== piece) return o;
+        count++;
+        return { ...o, ...size };
+      });
+      return { ...bb, openings: next } as CanvasItem;
+    }));
+    setTimeout(() => { saveHistory(); showExportNotice(`Same size for ${count} more ${OPENING_DEFAULTS[src.kind].label.toLowerCase()}${count === 1 ? "" : "s"}`, "info", { label: "Undo", run: handleUndo }); }, 60);
+  };
+  const [applyOpen, setApplyOpen] = useState(false);
+  // Little menus close on Esc or a click anywhere else, like any modern menu
+  useEffect(() => {
+    if (!quickAdd && !applyOpen && !sunOpen) return;
+    const closeAll = () => { setQuickAdd(false); setApplyOpen(false); setSunOpen(false); };
+    const down = (e: PointerEvent) => { const t = e.target as HTMLElement; if (!t.closest?.("[data-popover],[data-popover-toggle]")) closeAll(); };
+    // Esc closes only the menu (the selection stays), so it is caught before anything else sees it
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopImmediatePropagation(); e.preventDefault(); closeAll(); } };
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("keydown", key, true);
+    return () => { window.removeEventListener("pointerdown", down, true); window.removeEventListener("keydown", key, true); };
+  }, [quickAdd, applyOpen, sunOpen]);
+
+  const renderBuildingQuickBar = (b: BuildingItem) => {
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    // A window or door picked on it: its size right here (drag its side and top squares, or type)
+    const oi = selectedOpening?.id === b.id ? selectedOpening.index : -1;
+    const op = oi >= 0 ? b.openings?.[oi] : undefined;
+    if (op) {
+      const setOp = (patch: Partial<Opening>) => updateItem(b.id, { openings: b.openings!.map((q, j) => (j === oi ? { ...q, ...patch } : q)) } as Partial<BuildingItem>);
+      const num = (label: string, key: "width" | "height" | "sill") => (
+        <label className="flex items-center gap-1 text-[10px] text-slate-400">
+          {label}
+          <input
+            type="number"
+            step={0.25}
+            min={key === "sill" ? 0 : 1}
+            value={Math.round((op[key] / upf) * 100) / 100}
+            onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= (key === "sill" ? 0 : 1)) setOp({ [key]: v * upf } as Partial<Opening>); }}
+            onBlur={() => setTimeout(() => saveHistory(), 50)}
+            className="w-12 h-7 rounded-md bg-zinc-800 border border-white/10 px-1 text-[11px] text-slate-100"
+            aria-label={`${label} (ft)`}
+          />
+        </label>
+      );
+      const kindLabel = OPENING_DEFAULTS[op.kind].label.toLowerCase();
+      return (
+        <>
+          <span className="px-1.5 text-[11px] font-semibold text-sky-200">{OPENING_DEFAULTS[op.kind].label}</span>
+          {num("W", "width")}
+          {num("H", "height")}
+          {num(isDoor(op.kind) ? "Bottom" : "Sill", "sill")}
+          <div className="relative">
+            <button data-popover-toggle className="h-7 px-2 rounded-md text-[11px] font-semibold text-slate-300 hover:bg-white/10" aria-expanded={applyOpen} onClick={() => setApplyOpen(v => !v)} title={`Use this size for other ${kindLabel}s`}>
+              Apply to…
+            </button>
+            {applyOpen && (
+              <div data-popover className="absolute top-full mt-2 left-0 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl py-1 z-40" role="menu">
+                {([["wall", `Every ${kindLabel} on this wall`], ["house", `Every ${kindLabel} on this building`], ["all", `Every ${kindLabel} on all my buildings`]] as const).map(([scope, label]) => (
+                  <button key={scope} role="menuitem" onClick={() => { setApplyOpen(false); applyOpeningSize(b, oi, scope); }} className="w-full text-left px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10">{label}</button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="h-7 px-2 rounded-md text-[11px] font-semibold text-red-300 hover:bg-red-500/15" onClick={() => removeOpening(b.id, oi)} title={`Delete this ${kindLabel} (Del)`}>
+            Delete
+          </button>
+          <button className="h-7 px-2 rounded-md text-[11px] text-slate-400 hover:bg-white/10" onClick={() => setSelectedOpening(null)} title="Back to the whole building">
+            Done
+          </button>
+          <span className="w-px h-5 bg-white/10 mx-0.5" />
+        </>
+      );
+    }
+    const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+    const preset = STORY_PRESETS.find(p => Math.abs(p.wallFt * upf - wall) < 0.6 * upf);
+    const chip = (on: boolean) => `h-7 px-1.5 rounded-md text-[11px] font-semibold ${on ? "bg-emerald-500/25 text-emerald-100" : "text-slate-300 hover:bg-white/10"}`;
+    const startOpening = (k: OpeningKind) => { if (!b.openings) updateItem(b.id, { openings: openingsOf(b) } as Partial<BuildingItem>); setOpeningKind(k); setMode("add-opening"); setQuickAdd(false); };
+    const startPart = (k: OpenPartKind) => { setOpenPartKind(k); setMode("add-open-part"); setQuickAdd(false); };
+    return (
+      <>
+        <div className="flex items-center" role="group" aria-label="Stories" title="Stories">
+          <span className="pl-1.5 pr-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">Stories</span>
+          {STORY_PRESETS.map(p => (
+            <button key={p.label} className={chip(preset === p)} aria-pressed={preset === p} onClick={() => { updateItem(b.id, { wallHeight: p.wallFt * upf }); setTimeout(() => saveHistory(), 50); }} title={`${p.label} ${p.label === "1" ? "story" : "stories"}`}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <select
+          value={b.gableWalls ? "custom" : b.roofType ?? "auto"}
+          onChange={e => { if (e.target.value !== "custom") { updateItem(b.id, { roofType: e.target.value as BuildingItem["roofType"], gableWalls: undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); } }}
+          className="h-7 bg-zinc-800 border border-white/10 rounded-md px-1 text-[11px] font-semibold text-slate-200"
+          aria-label="Roof"
+          title="Roof shape (click the little roof shapes beside the walls to set each end)"
+        >
+          <option value="auto">Auto roof</option>
+          <option value="gable">Gable</option>
+          <option value="hip">Hip</option>
+          <option value="flat">Flat</option>
+          {b.gableWalls && <option value="custom">Custom ends</option>}
+        </select>
+        <div className="relative">
+          <button data-popover-toggle className={`${chip(quickAdd)} px-2`} aria-expanded={quickAdd} onClick={() => setQuickAdd(v => !v)} title="Add a window, door, porch or wing">
+            + Add
+          </button>
+          {quickAdd && (
+            <div data-popover className="absolute top-full mt-2 left-0 w-44 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl py-1 z-40" role="menu">
+              {([["Window", () => startOpening("window")], ["Door", () => startOpening("door")], ["Garage door", () => startOpening("garage-door")], ["Sliding door", () => startOpening("slider")], ["Porch", () => startPart("porch")], ["Deck", () => startPart("deck")], ["Carport", () => startPart("carport")], ["Wing", () => { setMode("add-wing"); setQuickAdd(false); }]] as [string, () => void][]).map(([label, run]) => (
+                <button key={label} role="menuitem" onClick={run} className="w-full text-left px-3 py-1.5 text-xs text-slate-100 hover:bg-white/10">{label}</button>
+              ))}
+            </div>
+          )}
+        </div>
+        <span className="w-px h-5 bg-white/10 mx-0.5" />
+      </>
+    );
+  };
+
+  /** A window or door of a kind on a building's wall at a point (its frame), in the story clicked. */
+  const addOpening = (id: string, p: { x: number; y: number }, height: number | null, kind: OpeningKind) => {
+    const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+    if (!b) return;
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const outline = buildingLocalPoints(b);
+    const o = openingAt(outline, p, kind, upf, wallPieces(outline, insetParts(outline, openPartsOf(b))));
+    if (height !== null && !isDoor(o.kind)) {
+      const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+      const storyH = wall / storiesOf(wall, upf);
+      o.sill = Math.min(wall - o.height - 0.5 * upf, Math.floor(height / storyH) * storyH + o.sill);
+    }
+    const list = placeOpening(openingsOf(b), o, upf);
+    updateItem(id, { openings: list } as Partial<BuildingItem>);
+    setSelectedOpening({ id, index: list.length - 1 });
+    setTimeout(() => saveHistory(), 50);
+  };
+  const removeOpening = (id: string, index: number) => {
+    const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+    if (!b?.openings) return;
+    updateItem(id, { openings: b.openings.filter((_, k) => k !== index) } as Partial<BuildingItem>);
+    setSelectedOpening(null);
+    setTimeout(() => saveHistory(), 50);
+    showExportNotice("Removed it", "info", { label: "Undo", run: handleUndo });
+  };
+
   const viewCallbacks: ViewCallbacks = {
     onSelect: id => {
       setSelectedId(id);
+      setSelectedOpening(null);
       if (id) setMode("select");
     },
     onPlace: (tool, p) => {
@@ -3706,20 +4108,58 @@ export default function SecurityPlanner() {
       updateItem(id, { openParts: [...openPartsOf(b), { pts, kind, floor: def.floorFt * upf }] } as Partial<BuildingItem>);
       setTimeout(() => saveHistory(), 50);
     },
-    onOpening: (id, p, height) => {
+    onOpening: (id, p, height) => addOpening(id, p, height, openingKindRef.current),
+    onContextMenu: info => {
+      setCtxMenu(info);
+      if (info.itemId) setSelectedId(info.itemId);
+      if (info.handle?.kind === "opening" && info.itemId && info.handle.index !== undefined) setSelectedOpening({ id: info.itemId, index: info.handle.index });
+    },
+    onSelectOpening: (id, index) => setSelectedOpening({ id, index }),
+    onToggleGable: (id, edge) => {
+      const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+      if (!b) return;
+      const upf = planGeoRef?.unitsPerFoot ?? 1;
+      const next = toggleGableWall(b, edge, upf);
+      updateItem(id, { gableWalls: next, roofType: buildingRoofKind(b, upf) === "flat" ? "hip" : b.roofType } as Partial<BuildingItem>);
+      setTimeout(() => saveHistory(), 50);
+    },
+    onWing: (id, edge, p) => {
+      setMode("select");
       const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
       if (!b) return;
       const upf = planGeoRef?.unitsPerFoot ?? 1;
       const outline = buildingLocalPoints(b);
-      const o = openingAt(outline, p, openingKindRef.current, upf);
-      // A window goes in the storey clicked
-      if (height !== null && !isDoor(o.kind)) o.sill = Math.max(1 * upf, Math.floor(height / (10 * upf)) * 10 * upf + o.sill);
-      const list = placeOpening(openingsOf(b), o, upf);
-      updateItem(id, { openings: list } as Partial<BuildingItem>);
-      setSelectedOpening({ id, index: list.length - 1 });
+      const a = outline[edge], c = outline[(edge + 1) % outline.length];
+      const len = Math.hypot(c.x - a.x, c.y - a.y);
+      const dir = { x: (c.x - a.x) / len, y: (c.y - a.y) / len };
+      const n = getEdgeOutwardNormal(outline, edge);
+      // A wing about 60% of the wall wide (at most 28 ft), 16 ft deep, centered where clicked
+      const width = Math.min(len * 0.6, 28 * upf), depth = 16 * upf;
+      const t = Math.max(width / 2, Math.min(len - width / 2, (p.x - a.x) * dir.x + (p.y - a.y) * dir.y));
+      const local = { x: a.x + dir.x * t + n.x * depth / 2, y: a.y + dir.y * t + n.y * depth / 2 };
+      const r = rotatePoint(local, b.rotation);
+      const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+      const stories = storiesOf(wall, upf);
+      const wing = createItem("building", b.x + r.x, b.y + r.y, { unitsPerFoot: upf }) as BuildingItem;
+      // Its local x runs along the wall; its ends (along the ridge) are the far wall and the one
+      // against the house: gables, like a real wing
+      const rot = b.rotation + (Math.atan2(dir.y, dir.x) * 180) / Math.PI;
+      Object.assign(wing, {
+        width,
+        height: depth,
+        points: rectanglePoints(width, depth),
+        rotation: ((rot % 360) + 360) % 360,
+        wallHeight: stories > 1 ? STORY_PRESETS[0].wallFt * upf : wall,
+        color: b.color,
+        mine: b.mine,
+        label: `${b.label || "Building"} wing`,
+        roofType: "gable",
+        gableWalls: [0, 2]
+      });
+      setItems(prev => [...prev, wing]);
+      setSelectedId(wing.id);
       setTimeout(() => saveHistory(), 50);
     },
-    onSelectOpening: (id, index) => setSelectedOpening({ id, index }),
     onAim: p => {
       if (!aimingCameraId) return;
       aimCameraAt(aimingCameraId, p);
@@ -3781,6 +4221,7 @@ export default function SecurityPlanner() {
 
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
+    if (mode === "add-wing") return "Click the wall the wing comes out of · Esc to stop";
     if (mode === "add-opening") return `Click a wall to put a ${OPENING_DEFAULTS[openingKind].label.toLowerCase()} there · Esc to stop`;
     if (mode === "add-open-part") return `Click just outside a wall to attach a ${OPEN_PART_DEFAULTS[openPartKind].label.toLowerCase()} to it, just inside to set one into the house, or drag its shape · Esc to cancel`;
     if (isTerrainMode && terrainTool === "woods") return "Woods: click and hold (or drag) to plant trees · Shift to clear them · Strength sets how dense";
@@ -3792,6 +4233,7 @@ export default function SecurityPlanner() {
       case "trace-building": return backgroundImg ? "Click a roof on the map to trace it into a 3D building · Esc when done" : "Import your site first — this tool traces roofs from the satellite map";
       case "add-tree": return "Click to place a tree";
       case "add-parking": return "Click to place a vehicle";
+      case "add-paving": return "Click to place it, then drag its corners to fit";
       case "add-label": return "Click to add a text label";
       case "add-target": return "Click a door, gate or driveway you want covered · Esc to cancel";
       case "add-recorder": return "Click where the recorder (NVR) goes, such as a closet or garage · Esc to cancel";
@@ -3800,6 +4242,7 @@ export default function SecurityPlanner() {
         if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
         if (selectedCamera) return "Drag the camera to move it · blue dot aims it · side dots widen · tip sets range · bar above sets height";
         if (selectedItem?.type === "building") return "Drag to move · corners reshape · pull an edge's middle dot to add a corner · bar on top sets height · ↻ rotates";
+        if (selectedItem?.type === "paving") return "Drag to move · corners reshape · pull an edge's middle dot to add a bend · ↻ rotates";
         if (selectedItem) return "Drag to move it · Delete removes it";
         return "Drag to pan · scroll or pinch to zoom · right-drag or Shift+drag to rotate and tilt";
     }
@@ -4588,6 +5031,16 @@ export default function SecurityPlanner() {
                     onFix={fixSpot}
                     night={nightCoverage}
                     onToggleNight={setNightCoverage}
+                    protectFrom={(() => {
+                      const own = (items.filter(i => i.type === "building") as BuildingItem[]).filter(b => isOwnBuilding(b) && !b.openSides);
+                      if (!own.length) return null;
+                      const all = own.map(protectFrom);
+                      return { doors: all.some(p => p.doors), windows: all.some(p => p.windows), driveways: all.some(p => p.driveways) };
+                    })()}
+                    onProtectFrom={(patch: Partial<ProtectFrom>) => {
+                      setItems(prev => prev.map(i => (i.type === "building" && isOwnBuilding(i as BuildingItem) ? { ...i, protect: { ...protectFrom(i as BuildingItem), ...patch } } as CanvasItem : i)));
+                      setTimeout(() => saveHistory(), 80);
+                    }}
                   />
                 }
               />
@@ -4695,7 +5148,7 @@ export default function SecurityPlanner() {
 
       <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen && !povCamId ? 352 : 0, right: 0 }}>
         {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
-        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure" && mode !== "add-open-part" && mode !== "add-opening")) && (
+        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure" && mode !== "add-open-part" && mode !== "add-opening" && mode !== "add-wing")) && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
               {isTerrainMode ? (
                 <div className="flex flex-col gap-4" data-testid="terrain-panel">
@@ -5159,6 +5612,7 @@ export default function SecurityPlanner() {
         {/* --- Main Workspace --- */}
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
           <div className="bg-zinc-900 relative overflow-hidden w-full h-full">
+            {ctxMenu && createPortal(renderContextMenu(ctxMenu), document.body)}
             <SiteViewport
               doc={viewDoc}
               selectedId={selectedId}
@@ -5169,10 +5623,14 @@ export default function SecurityPlanner() {
               hidden={viewMode === "nvr"}
               actions={selectedItem && mode === "select" && !isTerrainMode && !interacting ? {
                 duplicate: duplicateSelected,
-                rotate: selectedItem.type === "target" || selectedItem.type === "recorder" || (selectedCamera?.mount?.type === "building") ? undefined : () => rotateSelected(15),
+                rotate: selectedItem.locked || selectedItem.type === "target" || selectedItem.type === "recorder" || (selectedCamera?.mount?.type === "building") ? undefined : () => rotateSelected(15),
                 look: selectedCamera ? () => lookThrough(selectedCamera.id) : undefined,
-                remove: () => { deleteItem(selectedItem.id); setTimeout(() => saveHistory(), 50); },
-                zoomTo: zoomToSelection
+                remove: selectedItem.locked ? undefined : () => { deleteItem(selectedItem.id); setTimeout(() => saveHistory(), 50); },
+                zoomTo: zoomToSelection,
+                locked: !!selectedItem.locked,
+                toggleLock: () => toggleLock(selectedItem.id),
+                extra: selectedItem.type === "building" && !selectedItem.locked ? renderBuildingQuickBar(selectedItem as BuildingItem) : undefined,
+                only: selectedItem.type === "building" && !selectedItem.locked && selectedOpening?.id === selectedItem.id && !!(selectedItem as BuildingItem).openings?.[selectedOpening.index]
               } : null}
               snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList }}
               onReady={v => { viewRef.current = v; }}
@@ -5391,6 +5849,89 @@ export default function SecurityPlanner() {
                     )}
                   </div>
                 )}
+                {siteLocation && (
+                  <div className="relative pointer-events-auto">
+                    <button
+                      data-popover-toggle
+                      onClick={() => setSunOpen(o => !o)}
+                      aria-expanded={sunOpen}
+                      className="flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-zinc-800"
+                      title="Sun and shadows: pick the date and time"
+                    >
+                      <Sun className="w-3.5 h-3.5 text-amber-300" />
+                      {sunTime === null ? "Now" : sunMoment.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                      {sunNow && sunNow.altitude <= 0 && <span className="text-slate-400">· night</span>}
+                    </button>
+                    {sunOpen && (
+                      <div data-popover className="absolute bottom-full mb-2 left-0 w-72 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-3 space-y-2.5 z-50" data-testid="sun-panel">
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-slate-100">Sun and shadows</div>
+                          <button onClick={() => setSunTime(null)} aria-pressed={sunTime === null} className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border ${sunTime === null ? "border-amber-400/50 bg-amber-500/20 text-amber-100" : "border-white/10 text-slate-300 hover:bg-white/10"}`}>
+                            Now
+                          </button>
+                        </div>
+                        <label className="block text-[11px] text-slate-300">
+                          <span className="flex justify-between">
+                            <span>Time of day</span>
+                            <span className="font-semibold text-slate-100">{sunMoment.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1439}
+                            step={5}
+                            value={sunMoment.getHours() * 60 + sunMoment.getMinutes()}
+                            onChange={e => {
+                              const m = Number(e.target.value);
+                              const d = new Date(sunMoment);
+                              d.setHours(Math.floor(m / 60), m % 60, 0, 0);
+                              setSunTime(d.getTime());
+                            }}
+                            className="w-full accent-amber-400"
+                            aria-label="Time of day"
+                          />
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <label className="flex-1 text-[11px] text-slate-300">
+                            Date
+                            <input
+                              type="date"
+                              value={`${sunMoment.getFullYear()}-${String(sunMoment.getMonth() + 1).padStart(2, "0")}-${String(sunMoment.getDate()).padStart(2, "0")}`}
+                              onChange={e => {
+                                const [y, mo, da] = e.target.value.split("-").map(Number);
+                                if (!y || !mo || !da) return;
+                                const d = new Date(sunMoment);
+                                d.setFullYear(y, mo - 1, da);
+                                setSunTime(d.getTime());
+                              }}
+                              className="mt-0.5 w-full rounded bg-zinc-800 border border-white/10 px-1.5 py-1 text-xs text-slate-100"
+                              aria-label="Date"
+                            />
+                          </label>
+                          <label className="flex-1 text-[11px] text-slate-300">
+                            Time
+                            <input
+                              type="time"
+                              value={`${String(sunMoment.getHours()).padStart(2, "0")}:${String(sunMoment.getMinutes()).padStart(2, "0")}`}
+                              onChange={e => {
+                                const [h, mi] = e.target.value.split(":").map(Number);
+                                if (!Number.isFinite(h) || !Number.isFinite(mi)) return;
+                                const d = new Date(sunMoment);
+                                d.setHours(h, mi, 0, 0);
+                                setSunTime(d.getTime());
+                              }}
+                              className="mt-0.5 w-full rounded bg-zinc-800 border border-white/10 px-1.5 py-1 text-xs text-slate-100"
+                              aria-label="Time"
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          {sunNow ? (sunNow.altitude > 0 ? `Sun ${Math.round(sunNow.altitude)}° up, from the ${["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"][Math.round(sunNow.azimuth / 45) % 8]}.` : "The sun is down: use Night in a camera view to see infrared.") : ""} Shadows fall as they really do at your address.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {(hasTerrain || (backgroundImg && items.some(i => i.type === "building"))) && (
                 <div className="flex items-center gap-1 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto">
                 {hasTerrain && (
@@ -5535,7 +6076,7 @@ export default function SecurityPlanner() {
                     <span className="truncate">{selectedCamera.label}</span>
                   </h2>
                 ) : (
-                  <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {getItemTypeLabel(selectedItem.type)}</h2>
+                  <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {selectedItem.type === "paving" ? PAVING_KINDS[(selectedItem as PavingItem).kind].label : getItemTypeLabel(selectedItem.type)}</h2>
                 )}
                 <button
                   onClick={() => setSelectedId(null)}
@@ -5635,6 +6176,40 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
+              {selectedItem.type === "paving" && (() => {
+                const pv = selectedItem as PavingItem;
+                const choice = (on: boolean) => `px-2 py-1.5 text-xs rounded transition-colors ${on ? "bg-blue-600 text-white" : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`;
+                return (
+                  <div className={panelSectionLoose}>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">What is it?</label>
+                      <div className="grid grid-cols-3 gap-1" role="group" aria-label="Paving kind">
+                        {(Object.keys(PAVING_KINDS) as PavingKind[]).map(k => (
+                          <button
+                            key={k}
+                            aria-pressed={pv.kind === k}
+                            onClick={() => updateItem(pv.id, { kind: k, label: pv.label === PAVING_KINDS[pv.kind].label ? PAVING_KINDS[k].label : pv.label } as Partial<PavingItem>)}
+                            className={choice(pv.kind === k)}
+                          >
+                            {PAVING_KINDS[k].label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Surface</label>
+                      <div className="grid grid-cols-2 gap-1" role="group" aria-label="Surface">
+                        {(Object.keys(PAVING_SURFACES) as PavingSurface[]).map(k => (
+                          <button key={k} aria-pressed={pv.surface === k} onClick={() => updateItem(pv.id, { surface: k } as Partial<PavingItem>)} className={choice(pv.surface === k)}>
+                            {PAVING_SURFACES[k]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-400">Drag its corners on the map to match the photo. Pull the dot in the middle of an edge to add a bend; double-click a corner to remove it.</p>
+                  </div>
+                );
+              })()}
               {selectedItem.type === "parking" && (
                 <div className={panelSectionLoose}>
                   {/* Vehicle Type Selector */}
@@ -5769,6 +6344,79 @@ export default function SecurityPlanner() {
                       <span className="block text-[11px] text-slate-400">A roof on posts with no walls at all. For a porch or carport that's part of a house, draw it below instead.</span>
                     </span>
                   </label>
+                  {(() => {
+                    const b = selectedItem as BuildingItem;
+                    const upf = planGeoRef?.unitsPerFoot ?? 1;
+                    const wall = b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf;
+                    const current = b.roofType ?? "auto";
+                    const preset = STORY_PRESETS.find(p => Math.abs(p.wallFt * upf - wall) < 0.6 * upf);
+                    return (
+                      <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-2" data-testid="building-shape">
+                        <div className="text-[11px] font-semibold text-slate-300">Stories</div>
+                        <div className="grid grid-cols-4 gap-1" role="group" aria-label="Stories">
+                          {STORY_PRESETS.map(p => (
+                            <button
+                              key={p.label}
+                              type="button"
+                              aria-pressed={preset === p}
+                              onClick={() => { updateItem(b.id, { wallHeight: p.wallFt * upf }); setTimeout(() => saveHistory(), 50); }}
+                              className={`py-1.5 rounded-lg text-xs font-semibold border ${preset === p ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                              title={`${p.label} ${p.label === "1" ? "story" : "stories"}: walls ${p.wallFt} ft to the eaves`}
+                            >
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="text-[11px] font-semibold text-slate-300">Roof</div>
+                        <div className="grid grid-cols-4 gap-1" role="group" aria-label="Roof shape">
+                          {(["auto", "gable", "hip", "flat"] as const).map(kind => (
+                            <button
+                              key={kind}
+                              type="button"
+                              aria-pressed={current === kind && !b.gableWalls}
+                              title={kind === "auto" ? "Pick from the footprint: pitched for houses, flat for large buildings" : `${kind[0].toUpperCase()}${kind.slice(1)} roof`}
+                              onClick={() => { updateItem(b.id, { roofType: kind, gableWalls: undefined } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); }}
+                              className={`py-1.5 rounded-lg text-[11px] font-semibold border capitalize ${current === kind && !b.gableWalls ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                            >
+                              {kind}
+                            </button>
+                          ))}
+                        </div>
+                        {(b.roofType ?? "auto") !== "flat" && (
+                          <label className="block text-[11px] text-slate-300">
+                            <span className="flex justify-between"><span>Roof slope</span><span className="font-semibold text-slate-100">{b.roofPitch ? `${b.roofPitch} in 12` : "standard"}</span></span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={14}
+                              step={1}
+                              value={b.roofPitch ?? 5}
+                              onChange={e => updateItem(b.id, { roofPitch: Number(e.target.value) } as Partial<BuildingItem>)}
+                              onPointerUp={() => setTimeout(() => saveHistory(), 50)}
+                              className="w-full accent-emerald-500"
+                              aria-label="Roof slope (inches per foot)"
+                            />
+                          </label>
+                        )}
+                        <p className="text-[11px] text-slate-400">
+                          {b.gableWalls ? "Custom roof ends. " : ""}Click the little roof shapes beside each wall on the map to make that end a gable <span className="text-purple-300">▲</span> or a hip.
+                        </p>
+                        {mode === "add-wing" ? (
+                          <button onClick={() => setMode("select")} aria-pressed className="w-full py-1.5 rounded-md text-xs font-semibold border bg-emerald-500/20 border-emerald-400/40 text-emerald-200">
+                            Click the wall the wing comes out of… (Esc to stop)
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setMode("add-wing")}
+                            className="w-full py-1.5 rounded-md text-xs font-semibold border bg-white/5 border-white/10 text-slate-200 hover:bg-white/10"
+                            title="A wing or addition coming out of a wall, with its own stories and roof (like a one-story wing on a two-story house)"
+                          >
+                            + Add a wing
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {!(selectedItem as BuildingItem).openSides && (
                     <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-2" data-testid="open-parts">
                       <div className="text-sm font-semibold text-slate-100">Porches, decks, carports and patios</div>
@@ -5826,6 +6474,22 @@ export default function SecurityPlanner() {
                                 </button>
                               ))}
                             </div>
+                            {partRoof(buildingLocalPoints(b), part) === "own" && (
+                              <label className="block text-[11px] text-slate-300">
+                                <span className="flex justify-between"><span>Roof slope</span><span className="font-semibold text-slate-100">{part.pitch ?? 3} in 12</span></span>
+                                <input
+                                  type="range"
+                                  min={0.5}
+                                  max={8}
+                                  step={0.5}
+                                  value={part.pitch ?? 3}
+                                  onChange={e => setPart({ pitch: Number(e.target.value) }, false)}
+                                  onPointerUp={() => setTimeout(() => saveHistory(), 50)}
+                                  className="w-full accent-amber-500"
+                                  aria-label={`Roof slope of part ${i + 1} (inches per foot)`}
+                                />
+                              </label>
+                            )}
                             <label className="block text-[11px] text-slate-300">
                               <span className="flex justify-between"><span>Floor height</span><span className="font-semibold text-slate-100">{floorFt === 0 ? "on the ground" : `${floorFt} ft up`}</span></span>
                               <input
@@ -5841,6 +6505,9 @@ export default function SecurityPlanner() {
                                 aria-label={`Floor height of part ${i + 1} (ft)`}
                               />
                             </label>
+                            {part.floor > 0 && hasRailing(part, upf) && (
+                              <p className="text-[11px] text-slate-400">Steps: drag the striped handle along the railing. Right-click a side for steps or no railing there.</p>
+                            )}
                             {part.floor > 0 && (
                               <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
                                 <input type="checkbox" className="accent-amber-500" checked={hasRailing(part, upf)} onChange={e => setPart({ railing: e.target.checked })} />
@@ -5971,6 +6638,12 @@ export default function SecurityPlanner() {
                                 Shutters
                               </label>
                             )}
+                            <div className="flex flex-wrap items-center gap-1 text-[10px] text-slate-400">
+                              Same size for every {OPENING_DEFAULTS[sel.kind].label.toLowerCase()}:
+                              {([["wall", "on this wall"], ["house", "on this building"], ["all", "on all my buildings"]] as const).map(([scope, label]) => (
+                                <button key={scope} onClick={() => applyOpeningSize(b, selIndex, scope)} className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10">{label}</button>
+                              ))}
+                            </div>
                           </div>
                         )}
                         {list && (
@@ -5995,7 +6668,7 @@ export default function SecurityPlanner() {
                   )}
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Wall Height</span>
-                    <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft · ~{Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11))} {Math.max(1, Math.round(((selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight) / 11)) === 1 ? "story" : "stories"}</span>
+                    <span>{(selectedItem as BuildingItem).wallHeight ?? DEFAULT_BUILDING.wallHeight} ft to the eaves</span>
                   </label>
                   <div className="flex gap-2">
                     <input
@@ -6012,26 +6685,6 @@ export default function SecurityPlanner() {
                       onChange={e => updateItem(selectedItem.id, { wallHeight: parseInt(e.target.value) })}
                       className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
                     />
-                  </div>
-                  <div className="space-y-1.5 pt-1">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Roof</label>
-                    <div className="grid grid-cols-4 gap-1" role="group" aria-label="Roof shape">
-                      {(["auto", "gable", "hip", "flat"] as const).map(kind => {
-                        const current = (selectedItem as BuildingItem).roofType ?? "auto";
-                        return (
-                          <button
-                            key={kind}
-                            type="button"
-                            aria-pressed={current === kind}
-                            title={kind === "auto" ? "Pick from the footprint: pitched for houses, flat for large buildings" : `${kind[0].toUpperCase()}${kind.slice(1)} roof`}
-                            onClick={() => updateItem(selectedItem.id, { roofType: kind })}
-                            className={`py-1.5 rounded-lg text-[11px] font-semibold border capitalize ${current === kind ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-100" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
-                          >
-                            {kind}
-                          </button>
-                        );
-                      })}
-                    </div>
                   </div>
                 </div>
               )}
@@ -6448,7 +7101,7 @@ export default function SecurityPlanner() {
                   className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-red-500/30 text-red-400 hover:text-red-200 hover:bg-red-500/10 transition-colors text-sm font-semibold"
                 >
                   <Trash2 className="w-4 h-4" />
-                  Delete {getItemTypeLabel(selectedItem.type)}
+                  Delete {selectedItem.type === "paving" ? PAVING_KINDS[(selectedItem as PavingItem).kind].label.toLowerCase() : getItemTypeLabel(selectedItem.type)}
                 </button>
               </div>
             </div>

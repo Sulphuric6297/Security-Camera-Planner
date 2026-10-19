@@ -26,6 +26,9 @@ export type ViewDoc = {
   roofPhoto: boolean;
   /** North arrow shown when the plan is georeferenced. */
   geo: boolean;
+  /** Where the sun is for the chosen date and time at the site (degrees: azimuth clockwise from
+   * north, altitude above the horizon); null: a pleasant default afternoon light. */
+  sun: { azimuth: number; altitude: number } | null;
 };
 
 /** The active tool, as far as the map view cares. */
@@ -40,6 +43,8 @@ export type ViewTool = {
   mapMove: boolean;
   /** What a click would place (sized like the real thing), for the ghost preview. */
   preview: CanvasItem | null;
+  /** The window or door picked on the selected building (its index), which gets size handles. */
+  opening: number | null;
 };
 
 export type ViewInfo = {
@@ -65,6 +70,11 @@ export type ViewCallbacks = {
    * height clicked on the wall when known), and one picked to edit. */
   onOpening: (buildingId: string, p: P, height: number | null) => void;
   onSelectOpening: (buildingId: string, index: number) => void;
+  /** A wall's roof end switched between gable and hip; a wing added on a wall (point in the building's frame). */
+  onToggleGable: (buildingId: string, edge: number) => void;
+  onWing: (buildingId: string, edge: number, p: P) => void;
+  /** A right-click (without dragging): what is under the pointer, for a menu of actions there. */
+  onContextMenu: (info: ContextInfo) => void;
   /** Live edits while dragging (no undo step); onCommit ends the gesture. */
   onChange: (id: string, patch: Partial<CanvasItem>) => void;
   onCommit: () => void;
@@ -74,4 +84,16 @@ export type ViewCallbacks = {
   onHover: (p: P | null) => void;
   onPose: (pose: "top" | "tilt") => void;
   onInteraction: (active: boolean) => void;
+};
+
+/** What a right-click landed on: an item (and a handle on it), the ground point, and for a
+ * building the point in its own frame (on the wall, with the height up it, when a wall was hit). */
+export type ContextInfo = {
+  clientX: number;
+  clientY: number;
+  itemId: string | null;
+  handle: { kind: string; index?: number } | null;
+  ground: P | null;
+  local: P | null;
+  height: number | null;
 };

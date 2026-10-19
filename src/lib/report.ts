@@ -8,6 +8,8 @@ export type ReportCamera = {
   /** e.g. "on House" or "free-standing" */
   mount: string;
   lensLabel: string;
+  /** The real camera model, when one was picked ("UniFi G5 Bullet"). */
+  modelLabel?: string;
   hFov: number;
   resolutionLabel: string;
   tiltDeg: number;
@@ -63,7 +65,9 @@ export const compassFromRotation = (rotation: number) => {
 export const buildPartsList = (cameras: ReportCamera[]) => {
   const groups = new Map<string, { description: string; qty: number; numbers: number[] }>();
   cameras.forEach(c => {
-    const description = `${c.resolutionLabel} camera, ${c.lensLabel} lens (${Math.round(c.hFov)}°), ${c.mount.startsWith("on ") ? "wall/eave mount" : "pole or free-standing mount"}`;
+    const description = c.modelLabel
+      ? `${c.modelLabel} (${c.resolutionLabel}, ${Math.round(c.hFov)}°), ${c.mount.startsWith("on ") ? "wall/eave mount" : "pole or free-standing mount"}`
+      : `${c.resolutionLabel} camera, ${c.lensLabel} lens (${Math.round(c.hFov)}°), ${c.mount.startsWith("on ") ? "wall/eave mount" : "pole or free-standing mount"}`;
     const g = groups.get(description) ?? { description, qty: 0, numbers: [] };
     g.qty++;
     g.numbers.push(c.number);

@@ -11,7 +11,7 @@ import {
 } from "../constants";
 import { rectanglePoints } from "./geometry";
 import { vFovFromH } from "./camera";
-import type { CanvasItem, ParkingItem, TargetItem, TargetKind } from "../types";
+import type { CanvasItem, ParkingItem, PavingKind, PavingSurface, TargetItem, TargetKind } from "../types";
 
 export type VehicleType = NonNullable<ParkingItem["vehicleType"]>;
 
@@ -35,7 +35,20 @@ export const TREE_SIZES = {
 export type TreeSize = keyof typeof TREE_SIZES;
 export const DEFAULT_TREE = TREE_SIZES.medium;
 
-export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target" | "recorder";
+export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target" | "recorder" | "paving";
+
+/** Driveways, walkways and patios: their usual size (ft) and surface when first placed. */
+export const PAVING_KINDS: Record<PavingKind, { label: string; width: number; length: number; surface: PavingSurface }> = {
+  driveway: { label: "Driveway", width: 12, length: 40, surface: "asphalt" },
+  walkway: { label: "Walkway", width: 4, length: 20, surface: "concrete" },
+  patio: { label: "Patio", width: 14, length: 14, surface: "pavers" }
+};
+export const PAVING_SURFACES: Record<PavingSurface, string> = {
+  asphalt: "Asphalt",
+  concrete: "Concrete",
+  gravel: "Gravel",
+  pavers: "Pavers"
+};
 
 /** Spots to protect, with the detail you usually want there. */
 export const TARGET_KINDS: Record<TargetKind, { label: string; goal: TargetItem["goal"] }> = {
@@ -88,6 +101,7 @@ export const createItem = (
     treeType?: "deciduous" | "conifer" | "palm" | "bush";
     vehicleType?: VehicleType;
     targetKind?: TargetKind;
+    pavingKind?: PavingKind;
   } = {}
 ): CanvasItem => {
   const u = opts.unitsPerFoot && opts.unitsPerFoot > 0 ? opts.unitsPerFoot : 1;
@@ -155,6 +169,13 @@ export const createItem = (
     }
     case "recorder":
       return { ...common, type: "recorder", label: "Recorder" } as CanvasItem;
+    case "paving": {
+      const kind = opts.pavingKind ?? "driveway";
+      const k = PAVING_KINDS[kind];
+      // Lengthwise along the plan's y, like a driveway running from the street to the house
+      const w = k.width * u, d = k.length * u;
+      return { ...common, type: "paving", kind, surface: k.surface, label: k.label, width: w, height: d, points: rectanglePoints(w, d) } as CanvasItem;
+    }
   }
 };
 

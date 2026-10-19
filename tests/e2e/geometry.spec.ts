@@ -86,12 +86,14 @@ test.describe("windows and doors", () => {
     const { autoOpenings, openingAt, placeOpening } = await import("../../src/lib/openings");
     const house = [{ x: -20, y: -15 }, { x: 20, y: -15 }, { x: 20, y: 15 }, { x: -20, y: 15 }];
     const auto = autoOpenings(house, 14, 1);
-    // 40 ft walls: 3 windows each, 30 ft walls: 3 (rounded 2.5); one storey
-    expect(auto.filter(o => o.edge === 0)).toHaveLength(3);
+    // Windows are kept by where they are: 40 ft walls get 3 each, one storey
+    const onWall = (y: number) => (o: any) => Math.abs(o.y - y) < 1e-6;
+    expect(auto.filter(onWall(-15))).toHaveLength(3);
+    // A door clicked just outside the south wall lands on it
     const door = openingAt(house, { x: 0, y: 15.5 }, "door", 1);
-    expect(door.edge).toBe(2);
+    expect(door.y).toBeCloseTo(15, 6);
     const next = placeOpening(auto, door, 1);
-    expect(next.filter(o => o.edge === 2 && o.kind === "window").length).toBe(auto.filter(o => o.edge === 2).length - 1);
+    expect(next.filter(o => onWall(15)(o) && o.kind === "window").length).toBe(auto.filter(onWall(15)).length - 1);
     expect(next.some(o => o.kind === "door")).toBe(true);
   });
 });

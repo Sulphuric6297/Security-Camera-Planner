@@ -30,6 +30,7 @@ export const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
   if (type === "image") return plural ? "Overlays" : "Overlay";
   if (type === "target") return plural ? "Protected spots" : "Protected spot";
   if (type === "recorder") return plural ? "Recorders" : "Recorder";
+  if (type === "paving") return plural ? "Driveways and paths" : "Driveway or path";
   return type;
 };
 
@@ -63,25 +64,36 @@ const CAR_PROFILES: Record<NonNullable<ParkingItem["vehicleType"]>, { body: Prof
   }
 };
 
-const profileGeometry = (profile: Profile, length: number, height: number, width: number, bevel: number) => {
-  // Shape in (z, y), extruded along x, then centered on x.
-  const shape = new THREE.Shape(profile.map(([z, y]) => new THREE.Vector2(z * length, y * height)));
-  const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: Math.max(0.01, width - bevel * 2),
-    bevelEnabled: bevel > 0,
-    bevelThickness: bevel,
-    bevelSize: bevel,
-    bevelSegments: 3,
-    curveSegments: 4
-  });
-  // ExtrudeGeometry extrudes along +z: map shape (x=z, y) -> world (z, y) and extrusion -> x.
-  geo.rotateY(-Math.PI / 2);
-  geo.translate((width - bevel * 2) / 2, 0, 0);
-  geo.computeVertexNormals();
-  return geo;
+/** Paint, glass, rubber and trim, shared by every car (paint per color). */
+const carMats = new Map<string, THREE.Material>();
+const carMat = (key: string, make: () => THREE.Material) => {
+  let m = carMats.get(key);
+  if (!m) { m = make(); m.userData.shared = true; carMats.set(key, m); }
+  return m;
 };
 
-/** A real-size car (width x length x height in plan units) of the item's vehicle type. */
+/** The top line of a side profile at a point along the car (its upper chain, smoothed). */
+const profileTop = (profile: Profile) => {
+  // The body polygon runs front-bottom, up over the top, down to rear-bottom: its top chain is
+  // everything but the first and last points.
+  const chain = profile.slice(1, -1);
+  const curve = new THREE.SplineCurve(chain.map(([z, y]) => new THREE.Vector2(z, y)));
+  const samples = curve.getPoints(160);
+  return (z: number) => {
+    for (let i = 1; i < samples.length; i++) {
+      const a = samples[i - 1], b = samples[i];
+      if ((z >= a.x && z <= b.x) || (z <= a.x && z >= b.x)) return a.y + ((b.y - a.y) * (z - a.x)) / (b.x - a.x || 1);
+    }
+    return z < samples[0].x ? samples[0].y : samples[samples.length - 1].y;
+  };
+};
+
+/**
+ * A real-size car (width x length x height in plan units) of the item's vehicle type: one smooth
+ * body lofted from rounded cross-sections along its side profile (narrower toward the roof and
+ * rounded at the ends), its windows cut from the same surface with painted pillars between them,
+ * clearcoat paint, reflective glass, and wheels with spoked rims in dark wheel arches.
+ */
 export const create3dCar = (item: ParkingItem): THREE.Group => {
   const group = new THREE.Group();
   const width = Math.max(item.width, 0.5);
@@ -90,135 +102,176 @@ export const create3dCar = (item: ParkingItem): THREE.Group => {
   const type = resolveVehicleType(item) ?? "sedan";
   const profile = CAR_PROFILES[type];
 
-  const paint = new THREE.MeshStandardMaterial({ color: item.color, metalness: 0.45, roughness: 0.32 });
-  const glass = new THREE.MeshStandardMaterial({ color: "#121a24", metalness: 0.1, roughness: 0.18, envMapIntensity: 0.35 });
-  const rubber = new THREE.MeshStandardMaterial({ color: "#121417", roughness: 0.9 });
-  const rimMat = new THREE.MeshStandardMaterial({ color: "#b8bec7", metalness: 0.8, roughness: 0.3 });
-  const trimMat = new THREE.MeshStandardMaterial({ color: "#1f2328", roughness: 0.7 });
+  const paint = carMat(`paint-${item.color}`, () => new THREE.MeshPhysicalMaterial({ color: item.color, metalness: 0.3, roughness: 0.4, clearcoat: 1, clearcoatRoughness: 0.1 }));
+  const glass = carMat("glass", () => new THREE.MeshStandardMaterial({ color: "#0e141b", metalness: 0.85, roughness: 0.06, envMapIntensity: 1.2 }));
+  const rubber = carMat("rubber", () => new THREE.MeshStandardMaterial({ color: "#151719", roughness: 0.92 }));
+  const rimMat = carMat("rim", () => new THREE.MeshStandardMaterial({ color: "#c3c8cf", metalness: 0.85, roughness: 0.28 }));
+  const trimMat = carMat("trim", () => new THREE.MeshStandardMaterial({ color: "#16191d", roughness: 0.65 }));
 
-  const bevel = Math.min(width, height) * 0.06;
-  // Real cabins narrow toward the roof (tumblehome): pull the sides in above the beltline.
-  const beltY = Math.min(...profile.glass.map(p => p[1])) * height;
-  const taper = (geo: THREE.BufferGeometry) => {
-    const pos = geo.getAttribute("position");
-    for (let i = 0; i < pos.count; i++) {
-      const y = pos.getY(i);
-      if (y > beltY) pos.setX(i, pos.getX(i) * (1 - 0.16 * ((y - beltY) / Math.max(1e-6, height - beltY))));
+  const top = profileTop(profile.body);
+  const belt = Math.min(...profile.glass.map(p => p[1])); // window line, fraction of height
+  const roofTop = Math.max(...profile.body.map(p => p[1]));
+  const gz = profile.glass.map(p => p[0]); // windshield base, roof front, roof rear, rear glass base
+  const bottom = Math.min(...profile.body.map(p => p[1])); // underside (above the wheels' centers)
+
+  // --- Body: rings of a rounded-rectangle section, one per station along the car ---
+  const stations = 72, around = 36;
+  const pos: number[] = [];
+  const zs: number[] = [];
+  for (let i = 0; i <= stations; i++) {
+    // More stations near the ends, where the shape turns fastest
+    const u = i / stations;
+    zs.push(-0.5 + 0.5 * (1 - Math.cos(Math.PI * u)));
+  }
+  // Plan shape: full width along the sides, rounding in to a flat nose and tail about 4/5 as wide
+  const endTaper = (e: number) => 0.8 + 0.2 * Math.pow(Math.max(0, 1 - Math.pow(e, 4)), 0.25);
+  const ringOf = (zf: number) => {
+    const yTop = top(zf) * height, y0 = bottom * height;
+    // Plan shape: the ends round off, the corners pull in
+    const e = Math.min(1, Math.abs(zf) / 0.5);
+    const halfW = (width / 2) * endTaper(e);
+    const pts: [number, number][] = [];
+    for (let k = 0; k < around; k++) {
+      // Around the section: bottom (theta -pi/2) up the right side to the top (pi/2), then down the left
+      const th = -Math.PI / 2 + (2 * Math.PI * k) / around;
+      const c = Math.cos(th), sn = Math.sin(th);
+      const ex = 2 / 5; // superellipse: square-ish with rounded corners
+      const x0 = Math.sign(c) * Math.pow(Math.abs(c), ex);
+      const yN = Math.sign(sn) * Math.pow(Math.abs(sn), ex); // -1 bottom .. 1 top
+      const y = y0 + ((yN + 1) / 2) * (yTop - y0);
+      // Sides: a gentle bulge at the shoulder, the cabin leaning in above the window line
+      const yb = belt * height;
+      let f = 1;
+      if (y <= yb) f = 0.95 + 0.05 * Math.sin((Math.PI * Math.max(0, y - bottom * height)) / Math.max(1e-6, yb - bottom * height));
+      else f = 1 - 0.2 * Math.min(1, (y - yb) / Math.max(1e-6, roofTop * height - yb));
+      pts.push([x0 * halfW * f, y]);
     }
-    geo.computeVertexNormals();
-    return geo;
+    return pts;
   };
-  // The car in three parts, from its side profile: painted lower body up to the window line, a
-  // glass cabin above it (windshield, side and rear windows all show), and a painted roof panel.
-  const beltFrac = beltY / height;
-  // The part of the side profile between two heights (polygon clipped to a horizontal band).
-  const clampProfile = (lo: number, hi: number): Profile => {
-    const clip = (pts: Profile, keep: (p: [number, number]) => boolean, cut: (a: [number, number], b: [number, number]) => [number, number]) => {
-      const out: Profile = [];
-      pts.forEach((cur, i) => {
-        const prev = pts[(i + pts.length - 1) % pts.length];
-        if (keep(cur)) {
-          if (!keep(prev)) out.push(cut(prev, cur));
-          out.push(cur);
-        } else if (keep(prev)) out.push(cut(prev, cur));
-      });
-      return out;
-    };
-    const at = (y: number) => (a: [number, number], b: [number, number]): [number, number] => [a[0] + ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]), y];
-    return clip(clip(profile.body, p => p[1] >= lo, at(lo)), p => p[1] <= hi, at(hi));
+  for (const zf of zs) for (const [x, y] of ringOf(zf)) pos.push(x, y, zf * length);
+  const bodyIdx: number[] = [], glassIdx: number[] = [];
+  // Which faces are window: in the cabin (between the window line and the roof edge, along the
+  // glass), but not the pillars between windows.
+  const isGlass = (zf: number, y: number, xFrac: number) => {
+    const yf = y / height;
+    if (zf < gz[0] || zf > gz[3]) return false;
+    // The glass shape in side view: between its base line and the line from its top corners
+    const tAt = (a: [number, number], b: [number, number]) => a[1] + ((b[1] - a[1]) * (zf - a[0])) / (b[0] - a[0] || 1);
+    const g = profile.glass as [number, number][];
+    const upper = zf < g[1][0] ? tAt(g[0], g[1]) : zf > g[2][0] ? tAt(g[2], g[3]) : tAt(g[1], g[2]);
+    if (yf < belt + 0.015 || yf > upper - 0.02) return false;
+    // Side windows: pillars at the windshield (A), the middle (B) and the back (C)
+    if (Math.abs(xFrac) > 0.55) {
+      const bz = (g[1][0] + g[2][0]) / 2;
+      const pillar = 0.018;
+      if (type !== "van" && type !== "truck" && Math.abs(zf - bz) < pillar) return false;
+      if (zf < g[1][0] - 0.01 && yf > tAt(g[0], g[1]) - 0.06) return false; // A-pillar edge
+      if (zf > g[2][0] + 0.01 && yf > tAt(g[2], g[3]) - 0.06) return false; // C-pillar edge
+      return true;
+    }
+    // Windshield and rear window: the sloped front and back of the cabin
+    return zf < g[1][0] + 0.01 || zf > g[2][0] - 0.01;
   };
-  // The rounded edge (bevel) grows the outline outward: build the body that much shorter so the
-  // whole car is exactly its stated length.
-  const body = new THREE.Mesh(taper(profileGeometry(clampProfile(0, beltFrac), length - 2 * bevel, height, width, bevel)), paint);
+  for (let i = 0; i < stations; i++) {
+    for (let k = 0; k < around; k++) {
+      const a = i * around + k, b = i * around + ((k + 1) % around), c = (i + 1) * around + ((k + 1) % around), d = (i + 1) * around + k;
+      const zf = (zs[i] + zs[i + 1]) / 2;
+      const y = (pos[a * 3 + 1] + pos[c * 3 + 1]) / 2;
+      const xm = (pos[a * 3] + pos[c * 3]) / 2;
+      const ring = ringOf(zf);
+      const maxX = Math.max(...ring.map(p => Math.abs(p[0])), 1e-6);
+      const list = isGlass(zf, y, xm / maxX) ? glassIdx : bodyIdx;
+      // Wound to face out (the rings go round counterclockwise seen from the front)
+      list.push(a, c, d, a, b, c);
+    }
+  }
+  // Caps at the ends (front and rear faces)
+  const capCenter = (i: number) => {
+    const ring = pos.slice(i * around * 3, (i + 1) * around * 3);
+    let cx = 0, cy = 0, cz = 0;
+    for (let k = 0; k < around; k++) { cx += ring[k * 3]; cy += ring[k * 3 + 1]; cz += ring[k * 3 + 2]; }
+    pos.push(cx / around, cy / around, cz / around);
+    return pos.length / 3 - 1;
+  };
+  const front = capCenter(0), rear = capCenter(stations);
+  for (let k = 0; k < around; k++) {
+    bodyIdx.push(front, (k + 1) % around, k);
+    bodyIdx.push(rear, stations * around + k, stations * around + ((k + 1) % around));
+  }
+  const bodyGeo = new THREE.BufferGeometry();
+  bodyGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  bodyGeo.setIndex([...bodyIdx, ...glassIdx]);
+  bodyGeo.addGroup(0, bodyIdx.length, 0);
+  bodyGeo.addGroup(bodyIdx.length, glassIdx.length, 1);
+  bodyGeo.computeVertexNormals();
+  const body = new THREE.Mesh(bodyGeo, [paint, glass]);
   body.castShadow = true;
   body.receiveShadow = true;
   group.add(body);
-  const cabin = new THREE.Mesh(taper(profileGeometry(clampProfile(beltFrac - 0.01, 1), length, height, width * 0.94, 0)), glass);
-  cabin.castShadow = true;
-  group.add(cabin);
-  const roofTop = Math.max(...profile.body.map(p => p[1]));
-  const roof = new THREE.Mesh(taper(profileGeometry(clampProfile(roofTop - 0.07, 1.01), length, height, width * 0.95, 0)), paint);
-  roof.position.y = height * 0.004;
-  roof.castShadow = true;
-  group.add(roof);
-  // Side pillars between front and rear windows (sedans/hatchbacks/SUVs) read better with a B-pillar.
-  if (type !== "van" && type !== "truck") {
-    const pillarZ = (profile.glass[1][0] + profile.glass[2][0]) / 2 * length;
-    const pillar = new THREE.Mesh(new THREE.BoxGeometry(width * 0.9, (roofTop - beltFrac) * height * 0.9, length * 0.025), paint);
-    pillar.position.set(0, (beltFrac + roofTop) / 2 * height, pillarZ);
-    group.add(pillar);
-  }
 
-  // Wheels
+  // --- Wheels: tires with spoked rims, in dark arches cut into the body sides ---
   const wheelR = height * 0.21;
-  const wheelW = width * 0.13;
-  const tireGeo = new THREE.CylinderGeometry(wheelR, wheelR, wheelW, 20);
-  tireGeo.rotateZ(Math.PI / 2);
-  const rimGeo = new THREE.CylinderGeometry(wheelR * 0.6, wheelR * 0.6, wheelW * 1.04, 14);
-  rimGeo.rotateZ(Math.PI / 2);
+  const wheelW = width * 0.14;
   const axleZ = length * (type === "van" ? 0.34 : 0.31);
-  // Dark wheel arches on the body sides
-  const archGeo = new THREE.CircleGeometry(wheelR * 1.18, 20, 0, Math.PI);
-  const archMat = new THREE.MeshStandardMaterial({ color: "#0d0f12", roughness: 1, side: THREE.DoubleSide });
+  const tireGeo = new THREE.TorusGeometry(wheelR * 0.78, wheelR * 0.24, 10, 28);
+  const rimGeo = new THREE.CylinderGeometry(wheelR * 0.56, wheelR * 0.56, wheelW * 0.5, 24);
+  rimGeo.rotateZ(Math.PI / 2);
+  const spokeGeo = new THREE.BoxGeometry(wheelW * 0.18, wheelR * 1.0, wheelR * 0.12);
+  // Dark wheel arches laid on the body side just outside its surface over each wheel
+  const archMat = carMat("arch", () => new THREE.MeshStandardMaterial({ color: "#08090b", roughness: 1, side: THREE.DoubleSide }));
+  const archGeo = new THREE.CircleGeometry(wheelR * 1.18, 24, 0, Math.PI);
+  const sideX = (zf: number) => {
+    // The body's widest point at the wheel's height range (its shoulder bulge)
+    const ring = ringOf(zf).filter(p => p[1] <= wheelR * 2.2 && p[0] > 0);
+    return ring.length ? Math.max(...ring.map(p => p[0])) : width / 2;
+  };
   [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
     const arch = new THREE.Mesh(archGeo, archMat);
-    arch.position.set(sx * (width / 2 + 0.005), wheelR, sz * length * (type === "van" ? 0.34 : 0.31));
+    arch.position.set(sx * (sideX(sz * axleZ / length) + width * 0.004), wheelR, sz * axleZ);
     arch.rotation.y = sx * Math.PI / 2;
     group.add(arch);
-  }));
-  [-1, 1].forEach(sx => [-1, 1].forEach(sz => {
-    const x = sx * (width / 2 - wheelW * 0.42);
+    const wheel = new THREE.Group();
     const tire = new THREE.Mesh(tireGeo, rubber);
-    tire.position.set(x, wheelR, sz * axleZ);
+    tire.rotation.y = Math.PI / 2;
+    tire.scale.set(1, 1, wheelW / (wheelR * 0.48));
     tire.castShadow = true;
-    group.add(tire);
+    wheel.add(tire);
     const rim = new THREE.Mesh(rimGeo, rimMat);
-    rim.position.copy(tire.position);
-    group.add(rim);
+    wheel.add(rim);
+    for (let k = 0; k < 5; k++) {
+      const spoke = new THREE.Mesh(spokeGeo, rimMat);
+      spoke.rotation.x = (k * 2 * Math.PI) / 5;
+      spoke.position.x = sx * wheelW * 0.12;
+      wheel.add(spoke);
+    }
+    wheel.position.set(sx * (width / 2 - wheelW * 0.62), wheelR, sz * axleZ);
+    group.add(wheel);
   }));
 
-  // Lights and bumpers: their outer faces just proud of the body's ends (no flicker where two
-  // surfaces meet), the whole car still its stated length.
-  const lightGeo = new THREE.BoxGeometry(width * 0.2, height * 0.07, length * 0.012);
-  const head = new THREE.MeshStandardMaterial({ color: "#fff7d6", emissive: "#fff2b3", emissiveIntensity: 0.6 });
-  const tail = new THREE.MeshStandardMaterial({ color: "#d81b1b", emissive: "#a30d0d", emissiveIntensity: 0.5 });
-  const frontY = profile.body[1][1] * height * 0.92;
-  const rearY = profile.body[profile.body.length - 2][1] * height * 0.85;
+  // --- Lights and grille on the flat nose and tail, a dark lower bumper strip, and mirrors ---
+  const frontTop = top(-0.5) * height, rearTop = top(0.5) * height, y0 = bottom * height;
+  const head = carMat("head", () => new THREE.MeshStandardMaterial({ color: "#f4f1e6", emissive: "#fff2c4", emissiveIntensity: 0.5, metalness: 0.3, roughness: 0.15 }));
+  const tail = carMat("tail", () => new THREE.MeshStandardMaterial({ color: "#b3141b", emissive: "#7a0a0e", emissiveIntensity: 0.45, roughness: 0.25 }));
+  const noseHalf = (width / 2) * 0.8;
+  const onEnd = (mat: THREE.Material, w: number, h: number, x: number, y: number, sz: number) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, length * 0.006), mat);
+    m.position.set(x, y, sz * (length / 2 - length * 0.002));
+    group.add(m);
+  };
   [-1, 1].forEach(sx => {
-    const h = new THREE.Mesh(lightGeo, head);
-    h.position.set(sx * width * 0.3, frontY, -length / 2 + length * 0.004);
-    group.add(h);
-    const t = new THREE.Mesh(lightGeo, tail);
-    t.position.set(sx * width * 0.3, rearY, length / 2 - length * 0.004);
-    group.add(t);
+    onEnd(head, noseHalf * 0.42, (frontTop - y0) * 0.22, sx * noseHalf * 0.66, y0 + (frontTop - y0) * 0.72, -1);
+    onEnd(tail, noseHalf * 0.4, (rearTop - y0) * (type === "sedan" || type === "sports" ? 0.22 : 0.12), sx * noseHalf * 0.7, y0 + (rearTop - y0) * 0.74, 1);
   });
-  const bumperGeo = new THREE.BoxGeometry(width * 0.96, height * 0.1, length * 0.03);
-  const fb = new THREE.Mesh(bumperGeo, trimMat);
-  fb.position.set(0, height * 0.24, -length / 2 + length * 0.013);
-  group.add(fb);
-  const rb = new THREE.Mesh(bumperGeo, trimMat);
-  rb.position.set(0, height * 0.24, length / 2 - length * 0.013);
-  group.add(rb);
-
-  // Grille, side mirrors and door seams
-  const grille = new THREE.Mesh(new THREE.BoxGeometry(width * 0.42, height * 0.1, length * 0.012), trimMat);
-  grille.position.set(0, frontY * 0.92, -length / 2 + length * 0.004);
-  group.add(grille);
-  const mirrorGeo = new THREE.BoxGeometry(width * 0.08, height * 0.07, length * 0.035);
-  const mirrorZ = profile.glass[0][0] * length + length * 0.02;
+  onEnd(trimMat, noseHalf * 0.75, (frontTop - y0) * 0.26, 0, y0 + (frontTop - y0) * 0.42, -1);
+  onEnd(trimMat, noseHalf * 1.7, (frontTop - y0) * 0.14, 0, y0 + (frontTop - y0) * 0.1, -1);
+  onEnd(trimMat, noseHalf * 1.7, (rearTop - y0) * 0.1, 0, y0 + (rearTop - y0) * 0.08, 1);
+  const mirrorGeo = new THREE.BoxGeometry(width * 0.05, height * 0.05, length * 0.022);
   [-1, 1].forEach(sx => {
-    const m = new THREE.Mesh(mirrorGeo, paint);
-    m.position.set(sx * (width / 2 + width * 0.035), beltY + height * 0.03, mirrorZ);
+    const m = new THREE.Mesh(mirrorGeo, trimMat);
+    m.position.set(sx * (width / 2 + width * 0.02), belt * height + height * 0.04, (gz[0] + 0.02) * length);
     m.castShadow = true;
     group.add(m);
   });
-  const seamMat = new THREE.LineBasicMaterial({ color: "#000000", transparent: true, opacity: 0.35 });
-  const seams: number[] = [];
-  const doorZs = type === "van" || type === "truck" ? [profile.glass[0][0] * length, profile.glass[2][0] * length] : [profile.glass[0][0] * length, (profile.glass[1][0] + profile.glass[2][0]) / 2 * length, profile.glass[3][0] * length];
-  [-1, 1].forEach(sx => doorZs.forEach(z => seams.push(sx * (width / 2 + 0.01), wheelR * 1.25, z, sx * (width / 2 + 0.01), beltY * 0.98, z)));
-  const seamGeo = new THREE.BufferGeometry();
-  seamGeo.setAttribute("position", new THREE.Float32BufferAttribute(seams, 3));
-  group.add(new THREE.LineSegments(seamGeo, seamMat));
 
   group.position.set(item.x, 0, item.y);
   group.rotation.y = -THREE.MathUtils.degToRad(item.rotation);

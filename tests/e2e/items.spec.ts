@@ -17,6 +17,28 @@ test.describe("real-world item sizes", () => {
     }
   });
 
+  test("the 3D car's body faces outward everywhere (no side or nose shows its inside)", () => {
+    for (const type of ["sedan", "suv", "truck", "van", "hatchback", "sports"] as const) {
+      const car = createItem("parking", 0, 0, { vehicleType: type }) as any;
+      const body = create3dCar({ ...car, rotation: 0 }).children[0] as THREE.Mesh;
+      const pos = body.geometry.getAttribute("position"), idx = body.geometry.getIndex()!;
+      // A closed surface wound one way throughout: every edge is used once in each direction, and
+      // its signed volume is positive only when that way is outward.
+      const edges = new Map<string, number>();
+      let volume = 0;
+      const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+      for (let t = 0; t < idx.count; t += 3) {
+        const [i, j, k] = [idx.getX(t), idx.getX(t + 1), idx.getX(t + 2)];
+        for (const [p, q] of [[i, j], [j, k], [k, i]]) edges.set(`${p},${q}`, (edges.get(`${p},${q}`) ?? 0) + 1);
+        a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, j); c.fromBufferAttribute(pos, k);
+        volume += a.dot(new THREE.Vector3().crossVectors(b, c)) / 6;
+      }
+      const twice = [...edges.values()].filter(n => n > 1).length;
+      expect(twice, type).toBe(0);
+      expect(volume, type).toBeGreaterThan(car.width * car.height * 0.5);
+    }
+  });
+
   test("vehicles, trees and buildings are real size in feet", () => {
     const car = createItem("parking", 0, 0) as any;
     expect(car.width).toBeCloseTo(VEHICLE_SIZES.sedan.width, 5);

@@ -13,6 +13,8 @@ import {
   getCameraAspectValue
 } from "../lib/camera";
 import { DEFAULT_CAMERA_PITCH, DEFAULT_IR_RANGE_FT } from "../constants";
+import { useEffect, useState } from "react";
+import { catalogByBrand, findModel, getCatalog, onCatalogChange, zoomedHFov, type CameraModel } from "../lib/cameraCatalog";
 
 type Props = {
   camera: CameraItem;
@@ -58,7 +60,22 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
   const detectFt = dori[dori.length - 1].distance;
 
   const setLens = (lens: (typeof LENS_PRESETS)[number]) =>
-    onChange({ lensPreset: lens.id, hFov: lens.hFov, fov: lens.hFov, vFov: vFovFromH(lens.hFov, aspect) });
+    onChange({ lensPreset: lens.id, hFov: lens.hFov, fov: lens.hFov, vFov: vFovFromH(lens.hFov, aspect), model: undefined, zoom: undefined });
+
+  // The camera list (refreshed from the site after start-up)
+  const [, setCatalogVersion] = useState(0);
+  useEffect(() => onCatalogChange(() => setCatalogVersion(v => v + 1)), []);
+  const model = findModel(camera.model);
+  const pickModel = (m: CameraModel | undefined) => {
+    if (!m) return onChange({ model: undefined, zoom: undefined });
+    const h = zoomedHFov(m, 0);
+    onChange({ model: m.id, zoom: 0, hFov: h, fov: h, vFov: vFovFromH(h, m.aspect), aspect: m.aspect, resolutionWidth: m.resolutionWidth, irRangeFt: m.irRangeFt, lensPreset: undefined });
+  };
+  const setZoom = (z: number) => {
+    if (!model) return;
+    const h = zoomedHFov(model, z);
+    onChange({ zoom: z, hFov: h, fov: h, vFov: vFovFromH(h, model.aspect) });
+  };
 
   const setMount = (mount: (typeof MOUNT_PRESETS)[number]) => {
     onMountHeightChange(mount.height);
@@ -76,7 +93,9 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
       vFov: vFovFromH(lens.hFov, aspect),
       resolutionWidth: o.width,
       pitch: suggestPitchForDistance(mountHeight, o.aimFt),
-      range: o.range
+      range: o.range,
+      model: undefined,
+      zoom: undefined
     });
   };
   const activeOutcome = OUTCOME_PRESETS.find(o => camera.lensPreset === o.lens && resolution === o.width);
@@ -107,6 +126,39 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
 
   return (
     <div className="space-y-4">
+      <div className="space-y-1.5" data-testid="camera-model">
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] uppercase font-bold text-slate-400">Camera model</div>
+          <div className="text-[10px] text-slate-500" title="The list updates itself from the makers' spec sheets">list of {getCatalog().updated}</div>
+        </div>
+        <select
+          value={model?.id ?? ""}
+          onChange={e => pickModel(findModel(e.target.value))}
+          className="w-full bg-zinc-900 border border-white/10 rounded-lg px-2 py-1.5 text-xs text-slate-100"
+          aria-label="Camera model"
+        >
+          <option value="">Any camera (set the lens below)</option>
+          {catalogByBrand().map(([brand, models]) => (
+            <optgroup key={brand} label={brand}>
+              {models.map(m => <option key={m.id} value={m.id}>{brand === "UniFi" ? `UniFi ${m.name}` : m.name}</option>)}
+            </optgroup>
+          ))}
+        </select>
+        {model && (
+          <div className="text-[11px] text-slate-400">
+            {Math.round(model.hFov)}°{model.hFovTele ? `–${Math.round(model.hFovTele)}°` : ""} wide ·{" "}
+            {RESOLUTION_PRESETS.find(r => r.width === model.resolutionWidth)?.label ?? `${model.resolutionWidth} px`} · night vision {model.irRangeFt} ft
+            {model.approx ? " · approximate" : ""}
+          </div>
+        )}
+        {model?.hFovTele && (
+          <label className="block text-[11px] text-slate-300">
+            <span className="flex justify-between"><span>Zoom</span><span className="font-semibold text-slate-100">{Math.round(hFov)}° wide</span></span>
+            <input type="range" min={0} max={1} step={0.02} value={camera.zoom ?? 0} onChange={e => setZoom(Number(e.target.value))} className="w-full accent-emerald-500" aria-label="Zoom" />
+          </label>
+        )}
+      </div>
+
       <div className="space-y-1.5">
         <div className="text-[10px] uppercase font-bold text-slate-400">What should it see?</div>
         <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="What should it see">
@@ -166,7 +218,7 @@ export function CameraSetupPanel({ camera, mountHeight, onChange, onMountHeightC
         <div className="text-[10px] uppercase font-bold text-slate-400">Resolution</div>
         <div className="grid grid-cols-4 gap-1.5">
           {RESOLUTION_PRESETS.map(r => (
-            <button key={r.id} onClick={() => onChange({ resolutionWidth: r.width })} className={chip(resolution === r.width)}>
+            <button key={r.id} onClick={() => onChange({ resolutionWidth: r.width, model: undefined })} className={chip(resolution === r.width)}>
               {r.label}
             </button>
           ))}

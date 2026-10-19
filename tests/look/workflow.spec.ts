@@ -32,7 +32,7 @@ test("flow", async ({ page }) => {
   // 3. Cameras: mark a door, add a camera
   await step(page, 2).click();
   await shot(page, "07-cameras-step");
-  await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+  await page.getByRole("button", { name: /Mark another spot/ }).click();
   await shot(page, "08-marking-a-spot");
   const box = (await page.getByTestId("plan").boundingBox())!;
   await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.62);

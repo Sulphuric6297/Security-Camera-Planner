@@ -207,6 +207,20 @@ preview:
   camera views read like the real house; a door is drawn wherever a door spot is marked next to a
   wall.
 
+### Editing the house like a home-design program (done)
+
+- Porches, decks, carports and patios as parts of a house (raised floor, railings with entries,
+  own sloped roof); windows and doors placed, dragged and resized on the walls, with "same size
+  for every window on this wall / building / all my buildings"; gable or hip per wall; stories.
+- Everything editable from a bar above the selected house (stories, roof, + Add) and from a
+  right-click menu; any item can be locked in place.
+- Modern-UX rules applied: one set of controls per selection (a picked window shows only its own
+  bar), labelled controls, menus close on Esc or a click elsewhere (Esc never also drops the
+  selection), quiet handles that brighten on hover, nothing overlapping the map's corner controls.
+- Driveways, walkways and patios (W): paving draped on the ground (asphalt, concrete, gravel,
+  pavers), reshaped by its corners like a house; a drawn driveway becomes the driveway spot to
+  protect.
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

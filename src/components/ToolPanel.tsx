@@ -1,13 +1,14 @@
 import React from "react";
-import { Camera, Car, HardDrive, MousePointerClick, Square, Target, Trees, Type, Wand2, X } from "lucide-react";
-import type { ToolMode, TargetKind } from "../types";
-import { TARGET_KINDS, TREE_SIZES, VEHICLE_SIZES, type TreeSize, type VehicleType } from "../lib/items";
+import { Camera, Car, HardDrive, MousePointerClick, Route, Square, Target, Trees, Type, Wand2, X } from "lucide-react";
+import type { PavingKind, ToolMode, TargetKind } from "../types";
+import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, TREE_SIZES, VEHICLE_SIZES, type TreeSize, type VehicleType } from "../lib/items";
 
 export type ToolDefaults = {
   treeSize: TreeSize;
   treeType: "deciduous" | "conifer" | "palm" | "bush";
   vehicleType: VehicleType;
   targetKind: TargetKind;
+  pavingKind: PavingKind;
 };
 
 type Props = {
@@ -24,6 +25,7 @@ const INFO: Partial<Record<ToolMode, { title: string; icon: React.ComponentType<
   "trace-building": { title: "Trace a roof", icon: Wand2, how: "Click the middle of a roof on the satellite map and it becomes a 3D building. Keep clicking roofs; press Esc when done." },
   "add-tree": { title: "Add trees", icon: Trees, how: "Pick a type and size, then click on the map. Trees block cameras' views." },
   "add-parking": { title: "Add a vehicle", icon: Car, how: "Pick a type, then click on the map. Vehicles are placed at their real size." },
+  "add-paving": { title: "Add a driveway or path", icon: Route, how: "Pick what it is, then click on the map. Drag its corners to match the photo; pull an edge's middle dot to add a bend." },
   "add-label": { title: "Add text", icon: Type, how: "Click on the map where the text should go." },
   "add-target": { title: "Mark a spot to protect", icon: Target, how: "Pick what it is, then click it on the map. Your cameras' coverage of it shows as green, amber or red." },
   "add-recorder": { title: "Place the recorder", icon: HardDrive, how: "Click where the recorder (NVR) goes, such as a closet, office or garage. Every camera's cable runs back to it." }
@@ -87,6 +89,20 @@ export function ToolPanel({ mode, defaults, onDefaults, onDone, hasSatellite }: 
               <button key={v} className={chip(defaults.vehicleType === v)} onClick={() => onDefaults({ vehicleType: v })}>
                 {VEHICLE_SIZES[v].label}
                 <span className="block text-[10px] font-medium opacity-70">{VEHICLE_SIZES[v].width} × {VEHICLE_SIZES[v].length} ft</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mode === "add-paving" && (
+        <div className="space-y-1.5">
+          <div className="text-[10px] uppercase font-bold text-slate-400">What is it?</div>
+          <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Paving kind">
+            {(Object.keys(PAVING_KINDS) as PavingKind[]).map(k => (
+              <button key={k} className={chip(defaults.pavingKind === k)} onClick={() => onDefaults({ pavingKind: k })}>
+                {PAVING_KINDS[k].label}
+                <span className="block text-[10px] font-medium opacity-70">{PAVING_SURFACES[PAVING_KINDS[k].surface]}</span>
               </button>
             ))}
           </div>

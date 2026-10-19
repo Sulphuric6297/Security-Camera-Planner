@@ -74,6 +74,21 @@ test.describe("guided workflow and plan tools", () => {
     await expect(bar).toHaveCount(0);
   });
 
+  test("a menu on the house bar closes on Esc or a click elsewhere, keeping the house selected", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    const bar = page.getByRole("toolbar", { name: "Selection actions" });
+    const menu = page.getByRole("menu");
+    await bar.getByRole("button", { name: "+ Add" }).click();
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(bar).toBeVisible();
+    await bar.getByRole("button", { name: "+ Add" }).click();
+    await expect(menu).toBeVisible();
+    await page.getByRole("banner").click({ position: { x: 600, y: 20 } });
+    await expect(menu).toHaveCount(0);
+  });
+
   test("scale bar matches real distances; zoom to selection and fit", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     const barPxPerFt = async () => {

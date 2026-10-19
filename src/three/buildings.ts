@@ -4,7 +4,7 @@
 // Coordinates: building-local plan coordinates (x, y) map to three.js (x, z) with Y up.
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { pointInPolygonXY, polygonArea } from "../lib/geometry";
+import { getEdgeOutwardNormal, pointInPolygonXY, polygonArea } from "../lib/geometry";
 import { straightSkeleton, type SkeletonNode } from "./roofSkeleton";
 
 type P = { x: number; y: number };
@@ -184,11 +184,29 @@ const geometryFrom = (positions: number[]) => {
  * inward and they meet in hips, valleys and ridges. For a gable roof, end slopes that come to a
  * point (triangles) stand up as gable walls instead. No eave overhang. Null if it can't be built.
  */
-const skeletonRoof = (pts: P[], kind: RoofKind, pitch: number, maxRise: number): RoofParts | null => {
+/** Which edges of `sub` lie along the flagged edges of `pts` (by their middles). */
+const edgesAlong = (sub: P[], pts: P[], flagged: number[]) => {
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const tol = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 1) * 1e-3;
+  const near = (m: P, a: P, b: P) => {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const t = Math.max(0, Math.min(1, ((m.x - a.x) * dx + (m.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(m.x - (a.x + dx * t), m.y - (a.y + dy * t)) < tol;
+  };
+  return sub.flatMap((a, i) => {
+    const b = sub[(i + 1) % sub.length];
+    const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    return flagged.some(f => pts[f] && near(m, pts[f], pts[(f + 1) % pts.length])) ? [i] : [];
+  });
+};
+
+const skeletonRoof = (pts: P[], kind: RoofKind, pitch: number, maxRise: number, gableWalls?: number[]): RoofParts | null => {
   const sk = straightSkeleton(pts, maxRise / pitch);
   if (!sk) return null;
   const gableFaces = new Set<number>();
-  if (kind === "gable") {
+  // Chosen gable walls (by the user), else every end that can be one when the roof is "gable"
+  const chosen = gableWalls ? new Set(edgesAlong(sk.points, pts, gableWalls)) : null;
+  if (kind === "gable" || chosen) {
     // Triangular end faces whose tip no other end face shares become gable walls: their tip
     // moves out onto the wall line, which also stretches the ridge to it.
     const tipOf = (i: number) => {
@@ -204,7 +222,7 @@ const skeletonRoof = (pts: P[], kind: RoofKind, pitch: number, maxRise: number):
     });
     sk.faces.forEach((_, i) => {
       const tip = tipOf(i);
-      if (!tip || uses.get(tip) !== 1) return;
+      if (!tip || uses.get(tip) !== 1 || (chosen && !chosen.has(i))) return;
       const a = sk.points[i];
       const b = sk.points[(i + 1) % sk.points.length];
       const dx = b.x - a.x;
@@ -239,14 +257,14 @@ const skeletonRoof = (pts: P[], kind: RoofKind, pitch: number, maxRise: number):
  * Rectangles get an exact roof with eaves, square-cornered L/T shapes a roof per wing, and any
  * other outline a roof that follows its walls (skeletonRoof).
  */
-export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave?: number; maxRise?: number } = {}): RoofParts => {
+export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave?: number; maxRise?: number; gableWalls?: number[] } = {}): RoofParts => {
   // L, T and other square-cornered shapes: one pitched roof per wing, intersecting.
   if (kind !== "flat" && pts.length > 4) {
     const r = orientedRect(pts);
     const fill = polygonArea(pts) / Math.max(1e-6, 4 * r.a * r.b);
     const parts = fill < NOTCH_FILL ? rectilinearParts(pts) : null;
     if (parts && parts.length > 1) {
-      const built = parts.map(q => buildRoof(q, kind, opts));
+      const built = parts.map(q => buildRoof(q, kind, { ...opts, gableWalls: opts.gableWalls && edgesAlong(q, pts, opts.gableWalls) }));
       const gables = built.map(b => b.gables).filter((g): g is THREE.BufferGeometry => !!g);
       return {
         roof: mergeGeometries(built.map(b => b.roof)) ?? built[0].roof,
@@ -259,7 +277,7 @@ export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave
   if (kind !== "flat") {
     const r = orientedRect(pts);
     if (polygonArea(pts) / Math.max(1e-6, 4 * r.a * r.b) < NOTCH_FILL) {
-      const roof = skeletonRoof(pts, kind, opts.pitch ?? 0.5, opts.maxRise ?? Infinity);
+      const roof = skeletonRoof(pts, kind, opts.pitch ?? 0.5, opts.maxRise ?? Infinity, opts.gableWalls);
       if (roof) return roof;
       kind = "flat"; // the outline is too odd to roof: flat rather than a wrong roof
     }
@@ -272,9 +290,14 @@ export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave
   }
   const pitch = opts.pitch ?? 0.5;
   const eave = opts.eave ?? 1.5;
-  const r = orientedRect(pts);
+  let r = orientedRect(pts);
+  // Chosen gable walls: a gable on a long wall turns the ridge to run across the other way.
+  const gw = opts.gableWalls?.filter(i => i < pts.length).map(i => getEdgeOutwardNormal(pts, i));
+  if (gw?.some(n => Math.abs(n.x * Math.cos(r.angle) + n.y * Math.sin(r.angle)) < 0.5)) r = { ...r, a: r.b, b: r.a, angle: r.angle + Math.PI / 2 };
   const c = Math.cos(r.angle);
   const s = Math.sin(r.angle);
+  // Each end (along the ridge, + or -) is a gable or a hip
+  const endGable = (sgn: number) => (gw ? gw.some(n => (n.x * c + n.y * s) * sgn > 0.5) : kind === "gable");
   // local (u along the ridge, v across, h up) -> three (x, y, z)
   const to = (u: number, v: number, h: number) => [r.cx + u * c - v * s, h, r.cy + u * s + v * c];
   const rise = Math.min(r.b * pitch, opts.maxRise ?? Infinity);
@@ -304,21 +327,18 @@ export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave
   const pushTri = (...ps: number[][]) => ps.forEach(p => { tri.push(...p); uvTri.push(...uvOf(p)); });
   const quad = (p1: number[], p2: number[], p3: number[], p4: number[]) => pushTri(p1, p2, p3, p1, p3, p4);
   const gable: number[] = [];
-  if (kind === "gable") {
-    const ridgeA = ae; // a gable ridge runs the full length, including the overhang
-    quad(to(-ae, -be, yEave), to(ae, -be, yEave), to(ridgeA, 0, rise), to(-ridgeA, 0, rise));
-    quad(to(ae, be, yEave), to(-ae, be, yEave), to(-ridgeA, 0, rise), to(ridgeA, 0, rise));
-    // Gable ends: wall triangles under the roof at each short side
-    gable.push(...to(a, -b, 0), ...to(a, b, 0), ...to(a, 0, rise));
-    gable.push(...to(-a, b, 0), ...to(-a, -b, 0), ...to(-a, 0, rise));
-  } else {
-    // Hip: the ridge is shorter by the roof's half-width at each end (a pyramid when square).
-    const ridgeA = Math.max(0, a - b);
-    quad(to(-ae, -be, yEave), to(ae, -be, yEave), to(ridgeA, 0, rise), to(-ridgeA, 0, rise));
-    quad(to(ae, be, yEave), to(-ae, be, yEave), to(-ridgeA, 0, rise), to(ridgeA, 0, rise));
-    pushTri(to(ae, -be, yEave), to(ae, be, yEave), to(ridgeA, 0, rise));
-    pushTri(to(-ae, be, yEave), to(-ae, -be, yEave), to(-ridgeA, 0, rise));
-  }
+  // A gable end's ridge runs out over the rake overhang; a hip end's stops short by the roof's
+  // half-width (a pyramid when square).
+  const hipA = Math.max(0, a - b);
+  const ridgeP = endGable(1) ? ae : hipA;
+  const ridgeN = endGable(-1) ? -ae : -hipA;
+  quad(to(-ae, -be, yEave), to(ae, -be, yEave), to(ridgeP, 0, rise), to(ridgeN, 0, rise));
+  quad(to(ae, be, yEave), to(-ae, be, yEave), to(ridgeN, 0, rise), to(ridgeP, 0, rise));
+  // Gable ends: wall triangles under the roof; hip ends: a sloped triangle
+  if (endGable(1)) gable.push(...to(a, -b, 0), ...to(a, b, 0), ...to(a, 0, rise));
+  else pushTri(to(ae, -be, yEave), to(ae, be, yEave), to(ridgeP, 0, rise));
+  if (endGable(-1)) gable.push(...to(-a, b, 0), ...to(-a, -b, 0), ...to(-a, 0, rise));
+  else pushTri(to(-ae, be, yEave), to(-ae, -be, yEave), to(ridgeN, 0, rise));
   const roof = geometryFrom(tri);
   roof.setAttribute("uvSource", new THREE.Float32BufferAttribute(uvTri, 3));
   return { roof, gables: gable.length ? geometryFrom(gable) : null, rise };

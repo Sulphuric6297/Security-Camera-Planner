@@ -182,8 +182,45 @@ const centroid = (pts: P[]) => pts.reduce((m, p) => ({ x: m.x + p.x / pts.length
 export const partRoof = (outline: P[], p: OpenPart): "main" | "own" | "none" =>
   p.roof ?? (pointInPolygonXY(centroid(p.pts), outline) ? "main" : p.kind === "porch" || p.kind === "carport" ? "own" : "none");
 
+/**
+ * A part's corners with any side lying along a wall (within `tol`, inside or out) moved just past
+ * that wall, so the wall there is open: a porch drawn up to the wall line (or snapped exactly onto
+ * it) opens it, never leaving a sliver of wall because of rounding.
+ */
+export const snapPartToWalls = (outline: P[], pts: P[], tol = 2): P[] => {
+  const out = pts.map(p => ({ ...p }));
+  const c = centroid(outline);
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 1e-6) continue;
+    const d = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+    for (let k = 0; k < outline.length; k++) {
+      const p = outline[k], q = outline[(k + 1) % outline.length];
+      const wl = Math.hypot(q.x - p.x, q.y - p.y);
+      if (wl < 1e-6) continue;
+      const w = { x: (q.x - p.x) / wl, y: (q.y - p.y) / wl };
+      if (Math.abs(d.x * w.y - d.y * w.x) > 0.05) continue; // not parallel
+      // The wall's outward normal, and how far the part's side is from the wall line along it
+      let n = { x: w.y, y: -w.x };
+      if ((p.x - c.x) * n.x + (p.y - c.y) * n.y < 0) n = { x: -n.x, y: -n.y };
+      const off = (a.x - p.x) * n.x + (a.y - p.y) * n.y;
+      if (Math.abs(off) > tol) continue;
+      // ...and they overlap along the wall
+      const t0 = (a.x - p.x) * w.x + (a.y - p.y) * w.y, t1 = (b.x - p.x) * w.x + (b.y - p.y) * w.y;
+      if (Math.max(t0, t1) < 0.1 || Math.min(t0, t1) > wl - 0.1) continue;
+      const push = 0.05 - off;
+      if (push <= 0) continue;
+      out[i] = { x: out[i].x + n.x * push, y: out[i].y + n.y * push };
+      out[(i + 1) % pts.length] = { x: out[(i + 1) % pts.length].x + n.x * push, y: out[(i + 1) % pts.length].y + n.y * push };
+      break;
+    }
+  }
+  return out;
+};
+
 /** Corner lists of the parts set into the house (under its main roof): these take out its walls. */
-export const insetParts = (outline: P[], parts: OpenPart[]) => parts.filter(p => partRoof(outline, p) === "main").map(p => p.pts);
+export const insetParts = (outline: P[], parts: OpenPart[]) => parts.filter(p => partRoof(outline, p) === "main").map(p => snapPartToWalls(outline, p.pts));
 
 /** The side of an attached part that meets the house (the edge nearest the outline). */
 export const attachEdge = (outline: P[], pts: P[]) => {
@@ -255,4 +292,33 @@ export const movePartEdge = (part: P[], i: number, p: P, outline: P[], snap: num
   next[i] = { x: a.x + n.x * d, y: a.y + n.y * d };
   next[(i + 1) % part.length] = { x: b.x + n.x * d, y: b.y + n.y * d };
   return next;
+};
+
+/** A part's open sides (where a railing can go): set into the house, the outline's stretches through
+ * it; attached, every side but the one against the house. */
+export const partSides = (outline: P[], part: OpenPart): { a: P; b: P }[] =>
+  partRoof(outline, part) === "main"
+    ? openStretches(outline, [snapPartToWalls(outline, part.pts)])
+    : part.pts.map((a, i) => ({ a, b: part.pts[(i + 1) % part.pts.length], i })).filter(e => e.i !== attachEdge(outline, part.pts)).map(({ a, b }) => ({ a, b }));
+
+/** A part's entries: as placed, or one in the middle of its longest side. */
+export const partEntries = (outline: P[], part: OpenPart): { side: number; at: number }[] => {
+  if (part.entries) return part.entries;
+  const sides = partSides(outline, part);
+  if (!sides.length) return [];
+  let best = 0;
+  sides.forEach((s, i) => { if (Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) > Math.hypot(sides[best].b.x - sides[best].a.x, sides[best].b.y - sides[best].a.y)) best = i; });
+  return [{ side: best, at: 0.5 }];
+};
+
+/** The open side of a part nearest a point: its index, how far along (0..1), and the distance. */
+export const nearestSide = (outline: P[], part: OpenPart, p: P) => {
+  let best = { side: -1, at: 0, dist: Infinity };
+  partSides(outline, part).forEach((s, i) => {
+    const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / (dx * dx + dy * dy || 1)));
+    const d = Math.hypot(p.x - (s.a.x + dx * t), p.y - (s.a.y + dy * t));
+    if (d < best.dist) best = { side: i, at: t, dist: d };
+  });
+  return best;
 };

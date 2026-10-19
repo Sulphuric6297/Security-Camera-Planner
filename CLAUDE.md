@@ -73,6 +73,7 @@ Useful commands:
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view, the picture fills the window with Settings beside it, closing with its X/tabs/steps; camera pictures rendered from the 3D scene |
 | `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |
 | `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows; a hand-labelled real satellite photo of a parking lot (`tests/fixtures/aerial`) (pure logic) |
+| `paving.spec.ts` | Driveways, walkways and patios: draped on sloping ground, cut to the terrain grid, a drawn driveway becomes the spot to protect (pure logic); placing one with W, surface/kind, corner and bend handles |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
 
@@ -110,5 +111,9 @@ keep it updated as phases ship.
   `src/components/`. The map view (2D and 3D are one view) is `src/viewport/`: `SiteView.ts` is the
   engine (scene, camera-controls navigation, picking, handles), `SiteViewport.tsx` its React wrapper.
   The printed plan is drawn by `src/lib/planSvg.ts`.
+- Real camera models live in `public/cameras.json` (a copy is built in from `src/data/cameras.json`;
+  `src/lib/cameraCatalog.ts` loads the site's copy at start-up). The UniFi entries are refreshed
+  weekly by `.github/workflows/update-cameras.yml` (`scripts/update-camera-catalog.mjs`); edit the
+  other brands by hand in both files.
 - Changes are developed on a feature branch. Do not merge or deploy to `main` without the
   owner's OK.
