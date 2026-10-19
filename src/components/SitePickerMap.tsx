@@ -1,5 +1,5 @@
 import "leaflet/dist/leaflet.css";
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import L from "leaflet";
 import { BuildingCandidate } from "../lib/geo/buildings";
 import { GeoBounds, SITE_MIN_WIDTH_FT, selectionFromBounds } from "../lib/geo/core";

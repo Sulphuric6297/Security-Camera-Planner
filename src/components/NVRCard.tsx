@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Camera, LayoutGrid, Plus, Maximize } from "lucide-react";
 import { vFovFromH } from "../lib/camera";
 import { CameraItem } from "../types";
@@ -39,16 +39,6 @@ export const NVRCard = ({ camera, renderFn, sceneKey, onMaximize, onExport, isMa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera, sceneKey, isMaximized]);
 
-  const handleDownload = () => {
-    if (!src) return;
-    const link = document.createElement("a");
-    link.href = src;
-    link.download = `nvr_snapshot_${camera.label}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
     <div className={`w-full h-full bg-zinc-900/90 backdrop-blur-xl rounded-xl overflow-hidden border border-white/10 relative group shadow-2xl flex flex-col ${isMaximized ? '' : 'hover:ring-1 hover:ring-indigo-500 ring-1 ring-black/50'}`}>
       {/* Header */}
@@ -58,15 +48,11 @@ export const NVRCard = ({ camera, renderFn, sceneKey, onMaximize, onExport, isMa
           <span className="text-sm font-medium text-slate-200 truncate">{camera.label}</span>
         </div>
         <div className="flex items-center gap-1">
-          <div className="flex items-center gap-1.5 bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/30">
-            <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
-            <span className="text-[10px] text-red-400 font-bold tracking-tight">LIVE</span>
-          </div>
           {!isMaximized && onMaximize && (
             <button
               onClick={(e) => { e.stopPropagation(); onMaximize(); }}
               className="no-drag text-slate-400 hover:text-white p-1 hover:bg-white/10 rounded transition-colors"
-              title="Expand View"
+              title="Look through this camera"
               onMouseDown={e => e.stopPropagation()}
             >
               <Maximize className="w-3 h-3" />

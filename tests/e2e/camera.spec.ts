@@ -78,6 +78,25 @@ test.describe("cameras", () => {
     await expect(page.getByText(/Blind spot:/)).toBeVisible();
   });
 
+  test("changes made in the camera panel can be undone, one step each", async ({ page }) => {
+    await placeWithKey(page, "c", 0.5, 0.5);
+    const [before] = await itemsOfType(page, "camera");
+    await page.getByRole("button", { name: /^12mm/ }).click();
+    await page.waitForTimeout(700);
+    await page.getByRole("button", { name: /^4K/ }).click();
+    await page.waitForTimeout(700);
+    const [changed] = await itemsOfType(page, "camera");
+    expect(changed.hFov).toBe(28);
+    expect(changed.resolutionWidth).toBe(3840);
+    await page.keyboard.press("Control+z");
+    const [undone1] = await itemsOfType(page, "camera");
+    expect(undone1.resolutionWidth).toBe(before.resolutionWidth);
+    expect(undone1.hFov).toBe(28); // only the last change
+    await page.keyboard.press("Control+z");
+    const [undone2] = await itemsOfType(page, "camera");
+    expect(undone2.hFov).toBe(before.hFov);
+  });
+
   test("height slider works for free-standing cameras", async ({ page }) => {
     await placeWithKey(page, "c", 0.5, 0.5);
     await page.getByRole("button", { name: /^Pole/ }).click();
@@ -87,7 +106,7 @@ test.describe("cameras", () => {
     await expect(page.getByText("15 ft high")).toBeVisible();
   });
 
-  test("camera placed next to a wall mounts at eave height facing out", async ({ page }) => {
+  test("camera placed next to a wall mounts at a face-friendly 9 ft, facing out", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     const [b] = await itemsOfType(page, "building");
     const box = await itemBox(page, b.id);
@@ -96,7 +115,7 @@ test.describe("cameras", () => {
     const [cam] = await itemsOfType(page, "camera");
     expect(cam.mount.type).toBe("building");
     expect(cam.mount.buildingId).toBe(b.id);
-    expect(cam.mount.height).toBe(13);
+    expect(cam.mount.height).toBe(9); // not at the roofline (13 ft): faces need a low camera
     expect(Math.round(cam.rotation)).toBe(90); // facing south (down the plan)
   });
 

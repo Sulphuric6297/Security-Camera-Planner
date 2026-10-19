@@ -1,4 +1,3 @@
-import React from "react";
 import type { CameraItem } from "../types";
 import {
   DORI_LEVELS,

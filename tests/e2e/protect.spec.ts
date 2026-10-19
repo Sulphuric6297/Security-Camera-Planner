@@ -117,11 +117,11 @@ test.describe("what to protect and coverage", () => {
     await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
     await expect(page.getByRole("status")).toContainText("Mark which building is yours");
     expect(await itemsOfType(page, "camera")).toHaveLength(0);
-    // Mark it as mine: now cameras go on it
+    // Mark it as mine from the Buildings list (the message takes you there): now cameras go on it
     const [b] = await itemsOfType(page, "building");
-    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-    await page.getByLabel("My building").check();
-    await page.keyboard.press("Escape");
+    await page.getByRole("status").getByRole("button", { name: "Show buildings" }).click();
+    await page.getByRole("checkbox", { name: /is mine$/ }).check();
+    expect((await itemsOfType(page, "building"))[0].mine).toBe(true);
     await page.locator('nav[aria-label="Steps"] button').nth(2).click();
     await page.getByRole("button", { name: "Suggest cameras for the rest" }).click();
     await expect.poll(async () => (await itemsOfType(page, "camera")).length).toBeGreaterThan(0);

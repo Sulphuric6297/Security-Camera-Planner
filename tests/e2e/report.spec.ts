@@ -68,6 +68,22 @@ test.describe("report", () => {
     expect(html.match(/<img /g)).toHaveLength(2); // plan + camera view
     expect(html).toContain("estimates");
   });
+
+  test("views added to the report come on top of the site plan and every camera's view (not instead)", () => {
+    const html = buildReportHtml({
+      title: "Plan",
+      preparedAt: "today",
+      planImage: "data:image/png;base64,PLAN",
+      pickedViews: [{ label: "Front yard in 3D", dataUrl: "data:image/png;base64,PICK" }],
+      cameras: [cam({ viewImage: "data:image/png;base64,VIEW" })],
+      spots: [],
+      counts: { buildings: 1 }
+    });
+    expect(html).toContain("base64,PLAN");
+    expect(html).toContain("base64,VIEW");
+    expect(html).toContain("base64,PICK");
+    expect(html).toContain("More views");
+  });
 });
 
 import { estimateStorage, bitrateFor } from "../../src/lib/recording";

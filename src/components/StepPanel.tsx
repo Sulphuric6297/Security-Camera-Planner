@@ -40,6 +40,12 @@ type Props = {
   showAllCones: boolean;
   onToggleCones: (show: boolean) => void;
   onSelect: (id: string) => void;
+  /** The welcome card in the middle of the map is showing its own start buttons. */
+  startCardShown?: boolean;
+  /** Look through a camera (the map view shows its picture). */
+  onLook: (id: string) => void;
+  /** Mark a building as yours (cameras go on it) or not. */
+  onMine: (id: string, mine: boolean) => void;
   onStep: (step: WorkflowStepId) => void;
   /** "Next": finishes this step and opens the next one. */
   onNext: (from: WorkflowStepId, to: WorkflowStepId) => void;
@@ -67,6 +73,7 @@ const card = "rounded-xl border border-white/10 bg-white/5 p-3";
 const action =
   "w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-slate-200 border border-white/10 bg-white/5 hover:bg-white/10 transition-colors";
 const kbd = "ml-auto text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-400 font-mono";
+const lookButton = "shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-emerald-300 hover:text-white hover:bg-white/10";
 const listButton = "w-full flex items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-white/5";
 
 /** The side panel for the current workflow step (shown when nothing is selected). */
@@ -97,6 +104,8 @@ export function StepPanel(props: Props) {
               )}
               {props.site.details && <div className="text-[11px] text-slate-500 mt-1.5 leading-snug">{props.site.details}</div>}
             </div>
+          ) : props.startCardShown ? (
+            <p className={`${card} text-sm text-slate-300`}>Start in the middle of the screen: find your property, upload your own map, or start on a blank grid.</p>
           ) : (
             <button onClick={props.onImportSite} className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20">
               Search for my address
@@ -108,9 +117,11 @@ export function StepPanel(props: Props) {
                 <Mountain className="w-4 h-4 text-emerald-400" /> Change or re-import the site
               </button>
             )}
-            <button onClick={props.onUploadBaseMap} className={action}>
-              <Upload className="w-4 h-4 text-slate-400" /> Use my own map or floor plan image
-            </button>
+            {!props.startCardShown && (
+              <button onClick={props.onUploadBaseMap} className={action}>
+                <Upload className="w-4 h-4 text-slate-400" /> Use my own map or floor plan image
+              </button>
+            )}
           </div>
           {props.site && <p className="text-xs text-slate-500">Elevation lines and shading: bottom-left corner of the map.</p>}
         </>
@@ -141,18 +152,21 @@ export function StepPanel(props: Props) {
             ) : (
               <ul className="max-h-72 overflow-auto custom-scrollbar -mx-1" aria-label="Buildings">
                 {buildings.map((b, i) => (
-                  <li key={b.id}>
-                    <button onClick={() => props.onSelect(b.id)} className={listButton}>
+                  <li key={b.id} className="flex items-center gap-1">
+                    <button onClick={() => props.onSelect(b.id)} className={`${listButton} flex-1 min-w-0`}>
                       <Box className="w-4 h-4 text-slate-400 shrink-0" />
                       <span className="flex-1 min-w-0">
                         <span className="block text-sm text-slate-200 truncate">{b.label?.trim() || `Building ${i + 1}`}</span>
                         <span className="block text-[11px] text-slate-500">
                           {Math.round(b.wallHeight ?? 0)} ft tall · {b.roofType && b.roofType !== "auto" ? `${b.roofType} roof` : "auto roof"}
                           {b.importSource === "osm" ? " · from map data" : ""}
-                          {isOwnBuilding(b) ? <span className="text-emerald-400"> · yours</span> : ""}
                         </span>
                       </span>
                     </button>
+                    <label className="flex items-center gap-1 px-1.5 text-[11px] text-slate-300 cursor-pointer shrink-0" title="Yours: cameras can go on it">
+                      <input type="checkbox" className="accent-emerald-500" checked={isOwnBuilding(b)} onChange={e => props.onMine(b.id, e.target.checked)} aria-label={`${b.label?.trim() || `Building ${i + 1}`} is mine`} />
+                      Mine
+                    </label>
                   </li>
                 ))}
               </ul>
@@ -164,10 +178,10 @@ export function StepPanel(props: Props) {
 
       {step === "cameras" && (
         <>
+          {props.coverage}
           <button onClick={() => props.onTool("add-camera")} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold">
             <Plus className="w-4 h-4" /> Add a camera <span className="text-[10px] px-1.5 rounded bg-black/20 font-mono">C</span>
           </button>
-          {props.coverage}
           <div className={card}>
             <div className="flex items-center justify-between mb-1">
               <div className="text-[10px] uppercase font-bold text-slate-400">Cameras ({cameras.length})</div>
@@ -187,8 +201,8 @@ export function StepPanel(props: Props) {
                 {cameras.map((cam, i) => {
                   const identify = Math.round(getDoriDistances(cam)[0].distance);
                   return (
-                    <li key={cam.id}>
-                      <button onClick={() => props.onSelect(cam.id)} className={listButton}>
+                    <li key={cam.id} className="flex items-center gap-1">
+                      <button onClick={() => props.onSelect(cam.id)} className={`${listButton} flex-1 min-w-0`}>
                         <span className="w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[11px] font-bold text-white" style={{ background: cam.color }}>
                           {i + 1}
                         </span>
@@ -198,6 +212,9 @@ export function StepPanel(props: Props) {
                             {Math.round(cam.mount?.height ?? cam.height ?? 0)} ft high · {Math.round(cam.hFov ?? cam.fov)}° · faces to ~{identify} ft
                           </span>
                         </span>
+                      </button>
+                      <button onClick={() => props.onLook(cam.id)} className={lookButton} title="Look through this camera" aria-label={`Look through ${cam.label}`}>
+                        <Eye className="w-4 h-4" />
                       </button>
                     </li>
                   );
@@ -210,6 +227,11 @@ export function StepPanel(props: Props) {
 
       {step === "review" && (
         <>
+          {cameras.length > 0 && (
+            <button onClick={() => props.onLook(cameras[0].id)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold shadow-lg shadow-emerald-500/20">
+              <Eye className="w-4 h-4" /> Look through each camera
+            </button>
+          )}
           {props.coverage}
           <div className="grid grid-cols-2 gap-2">
             <button onClick={() => props.onView("iso3d")} className={action}>
@@ -257,7 +279,7 @@ export function StepPanel(props: Props) {
           </button>
           <p className="text-xs text-slate-400 -mt-2">
             {props.reportViews > 0
-              ? `Includes your ${props.reportViews} picked view${props.reportViews === 1 ? "" : "s"}, the camera list and each camera's view.`
+              ? `Includes the site plan, the coverage checklist, the camera list, every camera's view, a parts list and your ${props.reportViews} added view${props.reportViews === 1 ? "" : "s"}.`
               : "Includes the site plan, the coverage checklist, the camera list, a parts list and every camera's view."}
           </p>
           <div className="space-y-2">

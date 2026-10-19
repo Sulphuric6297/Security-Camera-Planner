@@ -5,6 +5,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { pointInPolygonXY, polygonArea } from "../lib/geometry";
+import { straightSkeleton, type SkeletonNode } from "./roofSkeleton";
 
 type P = { x: number; y: number };
 export type RoofKind = "flat" | "gable" | "hip";
@@ -179,8 +180,64 @@ const geometryFrom = (positions: number[]) => {
 };
 
 /**
+ * A pitched roof that follows any outline (its straight skeleton): every wall sends a roof slope
+ * inward and they meet in hips, valleys and ridges. For a gable roof, end slopes that come to a
+ * point (triangles) stand up as gable walls instead. No eave overhang. Null if it can't be built.
+ */
+const skeletonRoof = (pts: P[], kind: RoofKind, pitch: number, maxRise: number): RoofParts | null => {
+  const sk = straightSkeleton(pts, maxRise / pitch);
+  if (!sk) return null;
+  const gableFaces = new Set<number>();
+  if (kind === "gable") {
+    // Triangular end faces whose tip no other end face shares become gable walls: their tip
+    // moves out onto the wall line, which also stretches the ridge to it.
+    const tipOf = (i: number) => {
+      const f = sk.faces[i];
+      if (f.length !== 1 || f[0].length !== 3) return null;
+      const tips = f[0].filter(p => p.z > 1e-6);
+      return tips.length === 1 ? tips[0] : null;
+    };
+    const uses = new Map<SkeletonNode, number>();
+    sk.faces.forEach((_, i) => {
+      const tip = tipOf(i);
+      if (tip) uses.set(tip, (uses.get(tip) ?? 0) + 1);
+    });
+    sk.faces.forEach((_, i) => {
+      const tip = tipOf(i);
+      if (!tip || uses.get(tip) !== 1) return;
+      const a = sk.points[i];
+      const b = sk.points[(i + 1) % sk.points.length];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const s = ((tip.x - a.x) * dx + (tip.y - a.y) * dy) / (dx * dx + dy * dy);
+      if (s <= 0 || s >= 1) return;
+      tip.x = a.x + s * dx;
+      tip.y = a.y + s * dy;
+      gableFaces.add(i);
+    });
+  }
+  const roofTri: number[] = [];
+  const gableTri: number[] = [];
+  const put = (out: number[], ...ps: SkeletonNode[]) => ps.forEach(p => out.push(p.x, p.z * pitch, p.y));
+  sk.faces.forEach((pieces, i) => {
+    for (const piece of pieces) {
+      for (let k = 1; k + 1 < piece.length; k++) put(gableFaces.has(i) ? gableTri : roofTri, piece[0], piece[k], piece[k + 1]);
+    }
+  });
+  let rise = 0;
+  for (const top of sk.tops) {
+    const tris = THREE.ShapeUtils.triangulateShape(top.map(p => new THREE.Vector2(p.x, p.y)), []);
+    for (const [a, b, c] of tris) put(roofTri, top[a], top[b], top[c]);
+  }
+  for (let i = 1; i < roofTri.length; i += 3) rise = Math.max(rise, roofTri[i]);
+  if (!roofTri.length || !roofTri.every(Number.isFinite)) return null;
+  return { roof: geometryFrom(roofTri), gables: gableTri.length ? geometryFrom(gableTri) : null, rise };
+};
+
+/**
  * Roof geometry in building-local space. `pitch` is rise over run (0.5 = a common 6/12 roof).
- * Pitched roofs only make sense on near-rectangular footprints; callers use chooseRoof().
+ * Rectangles get an exact roof with eaves, square-cornered L/T shapes a roof per wing, and any
+ * other outline a roof that follows its walls (skeletonRoof).
  */
 export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave?: number; maxRise?: number } = {}): RoofParts => {
   // L, T and other square-cornered shapes: one pitched roof per wing, intersecting.
@@ -196,6 +253,15 @@ export const buildRoof = (pts: P[], kind: RoofKind, opts: { pitch?: number; eave
         gables: gables.length ? mergeGeometries(gables) : null,
         rise: Math.max(...built.map(b => b.rise))
       };
+    }
+  }
+  // Any other shape that isn't a plain rectangle: a roof that follows every wall.
+  if (kind !== "flat") {
+    const r = orientedRect(pts);
+    if (polygonArea(pts) / Math.max(1e-6, 4 * r.a * r.b) < NOTCH_FILL) {
+      const roof = skeletonRoof(pts, kind, opts.pitch ?? 0.5, opts.maxRise ?? Infinity);
+      if (roof) return roof;
+      kind = "flat"; // the outline is too odd to roof: flat rather than a wrong roof
     }
   }
   if (kind === "flat") {

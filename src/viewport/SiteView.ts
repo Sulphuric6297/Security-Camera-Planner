@@ -9,7 +9,7 @@ import * as THREE from "three";
 import CameraControls from "camera-controls";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { DEFAULT_BUILDING, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_PITCH, OBJECT_ELEVATION_OFFSET, clamp, mountHeightForBuilding } from "../constants";
-import { getCameraHFov, suggestPitchForDistance } from "../lib/camera";
+import { getCameraAspectValue, getCameraHFov, suggestPitchForDistance } from "../lib/camera";
 import { boundsOfPoints, type Bounds } from "../lib/view";
 import {
   buildingBaseHeight,
@@ -42,6 +42,7 @@ const TILT_TOP = 8 * DEG;
 const DEFAULT_TILT = 52 * DEG;
 const MAX_TILT = 74 * DEG;
 const SELECT = 0x10b981;
+const SKY_HAZE = "#d6e2ea";
 
 type Drag = { move: (e: PointerEvent) => void; end: (e: PointerEvent) => void };
 type Handle = {
@@ -59,7 +60,7 @@ const STYLE = `
 .scp-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden}
 .scp-ov{position:absolute;left:0;top:0;will-change:transform;white-space:nowrap}
 .scp-cam{pointer-events:auto;cursor:move;display:flex;align-items:center;gap:4px;padding:2px 7px 2px 5px;border-radius:999px;background:rgba(255,255,255,.94);color:#1e293b;font:700 11px system-ui,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);border:1.5px solid var(--c)}
-.scp-cam i{width:8px;height:8px;border-radius:50%;background:var(--c);display:block}
+.scp-cam i{min-width:15px;height:15px;padding:0 3px;border-radius:999px;background:var(--c);color:#fff;font:800 10px/15px system-ui,sans-serif;font-style:normal;text-align:center;display:block}
 .scp-cam.sel{outline:2px solid #10b981;outline-offset:1px}
 .scp-pin{pointer-events:auto;cursor:move;display:flex;flex-direction:column;align-items:center}
 .scp-pin b{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font:800 12px system-ui,sans-serif;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45)}
@@ -134,6 +135,14 @@ export class SiteView {
   private hoverFrame = 0;
   private lastPointer: { x: number; y: number } | null = null;
   private disposers: (() => void)[] = [];
+  // Camera views: what a security camera sees, rendered from this same scene.
+  private povCam = new THREE.PerspectiveCamera(60, 16 / 9, 0.3, 20000);
+  private povId: string | null = null;
+  private skyDome: THREE.Mesh;
+  private horizon: THREE.Mesh;
+  private povRect = { x: 0, y: 0, width: 1, height: 1 };
+  private povInset = 0;
+  private groundTone: { src: unknown; color: THREE.Color } | null = null;
 
   constructor(private container: HTMLDivElement, private cb: ViewCallbacks) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
@@ -179,6 +188,36 @@ export class SiteView {
       sky.colorSpace = THREE.SRGBColorSpace;
       this.scene.background = sky;
     }
+    // Daylight sky for camera views: a dome, deep blue overhead fading to the haze color at the
+    // horizon (which the distance fog also uses, so far ground melts into the sky).
+    {
+      const geo = new THREE.SphereGeometry(1, 32, 16);
+      const pos = geo.getAttribute("position");
+      const colors = new Float32Array(pos.count * 3);
+      const zenith = new THREE.Color("#4f86c6");
+      const haze = new THREE.Color(SKY_HAZE);
+      const c = new THREE.Color();
+      for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        c.copy(haze).lerp(zenith, y > 0 ? Math.pow(y, 0.55) : 0);
+        colors.set([c.r, c.g, c.b], i * 3);
+      }
+      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      this.skyDome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false, toneMapped: false }));
+      this.skyDome.renderOrder = -10;
+      this.skyDome.visible = false;
+      this.skyDome.frustumCulled = false;
+      this.skyDome.userData.noPick = true;
+    }
+    // Ground beyond the site, out to the horizon (only in camera views), so the site doesn't end in a cliff.
+    {
+      const geo = new THREE.CircleGeometry(1, 64);
+      geo.rotateX(-Math.PI / 2);
+      this.horizon = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x7d8a6c }));
+      this.horizon.receiveShadow = true;
+      this.horizon.visible = false;
+      this.horizon.userData.noPick = true;
+    }
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.env = pmrem.fromScene(new RoomEnvironment()).texture;
     pmrem.dispose();
@@ -214,7 +253,7 @@ export class SiteView {
     c.addEventListener("rest", () => { this.posePinned = false; });
 
     this.ground = new Ground(this.renderer, () => this.invalidate(true));
-    this.scene.add(this.ground.group, this.itemsGroup, this.coverageGroup, this.fx);
+    this.scene.add(this.ground.group, this.itemsGroup, this.coverageGroup, this.fx, this.horizon, this.skyDome);
 
     const brushGeo = new THREE.BufferGeometry();
     brushGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(72 * 3), 3));
@@ -428,6 +467,145 @@ export class SiteView {
   }
 
   /** The current view as a PNG data URL. */
+  // ------------------------------------------------------------------ camera views
+
+  /** Look through a camera in the main view (drag aims it, scroll zooms the lens); null for the map. */
+  setPov(id: string | null, rightInset = this.povInset) {
+    if (rightInset !== this.povInset) {
+      this.povInset = rightInset;
+      this.invalidate();
+    }
+    if (id === this.povId) return;
+    this.povId = id;
+    this.controls.enabled = !id;
+    this.labelsLayer.style.display = id ? "none" : "";
+    this.handlesLayer.style.display = id ? "none" : "";
+    this.updateCursor();
+    this.invalidate();
+  }
+
+  /** Where the camera picture sits in the view while looking through a camera (CSS px). */
+  povFrame() {
+    return { ...this.povRect };
+  }
+
+  /** What a camera sees, as a canvas of the given size (rendered from this scene). */
+  renderCameraView(id: string, width: number, height: number): HTMLCanvasElement | null {
+    const cam = this.item(id) as CameraItem | null;
+    if (!cam || !this.doc) return null;
+    width = Math.max(16, Math.round(width));
+    height = Math.max(16, Math.round(height));
+    const out = document.createElement("canvas");
+    out.width = width;
+    out.height = height;
+    const ratio = this.renderer.getPixelRatio();
+    const canvas = this.renderer.domElement;
+    if (width <= canvas.width && height <= canvas.height) {
+      // Small enough: draw it in a corner of the view's own canvas (no resizing, which is slow),
+      // copy it out, then redraw the view.
+      const w = width / ratio, h = height / ratio;
+      this.drawCameraView(cam, { x: 0, y: this.size.height - h, width: w, height: h });
+      out.getContext("2d")?.drawImage(canvas, 0, 0, width, height, 0, 0, width, height);
+    } else {
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(width, height, false);
+      this.drawCameraView(cam, { x: 0, y: 0, width, height });
+      out.getContext("2d")?.drawImage(canvas, 0, 0);
+      this.renderer.setPixelRatio(ratio);
+      this.renderer.setSize(this.size.width, this.size.height, false);
+    }
+    this.render();
+    return out;
+  }
+
+  /** Renders a camera's view into a rectangle of the canvas (CSS px), in camera-view dress. */
+  private drawCameraView(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }) {
+    const doc = this.doc!;
+    const upf = this.upf();
+    const aspect = rect.width / rect.height;
+    const hFov = getCameraHFov(cam);
+    const pitch = (cam.pitch ?? DEFAULT_CAMERA_PITCH) * DEG;
+    const rot = cam.rotation * DEG;
+    const dir = new THREE.Vector3(Math.cos(rot) * Math.cos(pitch), Math.sin(pitch), Math.sin(rot) * Math.cos(pitch));
+    const eye = this.cameraWorld(cam).addScaledVector(dir, 0.6 * upf);
+    const span = this.siteSpan();
+    const c = this.povCam;
+    c.fov = (2 * Math.atan(Math.tan((hFov * DEG) / 2) / aspect)) / DEG;
+    c.aspect = aspect;
+    c.near = 0.25 * upf;
+    c.far = Math.max(cam.range * 6, span * 6);
+    c.position.copy(eye);
+    c.up.set(0, 1, 0);
+    c.lookAt(eye.clone().add(dir));
+    c.updateProjectionMatrix();
+    c.updateMatrixWorld();
+    // Ground to the horizon around the site, at its lowest point.
+    const cx = doc.canvas.width / 2;
+    const cz = doc.canvas.height / 2;
+    // A disc under the whole site (the site's ground covers its middle) out to the horizon.
+    this.horizon.scale.setScalar(span * 12);
+    this.horizon.position.set(cx, this.minGround() - 0.3 * upf, cz);
+    (this.horizon.material as THREE.MeshLambertMaterial).color.copy(this.photoTone());
+    // Hide map-only things; daylight sky with haze in the distance.
+    const own = this.objects.get(cam.id)?.obj;
+    const hidden = [this.coverageGroup, this.fx, this.ground.extras, own].filter((o): o is THREE.Object3D => !!o && o.visible);
+    hidden.forEach(o => (o.visible = false));
+    const bg = this.scene.background;
+    this.scene.background = new THREE.Color(SKY_HAZE);
+    this.scene.fog = new THREE.Fog(SKY_HAZE, Math.max(cam.range * 1.5, span * 0.8), Math.max(cam.range * 6, span * 5));
+    this.horizon.visible = true;
+    this.skyDome.visible = true;
+    this.skyDome.position.copy(eye);
+    this.skyDome.scale.setScalar(c.far * 0.9);
+    if (this.shadowsDirty) {
+      this.placeSun();
+      this.renderer.shadowMap.needsUpdate = true;
+      this.shadowsDirty = false;
+    }
+    this.renderer.setViewport(rect.x, rect.y, rect.width, rect.height);
+    this.renderer.setScissor(rect.x, rect.y, rect.width, rect.height);
+    this.renderer.setScissorTest(true);
+    this.renderer.render(this.scene, c);
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, this.size.width, this.size.height);
+    this.horizon.visible = false;
+    this.skyDome.visible = false;
+    this.scene.fog = null;
+    this.scene.background = bg;
+    hidden.forEach(o => (o.visible = true));
+  }
+
+  /** The photo's average color (the ground beyond the site takes it on), or grass. */
+  private photoTone() {
+    const img = this.ground.photo?.image as CanvasImageSource | undefined;
+    if (!img) return new THREE.Color(0x7d8a6c);
+    if (this.groundTone?.src !== img) {
+      const c = document.createElement("canvas");
+      c.width = c.height = 16;
+      const g = c.getContext("2d", { willReadFrequently: true });
+      let color = new THREE.Color(0x7d8a6c);
+      try {
+        g!.drawImage(img, 0, 0, 16, 16);
+        const d = g!.getImageData(0, 0, 16, 16).data;
+        let r = 0, gg = 0, b = 0;
+        for (let i = 0; i < d.length; i += 4) { r += d[i]; gg += d[i + 1]; b += d[i + 2]; }
+        const n = d.length / 4;
+        // A little darker than the average: roofs and roads brighten it, the grass beyond is darker.
+        color = new THREE.Color().setRGB((r / n / 255) * 0.88, (gg / n / 255) * 0.9, (b / n / 255) * 0.85, THREE.SRGBColorSpace);
+      } catch { /* keep grass */ }
+      this.groundTone = { src: img, color };
+    }
+    return this.groundTone.color;
+  }
+
+  private minGround() {
+    const doc = this.doc;
+    if (!doc) return 0;
+    let min = 0;
+    for (const v of Object.values(doc.heights)) if (v < min) min = v;
+    return min;
+  }
+
   capture() {
     this.render();
     return this.renderer.domElement.toDataURL("image/png");
@@ -459,6 +637,23 @@ export class SiteView {
   };
 
   private render() {
+    const pov = this.povId ? (this.item(this.povId) as CameraItem | null) : null;
+    if (this.povId && !pov) this.setPov(null);
+    if (pov) {
+      // The camera's picture, as large as fits, centered on black.
+      const aspect = getCameraAspectValue(pov);
+      const { height: H } = this.size;
+      const W = Math.max(1, this.size.width - this.povInset);
+      const w = Math.min(W, H * aspect);
+      const h = w / aspect;
+      this.povRect = { x: Math.round((W - w) / 2), y: Math.round((H - h) / 2), width: Math.round(w), height: Math.round(h) };
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      // WebGL viewports count from the bottom.
+      this.drawCameraView(pov, { ...this.povRect, y: H - this.povRect.y - this.povRect.height });
+      this.renderer.setViewport(0, 0, this.size.width, this.size.height);
+      return;
+    }
     const dist = this.controls.distance;
     const near = clamp(dist * 0.01, 0.05, 20);
     const far = dist * 6 + this.siteSpan() * 4;
@@ -925,11 +1120,14 @@ export class SiteView {
       o.anchor = anchor;
       o.dy = dy;
     };
+    let camNumber = 0;
     for (const item of doc.items) {
       const sel = item.id === this.selectedId;
       if (item.type === "camera") {
         const cam = item as CameraItem;
-        put(`cam:${cam.id}`, `${cam.label}|${cam.color}|${sel}`, () => {
+        // Numbered like the camera list and the report
+        const num = ++camNumber;
+        put(`cam:${cam.id}`, `${cam.label}|${cam.color}|${sel}|${num}`, () => {
           const el = document.createElement("div");
           el.className = `scp-cam${sel ? " sel" : ""}`;
           el.dataset.itemId = cam.id;
@@ -938,6 +1136,7 @@ export class SiteView {
           el.style.setProperty("--c", cam.color);
           el.title = `${cam.label}: drag to move`;
           const dot = document.createElement("i");
+          dot.textContent = String(num);
           el.append(dot, document.createTextNode(cam.label));
           return el;
         }, this.cameraWorld(cam), -16);
@@ -1489,6 +1688,13 @@ export class SiteView {
   private onPointerDown(e: PointerEvent) {
     const target = e.target as HTMLElement;
     if (!this.doc) return;
+    if (this.povId) {
+      if (e.button !== 0 || target.closest?.("button,input,select,[data-pov-ui]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.povAim(e);
+      return;
+    }
     // Rotate / tilt: right-drag (camera-controls), or Ctrl/Alt/Shift + left-drag.
     if (e.button === 2) return;
     const handleEl = target.closest?.("[data-handle]") as HTMLElement | null;
@@ -1682,6 +1888,19 @@ export class SiteView {
   private onWheel(e: WheelEvent) {
     e.preventDefault();
     e.stopPropagation();
+    if (this.povId) {
+      // Zoom the lens: narrower view up close, wider view out.
+      const cam = this.item(this.povId) as CameraItem | null;
+      if (!cam) return;
+      const delta = (e.deltaMode !== 0 ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.0015);
+      const hFov = Math.round(clamp(getCameraHFov(cam) * Math.exp(delta), 12, 130));
+      if (hFov !== Math.round(getCameraHFov(cam))) {
+        this.cb.onChange(cam.id, { hFov, fov: hFov });
+        clearTimeout(this.povWheelTimer);
+        this.povWheelTimer = window.setTimeout(() => this.cb.onCommit(), 350);
+      }
+      return;
+    }
     const line = e.deltaMode !== 0;
     // Scroll up/down (mouse wheel or two fingers) and pinch zoom at the cursor; a sideways
     // two-finger swipe slides the map sideways. Panning is a drag.
@@ -1693,6 +1912,38 @@ export class SiteView {
     }
     const delta = (line ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.002);
     this.zoomAt(e.clientX, e.clientY, Math.exp(delta));
+  }
+
+  private povWheelTimer = 0;
+
+  /** Drag inside a camera view to aim the camera: the picture follows the pointer. */
+  private povAim(e: PointerEvent) {
+    const id = this.povId!;
+    const start = this.item(id) as CameraItem | null;
+    if (!start) return;
+    const hFov = getCameraHFov(start);
+    const vFov = (2 * Math.atan(Math.tan((hFov * DEG) / 2) / (this.povRect.width / this.povRect.height))) / DEG;
+    const degPerPxX = hFov / this.povRect.width;
+    const degPerPxY = vFov / this.povRect.height;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const r0 = start.rotation;
+    const p0 = start.pitch ?? DEFAULT_CAMERA_PITCH;
+    this.setDragging(true);
+    const move = (ev: PointerEvent) => {
+      // Grab-and-drag: dragging right swings the view left (like moving the picture).
+      const rotation = (((r0 - (ev.clientX - x0) * degPerPxX) % 360) + 360) % 360;
+      const pitch = clamp(p0 + (ev.clientY - y0) * degPerPxY, -89, 30);
+      this.cb.onChange(id, { rotation: Math.round(rotation * 10) / 10, pitch: Math.round(pitch * 10) / 10 });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      this.setDragging(false);
+      this.cb.onCommit();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   /** Zoom keeping the ground point under the cursor fixed (scale about that point). */
@@ -1744,7 +1995,8 @@ export class SiteView {
   private updateCursor() {
     const t = this.tool;
     let c = "grab";
-    if (t.terrain || t.mode !== "select" || t.aimingCameraId || t.vertexInsert) c = "crosshair";
+    if (this.povId) c = "move";
+    else if (t.terrain || t.mode !== "select" || t.aimingCameraId || t.vertexInsert) c = "crosshair";
     else if (this.hoverId) c = this.item(this.hoverId)?.type === "building" && this.hoverId !== this.selectedId ? "pointer" : "move";
     this.container.style.cursor = c;
   }

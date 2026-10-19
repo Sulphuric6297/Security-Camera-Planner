@@ -58,9 +58,13 @@ export const loadBlobImage = (blob: Blob) =>
     img.src = url;
   });
 
+const creditFontPx = (imageWidth: number) => Math.max(6, Math.round(imageWidth / 140));
+/** Height of the provider credit box drawn along the bottom edge of an exported map image. */
+export const creditHeightPx = (imageWidth: number) => creditFontPx(imageWidth) * 1.6;
+
 // Draws the provider credit in the corner of an exported map image.
 export const drawAttribution = (ctx: CanvasRenderingContext2D, width: number, height: number, text: string) => {
-  const fontSize = Math.max(6, Math.round(width / 140));
+  const fontSize = creditFontPx(width);
   ctx.font = `${fontSize}px sans-serif`;
   const textW = ctx.measureText(text).width;
   ctx.fillStyle = "rgba(0,0,0,0.5)";

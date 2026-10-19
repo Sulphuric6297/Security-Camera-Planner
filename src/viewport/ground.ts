@@ -16,8 +16,8 @@ export class Ground {
   private photoUrl: string | null = null;
   private mapPlane: THREE.Mesh | null = null;
   private shade: THREE.Mesh | null = null;
-  private shadeUrl: string | null = null;
-  private extras = new THREE.Group();
+  /** Map-only drawings on the ground (grid, site edge, contours, cut-away sides): hidden in camera views. */
+  extras = new THREE.Group();
   private key = "";
   private heightsRef: Record<string, number> | null = null;
   private overlayKey = "";
@@ -264,7 +264,6 @@ export class Ground {
       shade.renderOrder = -1;
       noRaycast(shade);
       this.shade = shade;
-      this.shadeUrl = doc.shadeUrl;
       this.extras.add(shade);
     }
   }

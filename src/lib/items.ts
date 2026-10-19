@@ -58,6 +58,22 @@ export const vehicleDimensions = (type: VehicleType, unitsPerFoot = 1) => {
  * everything else (footprints, wall/tree/vehicle heights) is in plan units like the rest of the 3D scene.
  */
 /** Whether cameras may be mounted on a building: the user's own buildings only. */
+/**
+ * The index (0-based) for the next new camera: one past the highest "Camera N" already used, so
+ * deleting Camera 2 of 3 and adding one gives Camera 4, never a second Camera 3.
+ */
+export const nextCameraIndex = (items: { type: string; label?: string }[]) => {
+  let max = 0;
+  let count = 0;
+  for (const i of items) {
+    if (i.type !== "camera") continue;
+    count++;
+    const m = /^Camera (\d+)$/.exec((i.label ?? "").trim());
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return Math.max(max, count);
+};
+
 export const isOwnBuilding = (b: { mine?: boolean; importSource?: string }) => b.mine ?? !b.importSource;
 
 export const createItem = (

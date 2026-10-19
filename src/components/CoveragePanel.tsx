@@ -1,4 +1,3 @@
-import React from "react";
 import { Check, AlertTriangle, X, Target, Trash2, Wand2 } from "lucide-react";
 import type { CameraItem, TargetItem } from "../types";
 import type { TargetCoverage } from "../lib/coverage";

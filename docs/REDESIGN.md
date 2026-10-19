@@ -157,6 +157,25 @@ From walking the whole flow on screen (`npm run look -- -g flow`):
 - The camera view is a window you drag (snaps to edges), resize or minimize; it opens clear of
   the camera and the inspector.
 
+### Camera point of view first (done)
+
+The point of the app is to see what each camera will see, so that is now a main mode, not a small
+preview:
+
+- "Look through" a camera (Enter, the selection bar, the camera window's expand button or a camera
+  wall tile): the map view becomes that camera's picture, drawn from the same 3D scene (same
+  models, shadows and light) with a daylight sky, distance haze and ground out to the horizon.
+  Drag to aim, scroll to zoom the lens, ← → or the thumbnails to switch cameras, Esc for the map.
+  A recorder-style stamp (camera number, name, time) and what the camera covers are shown.
+- The small camera window, the camera wall and the report's camera views use the same renderer.
+- Wall cameras go up at a face-friendly 9 ft by default (not the roofline).
+- Trees are leafy (leaf cards around a dark core, branches); cars have a glass cabin, roof panel,
+  arches, mirrors and seams.
+- Roofs follow any outline (straight skeleton), so gable and hip work on odd shapes too.
+- Trees and cars are found on the photo much more often: canopy is told from lawn by darkness and
+  leaf texture (not shadow edges), touching crowns are split; cars are compared with the pavement
+  around them, so silver, black and white cars all show, and rows of parked cars are split.
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

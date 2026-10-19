@@ -9,6 +9,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "strict": true,
+    "noUnusedLocals": true,
     "skipLibCheck": true
   },
   "include": ["src", "code.tsx"]

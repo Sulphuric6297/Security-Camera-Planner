@@ -2,6 +2,7 @@
 import { test, expect } from "@playwright/test";
 import * as THREE from "three";
 import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, orientedRect, rectilinearParts } from "../../src/three/buildings";
+import { straightSkeleton } from "../../src/three/roofSkeleton";
 
 const rect = (w: number, d: number, angle = 0) => {
   const c = Math.cos(angle);
@@ -35,6 +36,90 @@ test.describe("3D building roofs", () => {
     const tShape = [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 40, y: 20 }, { x: 40, y: 50 }, { x: 20, y: 50 }, { x: 20, y: 20 }, { x: 0, y: 20 }];
     expect(rectilinearParts(tShape)).toHaveLength(2);
     expect(chooseRoof(tShape, 12)).toBe("gable");
+  });
+
+  test("gable and hip roofs follow any outline: they cover exactly the footprint, starting at the walls", () => {
+    // Projected roof area (gable walls are upright, so they add nothing)
+    const projected = (g: THREE.BufferGeometry) => {
+      const p = g.getAttribute("position");
+      let sum = 0;
+      for (let i = 0; i < p.count; i += 3) {
+        const ax = p.getX(i), az = p.getZ(i), bx = p.getX(i + 1), bz = p.getZ(i + 1), cx = p.getX(i + 2), cz = p.getZ(i + 2);
+        sum += Math.abs((bx - ax) * (cz - az) - (bz - az) * (cx - ax)) / 2;
+      }
+      return sum;
+    };
+    const area = (pts: { x: number; y: number }[]) => Math.abs(pts.reduce((s, p, i) => { const q = pts[(i + 1) % pts.length]; return s + p.x * q.y - q.x * p.y; }, 0)) / 2;
+    const shapes = {
+      // A store with a V-shaped notch in its front (like a real angled entrance)
+      notch: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 40 }, { x: 40, y: 40 }, { x: 30, y: 28 }, { x: 20, y: 40 }, { x: 0, y: 40 }],
+      odd: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 45, y: 30 }, { x: 10, y: 50 }, { x: -5, y: 25 }],
+      trapezoid: [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 40, y: 30 }, { x: 10, y: 30 }],
+      // A U with one angled wall (not square-cornered), turned
+      u: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 50 }, { x: 45, y: 50 }, { x: 45, y: 20 }, { x: 15, y: 20 }, { x: 10, y: 50 }, { x: 0, y: 50 }].map(p => ({ x: p.x * 0.9 + p.y * 0.3, y: -p.x * 0.3 + p.y * 0.9 }))
+    };
+    for (const [name, pts] of Object.entries(shapes)) {
+      for (const kind of ["gable", "hip"] as const) {
+        const roof = buildRoof(pts, kind, { pitch: 0.5, maxRise: 12 });
+        expect(projected(roof.roof), `${name} ${kind}`).toBeCloseTo(area(pts), 0);
+        expect(roof.rise, `${name} ${kind}`).toBeGreaterThan(3);
+        expect(roof.rise).toBeLessThanOrEqual(12 + 1e-6);
+        // Every roof point is over the footprint, and the roof's low edge is on the walls
+        const p = roof.roof.getAttribute("position");
+        for (let i = 0; i < p.count; i++) {
+          const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+          expect(y).toBeGreaterThanOrEqual(-1e-6);
+          const onWall = pts.some((a, k) => {
+            const b = pts[(k + 1) % pts.length];
+            const t = Math.max(0, Math.min(1, ((x - a.x) * (b.x - a.x) + (z - a.y) * (b.y - a.y)) / ((b.x - a.x) ** 2 + (b.y - a.y) ** 2)));
+            return Math.hypot(x - a.x - t * (b.x - a.x), z - a.y - t * (b.y - a.y)) < 1e-3;
+          });
+          if (y < 1e-6) expect(onWall, `${name} ${kind}: eave point on a wall`).toBe(true);
+        }
+      }
+    }
+    // The notch stays open; the store is roofed on both sides of it
+    const roof = new THREE.Mesh(buildRoof(shapes.notch, "gable").roof, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+    const hitsAt = (x: number, z: number) =>
+      new THREE.Raycaster(new THREE.Vector3(x, 100, z), new THREE.Vector3(0, -1, 0)).intersectObject(roof).length > 0;
+    expect(hitsAt(30, 36)).toBe(false);
+    expect(hitsAt(10, 36)).toBe(true);
+    expect(hitsAt(50, 36)).toBe(true);
+    expect(hitsAt(30, 10)).toBe(true);
+  });
+
+  test("the roof skeleton handles square-cornered shapes (many corners meeting at once)", () => {
+    const area = (pts: { x: number; y: number }[]) => Math.abs(pts.reduce((s, p, i) => { const q = pts[(i + 1) % pts.length]; return s + p.x * q.y - q.x * p.y; }, 0)) / 2;
+    const shapes = [
+      [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 20, y: 20 }, { x: 20, y: 60 }, { x: 0, y: 60 }], // L
+      [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 40, y: 20 }, { x: 40, y: 50 }, { x: 20, y: 50 }, { x: 20, y: 20 }, { x: 0, y: 20 }], // T
+      [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 50 }, { x: 45, y: 50 }, { x: 45, y: 20 }, { x: 15, y: 20 }, { x: 15, y: 50 }, { x: 0, y: 50 }], // U
+      [{ x: 0, y: 0 }, { x: 30, y: 0 }, { x: 30, y: 30 }, { x: 0, y: 30 }], // square: a pyramid
+      [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 10 }, { x: 30, y: 10 }, { x: 30, y: 20 }, { x: 40, y: 20 }, { x: 40, y: 30 }, { x: 0, y: 30 }] // E-ish notch
+    ];
+    for (const pts of shapes) {
+      const sk = straightSkeleton(pts);
+      expect(sk).not.toBeNull();
+      let covered = 0;
+      for (const face of sk!.faces) for (const piece of face) for (let k = 1; k + 1 < piece.length; k++) {
+        const [a, b, c] = [piece[0], piece[k], piece[k + 1]];
+        covered += Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / 2;
+      }
+      expect(covered).toBeCloseTo(area(pts), 3);
+      // Every edge has a roof face
+      expect(sk!.faces.every(f => f.length > 0)).toBe(true);
+    }
+  });
+
+  test("a gable roof on a plain outline from the skeleton matches the rectangle roof", () => {
+    // 40 x 20 rotated a little and with one extra point on an edge (so it takes the general path)
+    const pts = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 20 }, { x: 0, y: 20 }];
+    const sk = straightSkeleton(pts)!;
+    expect(sk.points).toHaveLength(4); // the straight-through point is dropped
+    // Short ends come to a point, long sides are trapezoids; ridge at half the width
+    const heights = sk.faces.flat(2).map(p => p.z);
+    expect(Math.max(...heights)).toBeCloseTo(10, 6);
+    expect(sk.faces.filter(f => f.length === 1 && f[0].length === 3)).toHaveLength(2);
   });
 
   test("a house with a small corner cut out (a patio) keeps the notch open under its roof", () => {

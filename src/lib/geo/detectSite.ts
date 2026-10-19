@@ -4,7 +4,8 @@ import { pointInPolygonXY } from "../geometry";
 import { createItem } from "../items";
 import { buildingWorldPoints } from "../planGeom";
 import type { BuildingItem, ParkingItem, TreeItem } from "../../types";
-import { detectTrees, detectVehicles } from "./detect";
+import { detectTrees, detectVehicles, type DetectImage } from "./detect";
+import { creditHeightPx } from "./imagery";
 
 const FT_PER_M = 3.28084;
 
@@ -16,29 +17,23 @@ const loadImage = (url: string) =>
     img.src = url;
   });
 
+type SiteRect = { x: number; y: number; width: number; height: number };
+
 /**
+ * Finds trees and parked cars on the photo, already scaled to detection size.
  * @param rect where the photo sits on the plan (plan units)
  * @param unitsPerFoot plan units per foot
+ * @param creditPx height of the map credit box along the photo's bottom edge, in image pixels
  */
-export const detectSiteObjects = async (
-  url: string,
-  rect: { x: number; y: number; width: number; height: number },
+export const findSiteObjects = (
+  data: DetectImage,
+  rect: SiteRect,
   unitsPerFoot: number,
-  buildings: BuildingItem[]
-): Promise<{ trees: TreeItem[]; vehicles: ParkingItem[] }> => {
-  const img = await loadImage(url);
+  buildings: BuildingItem[],
+  creditPx = 0
+): { trees: TreeItem[]; vehicles: ParkingItem[] } => {
+  const { width: w, height: h } = data;
   const widthM = rect.width / unitsPerFoot / FT_PER_M;
-  // About 25 cm per pixel: plenty for crowns and cars, and fast.
-  const scale = Math.min(1, (widthM / 0.25) / img.naturalWidth);
-  const w = Math.max(16, Math.round(img.naturalWidth * scale));
-  const h = Math.max(16, Math.round(img.naturalHeight * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return { trees: [], vehicles: [] };
-  ctx.drawImage(img, 0, 0, w, h);
-  const data = ctx.getImageData(0, 0, w, h);
   const mpp = widthM / w;
   const unitsPerPx = rect.width / w;
   const toPlan = (px: number, py: number) => ({ x: rect.x + px * unitsPerPx, y: rect.y + py * (rect.height / h) });
@@ -67,7 +62,10 @@ export const detectSiteObjects = async (
       if (pointInPolygonXY(toPlan(x + 0.5, y + 0.5), o.pts)) excludeMask[y * w + x] = 1;
     }
   });
-  const exclude = (x: number, y: number) => excludeMask[y * w + x] === 1;
+  // The map credit (a dark box with small text) looks just like leafy canopy; its width depends
+  // on the font, so leave out the whole strip.
+  const creditTop = creditPx > 0 ? h - Math.ceil(creditPx) - 1 : h;
+  const exclude = (x: number, y: number) => y >= creditTop || excludeMask[y * w + x] === 1;
 
   const foundTrees = detectTrees(data, { metersPerPx: mpp, exclude, maxTrees: 150 });
   const foundCars = detectVehicles(data, { metersPerPx: mpp, exclude, maxVehicles: 40 });
@@ -88,4 +86,29 @@ export const detectSiteObjects = async (
     // A "car" under a tree crown is more likely a shadow.
     .filter(v => !trees.some(t => Math.hypot(t.x - v.x, t.y - v.y) < t.radius));
   return { trees, vehicles };
+};
+
+/**
+ * @param rect where the photo sits on the plan (plan units)
+ * @param unitsPerFoot plan units per foot
+ */
+export const detectSiteObjects = async (
+  url: string,
+  rect: SiteRect,
+  unitsPerFoot: number,
+  buildings: BuildingItem[]
+): Promise<{ trees: TreeItem[]; vehicles: ParkingItem[] }> => {
+  const img = await loadImage(url);
+  const widthM = rect.width / unitsPerFoot / FT_PER_M;
+  // About 25 cm per pixel: plenty for crowns and cars, and fast.
+  const scale = Math.min(1, (widthM / 0.25) / img.naturalWidth);
+  const w = Math.max(16, Math.round(img.naturalWidth * scale));
+  const h = Math.max(16, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return { trees: [], vehicles: [] };
+  ctx.drawImage(img, 0, 0, w, h);
+  return findSiteObjects(ctx.getImageData(0, 0, w, h), rect, unitsPerFoot, buildings, creditHeightPx(img.naturalWidth) * (h / img.naturalHeight));
 };

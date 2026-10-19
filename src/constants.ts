@@ -31,8 +31,13 @@ export const defaultCameraLabelOffset = (rotationDeg: number) => {
   const rad = (rotationDeg * Math.PI) / 180;
   return { x: -Math.cos(rad) * 38, y: -Math.sin(rad) * 38 };
 };
+/**
+ * Where a camera goes on a wall by default: a typical 9 ft (low enough to see faces), or just
+ * under the top of a shorter wall. Mount presets (Doorbell, Eave...) change it.
+ */
+export const WALL_MOUNT_FT = 9;
 export const mountHeightForBuilding = (building?: { wallHeight?: number }) =>
-  Math.max(6, Math.round(((building?.wallHeight ?? DEFAULT_BUILDING.wallHeight) - 1) * 2) / 2);
+  Math.max(6, Math.min(WALL_MOUNT_FT, Math.round(((building?.wallHeight ?? DEFAULT_BUILDING.wallHeight) - 1) * 2) / 2));
 export const TERRAIN_BRUSH_MIN = 1;
 export const TERRAIN_BRUSH_MAX = 12;
 export const TERRAIN_FALLOFF_MIN = 0.5;

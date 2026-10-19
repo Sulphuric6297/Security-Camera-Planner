@@ -1,6 +1,6 @@
 // Pure-logic tests (no browser page): new items get real-world sizes at any map scale.
 import { test, expect } from "@playwright/test";
-import { VEHICLE_SIZES, createItem, migrateItems } from "../../src/lib/items";
+import { VEHICLE_SIZES, createItem, migrateItems, nextCameraIndex } from "../../src/lib/items";
 
 test.describe("real-world item sizes", () => {
   test("vehicles, trees and buildings are real size in feet", () => {
@@ -36,4 +36,15 @@ test.describe("real-world item sizes", () => {
     expect(fixed.height).toBeCloseTo(VEHICLE_SIZES.van.length, 5);
     expect(kept).toEqual(edited);
   });
+});
+
+
+test("new cameras take the next free number, never repeating one", () => {
+  const cams = (labels: string[]) => labels.map(label => ({ type: "camera", label }));
+  expect(nextCameraIndex([])).toBe(0); // -> Camera 1
+  expect(nextCameraIndex(cams(["Camera 1", "Camera 2"]))).toBe(2); // -> Camera 3
+  // Camera 2 of 3 was deleted: the next is Camera 4, not a second Camera 3
+  expect(nextCameraIndex(cams(["Camera 1", "Camera 3"]))).toBe(3);
+  // Renamed cameras still count
+  expect(nextCameraIndex(cams(["Front door", "Garage"]))).toBe(2);
 });

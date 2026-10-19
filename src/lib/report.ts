@@ -163,7 +163,7 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
         ${c.blindSpotFt != null ? `<span>blind spot under it: ${Math.round(c.blindSpotFt)} ft</span>` : ""}
         ${c.covers.length ? `<span>covers: ${c.covers.map(esc).join(", ")}</span>` : ""}
       </div>
-      ${r.pickedViews.length === 0 && c.viewImage ? `<img src="${c.viewImage}" alt="${esc(c.label)} view" />` : ""}
+      ${c.viewImage ? `<img src="${c.viewImage}" alt="${esc(c.label)} view" />` : ""}
     </div>`).join("");
 
   return `<!DOCTYPE html>
@@ -202,7 +202,7 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
   ${scheduleHtml}
   ${partsHtml}
   ${r.cameras.length ? `<h2>Cameras</h2>${cameraSections}` : ""}
-  ${r.pickedViews.length ? `<h2>Views</h2>${r.pickedViews.map(v => `<div class="item"><h3>${esc(v.label)}</h3><img src="${v.dataUrl}" alt="${esc(v.label)}" /></div>`).join("")}` : ""}
+  ${r.pickedViews.length ? `<h2>More views</h2>${r.pickedViews.map(v => `<div class="item"><h3>${esc(v.label)}</h3><img src="${v.dataUrl}" alt="${esc(v.label)}" /></div>`).join("")}` : ""}
   <p class="disclaimer">Distances and coverage are estimates from the camera's lens and resolution under good lighting. Real results depend on the camera model, night vision, weather and installation.</p>
   ${opts.autoPrint ? "<script>window.onload = () => setTimeout(() => window.print(), 500);</script>" : ""}
 </body>

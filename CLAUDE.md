@@ -70,6 +70,7 @@ Useful commands:
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
 | `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
+| `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails switch cameras, Esc back; camera pictures rendered from the 3D scene |
 | `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.

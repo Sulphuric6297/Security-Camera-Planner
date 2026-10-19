@@ -1,4 +1,3 @@
-import L from "leaflet";
 import { clamp } from "../constants";
 
 // Building-mounted cameras go just under the eave.

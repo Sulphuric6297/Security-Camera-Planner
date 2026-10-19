@@ -21,7 +21,9 @@ test.describe("Import Site", () => {
     await page.locator("div.fixed button", { hasText: "Import Site" }).last().click();
     const done = page.getByText(/^Site imported\./);
     await expect(done).toBeVisible({ timeout: 60_000 });
-    await expect(done).toContainText("Added 2 buildings");
+    // The summary fades after a while: read it now.
+    const summary = (await done.textContent()) ?? "";
+    expect(summary).toContain("Added 2 buildings");
     // Where the imagery and elevation came from is on the Site step
     await expect(page.getByTestId("step-panel")).toContainText("global terrain tiles"); // USGS stubbed as unavailable
 
@@ -43,7 +45,7 @@ test.describe("Import Site", () => {
     expect(house.points).toHaveLength(6);
 
     // The tree crown and the parked car on the photo were placed as a tree and a vehicle
-    await expect(done).toContainText(/Placed 1 tree and 1 parked car found on the photo/);
+    expect(summary).toMatch(/Placed 1 tree and 1 parked car found on the photo/);
     const geo = await page.evaluate(() => (window as any).__scpProject().planGeoRef);
     const toPlan = (p: { lat: number; lon: number }) => ({
       x: geo.area.x + ((p.lon - geo.bounds.west) / (geo.bounds.east - geo.bounds.west)) * geo.area.width,

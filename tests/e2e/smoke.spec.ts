@@ -7,6 +7,9 @@ test.describe("app shell", () => {
     // The side panel shows the current step's workspace
     await expect(page.getByTestId("step-panel")).toHaveAttribute("data-step", "site");
     await expect(page.getByText("Step 1 of 5")).toBeVisible();
+    // One place to start (the welcome card), not the same buttons twice
+    await expect(page.getByTestId("step-panel")).toContainText("Start in the middle of the screen");
+    await expect(page.getByRole("button", { name: "Search for my address" })).toHaveCount(0);
 
     await page.getByRole("tab", { name: "3D" }).click();
     await expect(page.locator("canvas").first()).toBeVisible();

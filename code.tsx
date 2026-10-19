@@ -5,50 +5,33 @@ import JSZip from "jszip";
 
 import proj4 from "proj4";
 
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   Camera,
   Square,
+  Eye,
   Move,
   Trash2,
   Download,
-  Upload,
   Type,
   Trees,
   Car,
-  Image as ImageIcon,
   Unlock,
   Lock,
   Map as MapIcon,
-  Save,
-  FolderOpen,
   X,
-  Layers,
   LayoutGrid,
   Plus,
 
   Undo,
   Redo,
   Maximize,
-  Minimize,
   Mountain,
   WandSparkles,
   LoaderCircle,
   MapPin,
-  Hand,
   SquareDashed,
-  Copy,
-  RotateCw,
-  Maximize2,
-  ZoomIn,
-  ZoomOut,
-  Crosshair,
-  Navigation2,
   ChevronDown,
-  Target,
-  RotateCcw,
-  ChevronUp,
-  Compass
+  Target
 } from "lucide-react";
 import GridLayoutBase from "react-grid-layout";
 // react-grid-layout v2 ships newer props than the bundled v1 type definitions describe.
@@ -56,7 +39,7 @@ const GridLayout = GridLayoutBase as unknown as React.ComponentType<any>;
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { NVRCard } from "./src/components/NVRCard";
-import { useProjectField, getProject, useProject, createEmptyProject, projectRef } from "./src/state/project";
+import { useProjectField, projectRef } from "./src/state/project";
 import { SitePickerMap } from "./src/components/SitePickerMap";
 import { CameraSetupPanel } from "./src/components/CameraSetupPanel";
 import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
@@ -64,38 +47,36 @@ import { StepPanel } from "./src/components/StepPanel";
 import { ToolPanel, type ToolDefaults } from "./src/components/ToolPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
 import { FloatingWindow } from "./src/components/FloatingWindow";
+import { CameraLook } from "./src/components/CameraLook";
 import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
 import { suggestCameras } from "./src/lib/suggest";
 import { estimateStorage } from "./src/lib/recording";
 import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
-import { boundsOfPoints, fitBounds, niceScaleBar, MAX_ZOOM, type Bounds } from "./src/lib/view";
+import { boundsOfPoints, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
-import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_HFOV, DEFAULT_CAMERA_PITCH, DEFAULT_CAMERA_RANGE_FT, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, MAP_OVERLAY_OFFSET, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, OBJECT_ELEVATION_OFFSET, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, defaultCameraLabelOffset, generateId, mountHeightForBuilding } from "./src/constants";
-import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, pixelsPerFootAt, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
+import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_PITCH, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, generateId, mountHeightForBuilding } from "./src/constants";
+import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
-import { TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
-import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
+import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, SITE_MAX_WIDTH_FT, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, normalizeAngle, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
+import { getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
-import { disposeObjectDeep } from "./src/three/dispose";
-import { type PhotoRect } from "./src/three/buildings";
-import { createBuildingModel } from "./src/three/buildingMesh";
-import { create3dCar, create3dTree, getItemTypeLabel, resolveVehicleType } from "./src/three/models";
+import { getItemTypeLabel, resolveVehicleType } from "./src/three/models";
 import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
 import { cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
-import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
+import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
@@ -146,7 +127,6 @@ export default function SecurityPlanner() {
   const [elevationImagery, setElevationImagery] = useState<MapImagerySource | "keep">("satellite");
   const elevationReadoutRef = useRef<HTMLDivElement>(null);
   const cameraReadoutRef = useRef<HTMLDivElement>(null);
-  const planBrushCursorRef = useRef<SVGCircleElement>(null);
   const [demTransformDrag, setDemTransformDrag] = useState<{
     mode: "move" | "scale" | "rotate";
     startMouse: { x: number; y: number };
@@ -395,7 +375,7 @@ export default function SecurityPlanner() {
 
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
-  const [maximizedCamId, setMaximizedCamId] = useState<string | null>(null);
+  const [povCamId, setPovCamId] = useState<string | null>(null);
   const nvrContainerRef = useRef<HTMLDivElement>(null);
   const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
   const nvrAspect = useMemo(() => {
@@ -468,15 +448,6 @@ export default function SecurityPlanner() {
   // Bilinear interpolation between terrain vertices so objects sit smoothly on slopes
   // (exact at grid vertices, so terrain meshes are unaffected).
   const getGridHeight = (x: number, y: number, map = terrainHeights) => heightAt(map, gridSize, x, y);
-
-  // Base elevation for a camera: building-mounted cameras sit on the building, not the ground under them.
-  const getCameraBaseHeight = (camera: CameraItem, camPos = getCameraPlanPosition(camera)) => {
-    if (camera.mount?.type === "building" && camera.mount.buildingId) {
-      const building = getBuildingById(camera.mount.buildingId);
-      if (building) return getBuildingBaseHeight(building);
-    }
-    return getGridHeight(camPos.x, camPos.y) + OBJECT_ELEVATION_OFFSET;
-  };
 
   const terrainStats = useMemo(() => getTerrainStats(terrainHeights), [terrainHeights]);
   const hasTerrain = terrainStats.relief > 0.01;
@@ -1303,13 +1274,6 @@ export default function SecurityPlanner() {
   const bg3dInputRef = useRef<HTMLInputElement>(null);
   const demInputRef = useRef<HTMLInputElement>(null);
 
-  // Camera preview renderer cache (prevent memory leaks from frequent recreation)
-  const cameraPreviewRendererRef = useRef<{
-    renderer: THREE.WebGLRenderer | null;
-    pmremGenerator: THREE.PMREMGenerator | null;
-    envTexture: THREE.Texture | null;
-  }>({ renderer: null, pmremGenerator: null, envTexture: null });
-
   const cameraSnapshotRendererRef = useRef<{
     renderer: THREE.WebGLRenderer | null;
     pmremGenerator: THREE.PMREMGenerator | null;
@@ -1482,9 +1446,6 @@ export default function SecurityPlanner() {
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
   const bgImageRef = useRef<HTMLImageElement | null>(null);
 
-  const snapValue = (value: number, snap = snapToGrid) =>
-    snap ? Math.round(value / gridSize) * gridSize : value;
-
   const getBuildingPoints = (building: BuildingItem) =>
     building.points && building.points.length >= 3 ? building.points : rectanglePoints(building.width, building.height);
 
@@ -1493,49 +1454,6 @@ export default function SecurityPlanner() {
     fontSize: building.labelFontSize ?? buildingLabelDefaults.fontSize,
     fontWeight: building.labelFontWeight ?? buildingLabelDefaults.fontWeight
   });
-
-  const splitLabelLines = (label: string) => {
-    const clean = label.trim();
-    if (!clean) return ["Building"];
-    const words = clean.split(/\s+/);
-    if (words.length <= 1) return [clean];
-    let best = { lines: [clean], maxLen: clean.length };
-    for (let i = 1; i < words.length; i += 1) {
-      const lineA = words.slice(0, i).join(" ");
-      const lineB = words.slice(i).join(" ");
-      const maxLen = Math.max(lineA.length, lineB.length);
-      if (maxLen < best.maxLen) {
-        best = { lines: [lineA, lineB], maxLen };
-      }
-    }
-    return best.lines;
-  };
-
-  const getBuildingLabelLayout = (building: BuildingItem) => {
-    const points = getBuildingPoints(building);
-    const bounds = getPointsBounds(points);
-    const maxWidth = Math.max(bounds.width * 0.9, 24);
-    const maxHeight = Math.max(bounds.height * 0.7, 14);
-    const label = building.label?.trim() || "Building";
-    const font = getBuildingLabelFont(building);
-    const desiredSize = clamp(font.fontSize, 6, 32);
-
-    const estimateFont = (lines: string[]) => {
-      const maxChars = Math.max(...lines.map(line => Math.max(line.length, 1)));
-      const byWidth = Math.floor(maxWidth / (maxChars * 0.62));
-      const byHeight = Math.floor(maxHeight / (lines.length * 1.2));
-      return clamp(Math.min(byWidth, byHeight, desiredSize), 6, 32);
-    };
-
-    let lines = [label];
-    let fontSize = estimateFont(lines);
-    if (fontSize < 10 && label.includes(" ")) {
-      lines = splitLabelLines(label);
-      fontSize = estimateFont(lines);
-    }
-
-    return { lines, fontSize, maxWidth, fontFamily: font.fontFamily, fontWeight: font.fontWeight };
-  };
 
   const rotatePoint = (point: { x: number; y: number }, angle: number) => {
     const rad = (angle * Math.PI) / 180;
@@ -1560,23 +1478,6 @@ export default function SecurityPlanner() {
   const getBuildingEdgePointsWorld = (building: BuildingItem) => {
     const points = getBuildingPoints(building);
     return points.map(point => toWorldPoint(point, building));
-  };
-
-  const getBuildingBaseHeight = (building: BuildingItem) => {
-    const centerH = getGridHeight(building.x, building.y) + OBJECT_ELEVATION_OFFSET;
-    const points = getBuildingEdgePointsWorld(building);
-    if (points.length === 0) return centerH;
-
-    let minH = centerH;
-    for (let i = 0; i < points.length; i += 1) {
-      const p = points[i];
-      minH = Math.min(minH, getGridHeight(p.x, p.y) + OBJECT_ELEVATION_OFFSET);
-      const next = points[(i + 1) % points.length];
-      const mid = { x: (p.x + next.x) / 2, y: (p.y + next.y) / 2 };
-      minH = Math.min(minH, getGridHeight(mid.x, mid.y) + OBJECT_ELEVATION_OFFSET);
-    }
-
-    return minH;
   };
 
   // On its wall (just outside it) when mounted on a building.
@@ -1628,7 +1529,7 @@ export default function SecurityPlanner() {
     if (!kind) return null;
     const newItem = createItem(kind, x, y, {
       unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
-      cameraIndex: itemsRef.current.filter(i => i.type === "camera").length,
+      cameraIndex: nextCameraIndex(itemsRef.current),
       targetIndex: itemsRef.current.filter(i => i.type === "target").length,
       treeSize: toolDefaults.treeSize,
       treeType: toolDefaults.treeType,
@@ -1684,7 +1585,16 @@ export default function SecurityPlanner() {
     setSelectedId(newItem.id);
   };
 
+  // Edits from the panels (chips, fields, sliders) become one undo step each, once they settle;
+  // edits during a drag on the map are saved when the drag ends.
+  const settleTimerRef = useRef(0);
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
+    if (!interactingRef.current) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = window.setTimeout(() => {
+        if (!interactingRef.current) saveHistory();
+      }, 450);
+    }
     setItems(prev => {
       const current = prev.find(i => i.id === id);
       if (!current) return prev;
@@ -1851,7 +1761,7 @@ export default function SecurityPlanner() {
     setBackgroundMode('flat');
     setNvrLayout([]);
     setCompletedSteps([]);
-    setMaximizedCamId(null);
+    setPovCamId(null);
     setViewMode("plan");
     setMode("select");
     requestFit(null);
@@ -2182,202 +2092,46 @@ export default function SecurityPlanner() {
     showExportNotice(`Added to Report: ${label}`);
   };
 
-  const getCameraSnapshotRenderer = (width: number, height: number) => {
-    let cache = cameraSnapshotRendererRef.current;
-    if (!cache.renderer || !cache.canvas) {
-      const canvas = document.createElement("canvas");
-      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
-      renderer.setPixelRatio(1);
-      const pmremGenerator = new THREE.PMREMGenerator(renderer);
-      const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
-      cameraSnapshotRendererRef.current = { renderer, pmremGenerator, envTexture, canvas };
-      cache = cameraSnapshotRendererRef.current;
-    }
-    cache.renderer!.setSize(width, height, false);
-    return cache;
-  };
-
-  // Render a camera's perspective view to data URL - MATCHES Camera Preview Panel exactly
-  // Renders what a camera sees (shared offscreen WebGL renderer) onto a new 2D canvas.
+  // What a camera sees, drawn from the map's own 3D scene (same models, shadows and light), with
+  // the name and time stamped on like a recorder would.
   const renderCameraViewToCanvas = (cam: CameraItem, width = 1280): HTMLCanvasElement => {
     const aspect = getCameraAspectValue(cam);
     const height = Math.max(Math.round(width / 3.6), Math.round(width / aspect));
-
-    const camPos = getCameraPlanPosition(cam);
-    const camTerrainH = getCameraBaseHeight(cam, camPos); // Terrain (or mounting building) adjusted height
-    const camHeight = cam.mount?.height ?? cam.height ?? 10;
-    const hFov = cam.hFov ?? cam.fov;
-    const pitch = cam.pitch ?? DEFAULT_CAMERA_PITCH;
-    const range = cam.range;
-    const rotAngle = THREE.MathUtils.degToRad(cam.rotation);
-
-    // Calculate vertical FOV from horizontal FOV and aspect ratio to match 2D cone
-    const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
-    const vFov = THREE.MathUtils.radToDeg(vFovRad);
-
-    // Create mini Three.js scene with a daylight sky; haze beyond the camera's rated range.
-    const scene = new THREE.Scene();
-    const sky = new THREE.Color('#a9c8e6');
-    scene.background = sky;
-    scene.fog = new THREE.Fog(sky, Math.max(range * 1.2, 60), Math.max(range * 3, 200));
-
-    // Perspective camera at security camera position (Terrain Adjusted)
-    const perspCam = new THREE.PerspectiveCamera(vFov, aspect, 0.5, Math.max(range * 4, 400));
-    perspCam.position.set(camPos.x, camTerrainH + camHeight, camPos.y);
-
-    const pitchRad = THREE.MathUtils.degToRad(pitch);
-    const lookAt = new THREE.Vector3(
-      camPos.x + Math.cos(rotAngle) * Math.cos(pitchRad) * 100,
-      camTerrainH + camHeight + Math.sin(pitchRad) * 100,
-      camPos.y + Math.sin(rotAngle) * Math.cos(pitchRad) * 100
-    );
-    perspCam.lookAt(lookAt);
-
-    // Lighting
-    scene.add(new THREE.HemisphereLight(0xdbeafe, 0x4b5563, 0.8));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
-    dirLight.position.set(camPos.x + 100, 300, camPos.y + 50);
-    scene.add(dirLight);
-
-    // Ground with Terrain Height (match 3D terrain resolution)
-    const groundW = canvasSize.width;
-    const groundH = canvasSize.height;
-    const segW = Math.max(Math.round(canvasSize.width / gridSize), 1);
-    const segH = Math.max(Math.round(canvasSize.height / gridSize), 1);
-    const groundGeo = new THREE.PlaneGeometry(groundW, groundH, segW, segH);
-
-    // Apply terrain height to ground geometry
-    const pos = groundGeo.attributes.position;
-    const centerX = canvasSize.width / 2;
-    const centerY = canvasSize.height / 2;
-
-    for (let i = 0; i < pos.count; i++) {
-      const lx = pos.getX(i);
-      const ly = pos.getY(i);
-      const wx = lx + centerX;
-      const wy = centerY - ly;
-      const h = getGridHeight(wx, wy);
-      pos.setZ(i, h);
-    }
-    groundGeo.computeVertexNormals();
-
-    const ground = new THREE.Mesh(
-      groundGeo,
-      new THREE.MeshStandardMaterial({ color: 0x6b7f5a, roughness: 1, metalness: 0 })
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.set(centerX, 0, centerY);
-    scene.add(ground);
-
-    // Background image (terrain deformed); roofs sample the same photo.
-    let viewRoofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
-    if (bgImageRef.current) {
-      const tex = new THREE.CanvasTexture(bgImageRef.current);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      viewRoofPhoto = { texture: tex, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
-
-      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
-      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
-      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
-
-      const mapPosAttr = mapGeometry.attributes.position;
-      for (let i = 0; i < mapPosAttr.count; i++) {
-        const lx = mapPosAttr.getX(i);
-        const ly = mapPosAttr.getY(i);
-        const wx = bgSettings.x + bgSettings.width / 2 + lx;
-        const wy = bgSettings.y + bgSettings.height / 2 - ly;
-        const h = getGridHeight(wx, wy);
-        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET);
-      }
-      mapGeometry.computeVertexNormals();
-
-      const mapPlane = new THREE.Mesh(
-        mapGeometry,
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: bgSettings.opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 })
-      );
-      mapPlane.renderOrder = -1;
-      mapPlane.rotation.x = -Math.PI / 2;
-      mapPlane.position.set(bgSettings.x + bgSettings.width / 2, 0, bgSettings.y + bgSettings.height / 2);
-      scene.add(mapPlane);
-    }
-
-    // Add items (Terrain Aware)
-    items.forEach(item => {
-      const itemH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
-
-      if (item.type === "building") {
-        const bld = item as BuildingItem;
-        const baseH = getBuildingBaseHeight(bld);
-        const mesh = createBuildingModel(bld, baseH, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, photo: roofPhoto ? viewRoofPhoto : null, outlines: false });
-        scene.add(mesh);
-      }
-      if (item.type === "tree") {
-        const tree = create3dTree(item as TreeItem);
-        tree.position.set(item.x, itemH, item.y);
-        scene.add(tree);
-      }
-      if (item.type === "parking") {
-        const car = create3dCar(item as ParkingItem);
-        car.position.set(item.x, itemH, item.y);
-        scene.add(car);
-      }
-    });
-
-    // Render
-    const snapshot = getCameraSnapshotRenderer(width, height);
-    const renderer = snapshot.renderer;
-    const canvas = snapshot.canvas!;
-
-    // Apply PBR Lighting (RoomEnvironment) to fix black models in preview
-    scene.environment = snapshot.envTexture ?? null;
-
-    // Load scene background image if present (same as Camera Preview Panel)
-    if (sceneBackgroundImg) {
-      try {
-        // Load texture synchronously by creating an image and converting it
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.src = sceneBackgroundImg;
-        // If image is already loaded (cached), use it
-        if (img.complete && img.naturalWidth > 0) {
-          const bgTexture = new THREE.Texture(img);
-          bgTexture.needsUpdate = true;
-          scene.background = bgTexture;
-        }
-      } catch (e) {
-        // Fallback - texture will load async, not available for this render
+    let canvas = viewRef.current?.renderCameraView(cam.id, width, height) ?? null;
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const blank = canvas.getContext("2d");
+      if (blank) {
+        blank.fillStyle = "#18181b";
+        blank.fillRect(0, 0, width, height);
       }
     }
+    const ctx = canvas.getContext("2d");
+    if (ctx) stampCameraView(ctx, cam, width, height);
+    return canvas;
+  };
 
-    renderer!.render(scene, perspCam);
-    // This scene is rebuilt for every snapshot; free its GPU resources (but keep the shared env map).
-    disposeObjectDeep(scene, new Set(snapshot.envTexture ? [snapshot.envTexture] : []));
-    if (scene.background instanceof THREE.Texture) scene.background.dispose();
-
-    // Copy WebGL canvas to a 2D canvas for overlay (WebGL and 2D contexts can't coexist on same canvas)
-    const outputCanvas = document.createElement('canvas');
-    outputCanvas.width = width;
-    outputCanvas.height = height;
-    const ctx = outputCanvas.getContext('2d');
-    if (ctx) {
-      // Draw the WebGL render first
-      ctx.drawImage(canvas, 0, 0);
-
-      // Top bar with camera name only
-      const k = width / 1280;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(0, 0, width, 40 * k);
-
-      // Camera icon and label
-      ctx.fillStyle = '#10b981';
-      ctx.font = `bold ${Math.round(24 * k)}px system-ui, sans-serif`;
-      ctx.fillText('📷', 16 * k, 28 * k);
-      ctx.fillStyle = '#fff';
-      ctx.font = `bold ${Math.round(22 * k)}px system-ui, sans-serif`;
-      ctx.fillText(cam.label, 56 * k, 28 * k);
-    }
-
-    return outputCanvas;
+  // Recorder-style stamp: camera number and name top-left, date and time top-right.
+  const stampCameraView = (ctx: CanvasRenderingContext2D, cam: CameraItem, width: number, height: number) => {
+    const number = (items.filter(i => i.type === "camera") as CameraItem[]).findIndex(c => c.id === cam.id) + 1;
+    const k = Math.max(0.5, Math.min(width, height * 1.78) / 1280);
+    const size = Math.round(26 * k);
+    const pad = Math.round(18 * k);
+    const now = new Date();
+    const two = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}  ${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
+    ctx.save();
+    ctx.font = `600 ${size}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    ctx.textBaseline = "top";
+    ctx.shadowColor = "rgba(0,0,0,0.85)";
+    ctx.shadowBlur = Math.max(2, 4 * k);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(`CAM ${number > 0 ? two(number) : "--"}  ${cam.label.toUpperCase()}`, pad, pad);
+    ctx.textAlign = "right";
+    ctx.fillText(stamp, width - pad, pad);
+    ctx.restore();
   };
 
   const renderCameraViewToDataUrl = (cam: CameraItem): string => renderCameraViewToCanvas(cam).toDataURL('image/png');
@@ -2551,38 +2305,6 @@ export default function SecurityPlanner() {
     link.click();
     document.body.removeChild(link);
   };
-  const escapeHtml = (text: string) =>
-    String(text ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
-
-  // Camera schedule for the report: mounting, lens and what each camera can make out at what distance.
-  const buildCameraScheduleHtml = () => {
-    const cameras = items.filter(i => i.type === "camera") as CameraItem[];
-    if (cameras.length === 0) return "";
-    const rows = cameras.map((cam, i) => {
-      const dori = getDoriDistances(cam);
-      const height = Math.round(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT);
-      const mountedOn = cam.mount?.type === "building" && cam.mount.buildingId
-        ? `on ${escapeHtml((getBuildingById(cam.mount.buildingId) as BuildingItem | undefined)?.label || "building")}`
-        : "free-standing";
-      const res = RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`;
-      return `<tr>
-        <td><span class="dot" style="background:${escapeHtml(cam.color)}"></span>${i + 1}. ${escapeHtml(cam.label)}</td>
-        <td>${height} ft ${mountedOn}</td>
-        <td>${Math.round(cam.hFov ?? cam.fov)}° · ${res}</td>
-        <td>${Math.abs(Math.round(cam.pitch ?? DEFAULT_CAMERA_PITCH))}° down</td>
-        <td>${Math.round(dori[0].distance)} ft</td>
-        <td>${Math.round(dori[1].distance)} ft</td>
-        <td>${Math.round(dori[3].distance)} ft</td>
-        <td>${escapeHtml(cam.description || "")}</td>
-      </tr>`;
-    }).join("");
-    return `<h2>Camera schedule</h2>
-      <table>
-        <thead><tr><th>Camera</th><th>Mount</th><th>Lens</th><th>Tilt</th><th>Identify to</th><th>Recognize to</th><th>Detect to</th><th>Notes</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <p class="note">Identify ≈ recognize a stranger's face or read a plate (250 px/m); Recognize ≈ tell if it's someone you know (125 px/m); Detect ≈ notice someone is there (25 px/m), per IEC 62676-4. Distances assume good lighting.</p>`;
-  };
 
   // Report data: cameras (numbered in plan order) and protected spots with their coverage.
   const buildReportCameras = (withViews: boolean): ReportCamera[] =>
@@ -2664,7 +2386,8 @@ export default function SecurityPlanner() {
     }
     printWindow.document.write("<p style='font-family:system-ui;padding:40px;color:#334155'>Preparing your report…</p>");
 
-    // The site plan always leads; picked views ("Add to report") replace the automatic camera views.
+    // The site plan always leads, every camera's view is shown with it, and views the user picked
+    // ("Add to report") come as an extra section.
     let planImage: string | undefined;
     try {
       planImage = await renderPlanToDataUrl({ scale: 2, includeGrid: showGrid, backgroundColor: "#f8fafc" });
@@ -2677,9 +2400,9 @@ export default function SecurityPlanner() {
         title: projectName,
         site: siteLocation,
         preparedAt: new Date().toLocaleString(),
-        planImage: picked.length ? undefined : planImage,
+        planImage,
         pickedViews: picked,
-        cameras: buildReportCameras(picked.length === 0),
+        cameras: buildReportCameras(true),
         spots: buildReportSpots(),
         counts: { buildings: items.filter(i => i.type === "building").length },
         storage: (() => {
@@ -2787,7 +2510,6 @@ export default function SecurityPlanner() {
   });
 
   const handleSaveProject = async () => {
-    const hasDem = !!demData;
     const hasTerrain = Object.keys(terrainHeights).length > 0;
 
     try {
@@ -2894,18 +2616,6 @@ export default function SecurityPlanner() {
       }
     };
     reader.readAsText(file);
-  };
-
-  const handleBg3dUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setSceneBackgroundImg(result);
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleBackgroundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3084,12 +2794,6 @@ export default function SecurityPlanner() {
 
   // --- The map view (2D and 3D are one view; see src/viewport) ---
   const viewRef = useRef<SiteView | null>(null);
-
-  const handleCaptureSnapshot = () => {
-    const dataUrl = viewRef.current?.capture();
-    if (!dataUrl) return;
-    setSnapshots(prev => [{ id: generateId(), dataUrl, createdAt: new Date().toLocaleString() }, ...prev]);
-  };
 
   const handleExportSnapshot = (dataUrl: string, fileName: string) => {
     const link = document.createElement("a");
@@ -3355,7 +3059,7 @@ export default function SecurityPlanner() {
     const cam = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
     if (!cam) return;
     // While dragging, redraw at most every 150 ms (the scene is rebuilt for each render).
-    const wait = interactingRef.current ? Math.max(0, 150 - (performance.now() - lastPreviewRef.current)) : 0;
+    const wait = interactingRef.current ? Math.max(0, 60 - (performance.now() - lastPreviewRef.current)) : 0;
     let frame = 0;
     const timer = window.setTimeout(() => {
       frame = window.requestAnimationFrame(() => {
@@ -3561,7 +3265,7 @@ export default function SecurityPlanner() {
     const upf = coverageModel.upf;
     const own = (items.filter(i => i.type === "building") as BuildingItem[]).filter(b => isOwnBuilding(b));
     if (own.length === 0 && items.some(i => i.type === "building")) {
-      showExportNotice("Mark which building is yours first (click it, then \"My building\"), so cameras go on it.", "info");
+      showExportNotice("Mark which building is yours first: tick \"Mine\" next to it in the Buildings step, so cameras go on it.", "info", { label: "Show buildings", run: () => handleWorkflowStep("buildings") });
       return;
     }
     const buildings = own.map(b => ({
@@ -3581,7 +3285,7 @@ export default function SecurityPlanner() {
       showExportNotice("Couldn't find a camera spot for the rest. Try a pole camera closer to them, or lower the detail needed.", "info");
       return;
     }
-    const startIndex = items.filter(i => i.type === "camera").length;
+    const startIndex = nextCameraIndex(items);
     const added = suggestions.map((sug, i) => {
       const base = createItem("camera", sug.x, sug.y, { unitsPerFoot: upf, cameraIndex: startIndex + i }) as CameraItem;
       const covers = targetItems.filter(t => sug.covers.includes(t.id)).map(t => t.label);
@@ -3614,6 +3318,82 @@ export default function SecurityPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [coverageModel, items]
   );
+  // --- Looking through a camera: the main view becomes that camera's picture ---
+  const cameraItems = items.filter(i => i.type === "camera") as CameraItem[];
+  const lookThrough = (id: string) => {
+    setExportNotice(null);
+    setSelectedId(id);
+    setMode("select");
+    setAimingCameraId(null);
+    if (viewMode === "nvr") setViewMode("iso3d");
+    setPovCamId(id);
+  };
+  const [povThumbs, setPovThumbs] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!povCamId) return;
+    // Thumbnails of every camera's view, refreshed shortly after changes.
+    const timer = window.setTimeout(() => {
+      const next: Record<string, string> = {};
+      for (const cam of cameraItems) {
+        try {
+          next[cam.id] = renderCameraViewToCanvas(cam, 256).toDataURL("image/jpeg", 0.75);
+        } catch {
+          /* leave it blank */
+        }
+      }
+      setPovThumbs(next);
+    }, interacting ? 700 : 200);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [povCamId, items, interacting, roofPhoto, backgroundImg, terrainHeights]);
+  useEffect(() => {
+    // Enter looks through the selected camera; while looking: Esc back to the map, arrows switch cameras.
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (!povCamId) {
+        if (e.key === "Enter" && selectedCamera && !e.ctrlKey && !e.metaKey) {
+          e.preventDefault();
+          lookThrough(selectedCamera.id);
+        }
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) return; // undo/redo/save still work
+      const i = cameraItems.findIndex(c => c.id === povCamId);
+      if (e.key === "Escape" || e.key === "Enter") setPovCamId(null);
+      else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && cameraItems.length > 1) {
+        const next = cameraItems[(i + (e.key === "ArrowRight" ? 1 : -1) + cameraItems.length) % cameraItems.length];
+        lookThrough(next.id);
+      } else if (e.key !== "?") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
+  const povCamera = povCamId ? cameraItems.find(c => c.id === povCamId) ?? null : null;
+  // What a camera gets: its setup, and how well it sees each spot it is the best camera for.
+  const cameraDetails = (cam: CameraItem | null) => {
+    if (!cam) return [];
+    const lines: { text: string; tone?: "good" | "warn" | "bad" }[] = [];
+    const heightFt = Math.round(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT);
+    const res = RESOLUTION_PRESETS.find(r => r.width === (cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH))?.label ?? `${cam.resolutionWidth}px`;
+    lines.push({ text: `${Math.round(getCameraHFov(cam))}° wide · ${res} · ${heightFt} ft up · tilted ${Math.abs(Math.round(cam.pitch ?? DEFAULT_CAMERA_PITCH))}° down` });
+    const mine = targetItems.filter(t => targetResults.get(t.id)?.best?.cameraId === cam.id);
+    mine.forEach(t => {
+      const r = targetResults.get(t.id)!;
+      lines.push({
+        text: r.met
+          ? `${t.label}: ${LEVEL_LABEL[r.best!.level]} ✓`
+          : `${t.label}: ${LEVEL_LABEL[r.best!.level]}, wants ${GOAL_LABEL[t.goal ?? "recognize"]?.toLowerCase() ?? t.goal}: zoom in (narrower lens) or move closer`,
+        tone: r.met ? "good" : "warn"
+      });
+    });
+    if (!mine.length && targetItems.length) lines.push({ text: "Not the best camera for any marked spot", tone: "warn" });
+    return lines;
+  };
+  const povDetails = cameraDetails(povCamera);
+
   const blindSpots = useMemo(() => {
     if (!showBlindSpots || viewMode === "nvr") return null;
     // Your property, not the whole imported area: around the cameras, the marked spots and the
@@ -3854,7 +3634,6 @@ export default function SecurityPlanner() {
   const mountEdgeCount = mountBuilding ? getBuildingPoints(mountBuilding).length : 0;
   const mountEdgeIndex = selectedCamera?.mount?.edgeIndex ?? 0;
   const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
-  const rightPanelOffset = isRightPanelOpen ? "lg:right-[22rem]" : "lg:right-4";
   const workspaceRightPadding = "";
   const workspaceLayoutClass = "items-stretch justify-stretch";
   const nvrGridWidth = Math.max(320, (nvrSize.width || canvasSize.width) - 32);
@@ -3881,7 +3660,6 @@ export default function SecurityPlanner() {
   const showProjectSettings = rightPanelMode === "project" && isRightPanelOpen;
   // The right panel is an inspector: it shows only when there's something to inspect or set.
   const inspectorVisible = !!selectedItem || showProjectSettings;
-  const floatingPanelRight = inspectorVisible ? "right-[21rem]" : "right-4";
   const exportNoticeTone = exportNotice?.tone ?? "success";
   const exportNoticeClass =
     exportNoticeTone === "error"
@@ -4532,6 +4310,9 @@ export default function SecurityPlanner() {
                 showAllCones={frustumSettings.showAll !== false}
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
                 onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onMine={(id, mine) => { updateItem(id, { mine } as Partial<CanvasItem>); }}
+                onLook={lookThrough}
+                startCardShown={viewMode === "plan" && items.length === 0 && !backgroundImg && !isTerrainMode && mode === "select"}
                 onStep={handleWorkflowStep}
                 onNext={(from, to) => { completeStep(from); handleWorkflowStep(to); }}
                 onImportSite={openElevationDialog}
@@ -4667,7 +4448,7 @@ export default function SecurityPlanner() {
       )}
 
       <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen ? 352 : 0, right: 0 }}>
-        {(viewMode === "plan" || viewMode === "iso3d") && renderToolDock()}
+        {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
         {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || mode !== "select") && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
               {isTerrainMode ? (
@@ -5115,12 +4896,26 @@ export default function SecurityPlanner() {
               hidden={viewMode === "nvr"}
               actions={selectedItem && mode === "select" && !isTerrainMode && !interacting ? {
                 duplicate: duplicateSelected,
-                rotate: () => rotateSelected(15),
+                rotate: selectedItem.type === "target" || (selectedCamera?.mount?.type === "building") ? undefined : () => rotateSelected(15),
+                look: selectedCamera ? () => lookThrough(selectedCamera.id) : undefined,
                 remove: () => { deleteItem(selectedItem.id); setTimeout(() => saveHistory(), 50); },
                 zoomTo: zoomToSelection
               } : null}
-              snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList, keep: handleCaptureSnapshot, background: () => bg3dInputRef.current?.click() }}
+              snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList }}
               onReady={v => { viewRef.current = v; }}
+              povId={povCamera ? povCamera.id : null}
+              povUi={povCamera && (
+                <CameraLook
+                  cameras={cameraItems.map((c, i) => ({ id: c.id, number: i + 1, label: c.label, color: c.color, thumb: povThumbs[c.id] }))}
+                  currentId={povCamera.id}
+                  aspect={getCameraAspectValue(povCamera)}
+                  details={povDetails}
+                  onSwitch={lookThrough}
+                  onExit={() => setPovCamId(null)}
+                  onAddToReport={() => addCameraViewToExportList(povCamera)}
+                  rightInset={inspectorVisible ? 320 : 0}
+                />
+              )}
               rightInset={inspectorVisible ? 320 : 0}
             />
                 {demAlignMode && demPreview && (
@@ -5239,12 +5034,7 @@ export default function SecurityPlanner() {
                               renderFn={renderCameraViewToDataUrl}
                               sceneKey={nvrSceneKey}
                               aspect={getCameraAspectValue(cam as CameraItem)}
-                              onMaximize={() => {
-                                setSelectedId(cam.id);
-                                setRightPanelMode("properties");
-                                setIsRightPanelOpen(true);
-                                setMaximizedCamId(cam.id);
-                              }}
+                              onMaximize={() => lookThrough(cam.id)}
                               onExport={() => addCameraViewToExportList(cam as CameraItem)}
                             />
                           </div>
@@ -5256,7 +5046,7 @@ export default function SecurityPlanner() {
               </div>
             )}
 
-            {viewMode !== "nvr" && toolHint && (
+            {viewMode !== "nvr" && toolHint && !povCamId && (
               <div className="absolute bottom-[5.25rem] left-1/2 -translate-x-1/2 z-30 pointer-events-none">
                 <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
                   {toolHint}
@@ -5289,7 +5079,7 @@ export default function SecurityPlanner() {
               </div>
             )}
 
-            {(viewMode === "plan" || viewMode === "iso3d") && (
+            {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && (
               <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2 pointer-events-none">
                 <div
                   ref={cameraReadoutRef}
@@ -5384,7 +5174,7 @@ export default function SecurityPlanner() {
         </div>
 
         {/* What the selected camera sees: a window you can drag (it snaps to the edges), resize or minimize */}
-        {selectedCamera && showCameraPreview && viewMode !== "nvr" && (
+        {selectedCamera && showCameraPreview && viewMode !== "nvr" && !povCamId && (
           <FloatingWindow
             label="Camera view"
             storageKey="scp.cameraViewPos"
@@ -5415,10 +5205,10 @@ export default function SecurityPlanner() {
                   <Plus className="w-3 h-3" /> Report
                 </button>
                 <button
-                  onClick={() => setMaximizedCamId(selectedCamera.id)}
+                  onClick={() => lookThrough(selectedCamera.id)}
                   className="p-1 text-slate-400 hover:text-white hover:bg-white/10 rounded transition-colors"
-                  title="Full screen"
-                  aria-label="Full screen"
+                  title="Look through this camera, full size (Enter)"
+                  aria-label="Look through camera"
                 >
                   <Maximize className="w-4 h-4" />
                 </button>
@@ -5446,49 +5236,13 @@ export default function SecurityPlanner() {
             </div>
           </FloatingWindow>
         )}
-        {selectedCamera && !showCameraPreview && viewMode !== "nvr" && (
+        {selectedCamera && !showCameraPreview && viewMode !== "nvr" && !povCamId && (
           <button
             onClick={() => setShowCameraPreview(true)}
             className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full bg-zinc-900/95 border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-200 shadow-xl hover:bg-zinc-800"
           >
             <Camera className="w-3.5 h-3.5 text-emerald-400" /> Show {selectedCamera.label}'s view
           </button>
-        )}
-
-        {maximizedCamId && (
-          <div
-            className="fixed left-0 bottom-0 z-50 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200"
-            style={{ right: inspectorVisible ? "20rem" : "0", top: 56 }}
-          >
-            <div
-              className="absolute left-4 top-16 bottom-4 lg:left-20 lg:top-20 lg:bottom-8"
-              style={{ right: "1rem" }}
-            >
-              {(() => {
-                const cam = items.find(i => i.id === maximizedCamId) as CameraItem | undefined;
-                if (!cam) return null;
-                return (
-                  <div className="w-full h-full rounded-2xl overflow-hidden border border-white/10 bg-zinc-950 shadow-2xl flex flex-col">
-                    <div className="flex items-center justify-between p-4 bg-zinc-900 border-b border-white/10 shrink-0">
-                      <div className="flex items-center gap-3">
-                        <Camera className="w-5 h-5 text-emerald-400" />
-                        <span className="font-bold text-slate-200 text-lg">{cam.label}</span>
-                        <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono font-bold border border-red-500/30">LIVE</span>
-                      </div>
-                      <button onClick={() => setMaximizedCamId(null)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors">
-                        <Minimize className="w-5 h-5" />
-                      </button>
-                    </div>
-                    <div className="flex-1 relative bg-black p-4 flex items-center justify-center overflow-hidden">
-                      <div className="w-full h-full relative">
-                                    <NVRCard camera={cam as CameraItem} renderFn={renderCameraViewToDataUrl} sceneKey={nvrSceneKey} aspect={getCameraAspectValue(cam as CameraItem)} isMaximized={true} />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
         )}
 
         {/* --- Properties Sidebar (Docked) --- */}
@@ -5988,6 +5742,14 @@ export default function SecurityPlanner() {
 
               {selectedItem.type === "camera" && (
                 <>
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3 space-y-1" data-testid="camera-verdict">
+                  {cameraDetails(selectedItem as CameraItem).map((d, i) => (
+                    <div key={i} className={`text-xs ${d.tone === "good" ? "text-emerald-300" : d.tone === "warn" ? "text-amber-300" : d.tone === "bad" ? "text-red-300" : "text-slate-300"}`}>{d.text}</div>
+                  ))}
+                  <button onClick={() => lookThrough(selectedItem.id)} className="mt-1.5 w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold">
+                    <Eye className="w-4 h-4" /> Look through this camera
+                  </button>
+                </div>
                 <div className={panelSection}>
                   <CameraSetupPanel
                     camera={selectedItem as CameraItem}

@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Box, Camera, ChevronDown, Copy, Crosshair, Maximize2, RotateCcw, RotateCw, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { Box, Camera, ChevronDown, Copy, Crosshair, Eye, Maximize2, RotateCcw, RotateCw, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import { clamp } from "../constants";
 import { niceScaleBar } from "../lib/view";
 import { SiteView } from "./SiteView";
@@ -14,9 +14,13 @@ type Props = {
   pose: "top" | "tilt";
   poseSignal: number;
   hidden?: boolean;
-  /** Selection actions for the floating bar. */
-  actions: { duplicate: () => void; rotate: () => void; remove: () => void; zoomTo: () => void } | null;
-  snapshot: { download: () => void; addToReport: () => void; keep: () => void; background: () => void };
+  /** Selection actions for the floating bar (rotate only where turning makes sense; look for cameras). */
+  actions: { duplicate: () => void; rotate?: () => void; remove: () => void; zoomTo: () => void; look?: () => void } | null;
+  snapshot: { download: () => void; addToReport: () => void };
+  /** Looking through this camera: the view shows its picture and the map controls step aside. */
+  povId?: string | null;
+  /** Controls drawn over the camera picture (camera switcher, exit). */
+  povUi?: React.ReactNode;
   onReady: (view: SiteView | null) => void;
   /** Width covered by a panel on the right (the inspector); the controls move left of it. */
   rightInset?: number;
@@ -71,6 +75,10 @@ export function SiteViewport(props: Props) {
   }, [props.tool]);
 
   useEffect(() => {
+    viewRef.current?.setPov(props.povId ?? null, props.rightInset ?? 0);
+  }, [props.povId, props.rightInset]);
+
+  useEffect(() => {
     if (props.poseSignal > 0) viewRef.current?.setPose(props.pose);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.poseSignal]);
@@ -83,7 +91,7 @@ export function SiteViewport(props: Props) {
   const ctl = "w-8 h-8 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10";
 
   let actionBar: React.ReactNode = null;
-  if (props.actions && box && info && !props.hidden) {
+  if (props.actions && box && info && !props.hidden && !props.povId) {
     const above = box.y - 56;
     const y = above > 8 ? above : Math.min(info.height - 48, box.y + box.height + 14);
     const x = clamp(box.x + box.width / 2, 110, Math.max(110, info.width - inset - 110));
@@ -95,8 +103,13 @@ export function SiteViewport(props: Props) {
         className="absolute z-30 flex items-center gap-0.5 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl backdrop-blur"
         style={{ left: x, top: y, transform: "translateX(-50%)" }}
       >
+        {props.actions.look && (
+          <button className={`${btn} !w-auto px-2 gap-1.5 text-emerald-300 text-xs font-semibold`} title="Look through this camera (Enter)" aria-label="Look through camera" onClick={props.actions.look}>
+            <Eye className="w-4 h-4" /> Look through
+          </button>
+        )}
         <button className={btn} title="Duplicate (Ctrl/⌘+D)" aria-label="Duplicate" onClick={props.actions.duplicate}><Copy className="w-4 h-4" /></button>
-        <button className={btn} title="Rotate 15° clockwise" aria-label="Rotate" onClick={props.actions.rotate}><RotateCw className="w-4 h-4" /></button>
+        {props.actions.rotate && <button className={btn} title="Rotate 15° clockwise" aria-label="Rotate" onClick={props.actions.rotate}><RotateCw className="w-4 h-4" /></button>}
         <button className={btn} title="Zoom to it (F)" aria-label="Zoom to selection" onClick={props.actions.zoomTo}><Crosshair className="w-4 h-4" /></button>
         <span className="w-px h-5 bg-white/10 mx-0.5" />
         <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={props.actions.remove}><Trash2 className="w-4 h-4" /></button>
@@ -108,7 +121,8 @@ export function SiteViewport(props: Props) {
     <div className={`absolute inset-0 ${props.hidden ? "invisible pointer-events-none" : ""}`}>
       <div ref={hostRef} data-testid="plan" className="absolute inset-0 overflow-hidden select-none" style={{ touchAction: "none" }} />
       {actionBar}
-      <div className="absolute top-3 z-20 flex items-start gap-2" style={{ right: 12 + inset }}>
+      {props.povId && props.povUi}
+      <div className={`absolute top-3 z-20 flex items-start gap-2 ${props.povId ? "hidden" : ""}`} style={{ right: 12 + inset }}>
         {tilted && (
           <div className="flex items-center gap-2">
           <button
@@ -129,9 +143,7 @@ export function SiteViewport(props: Props) {
               <div className="absolute top-full mt-2 right-0 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setMenu(false)}>
                 {[
                   { label: "Download as image", action: props.snapshot.download },
-                  { label: "Add to the report", action: props.snapshot.addToReport },
-                  { label: "Keep in snapshots", action: props.snapshot.keep },
-                  { label: "Set 3D background image…", action: props.snapshot.background }
+                  { label: "Add to the report", action: props.snapshot.addToReport }
                 ].map(m => (
                   <button key={m.label} onClick={() => { setMenu(false); m.action(); }} className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-white/10 rounded-lg">
                     {m.label}
@@ -165,12 +177,12 @@ export function SiteViewport(props: Props) {
           <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={() => view?.fitSite()}><Maximize2 className="w-4 h-4" /></button>
         </div>
         <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
-          <button className={`${ctl} ${tilted ? "text-indigo-300" : ""}`} title={tilted ? "Look straight down (T)" : "Tilt into 3D (T)"} aria-label={tilted ? "Look straight down" : "Tilt into 3D"} onClick={() => view?.toggleTilt()}><Box className="w-4 h-4" /></button>
+          <button className={`${ctl} ${tilted ? "text-indigo-300" : ""}`} title={tilted ? "Look straight down (2)" : "Tilt into 3D (3)"} aria-label={tilted ? "Look straight down" : "Tilt into 3D"} onClick={() => view?.toggleTilt()}><Box className="w-4 h-4" /></button>
           <button className={ctl} title="Turn the view left" aria-label="Rotate view left" onClick={() => view?.rotateBy(-22.5)}><RotateCcw className="w-4 h-4" /></button>
           <button className={ctl} title="Turn the view right" aria-label="Rotate view right" onClick={() => view?.rotateBy(22.5)}><RotateCw className="w-4 h-4" /></button>
         </div>
       </div>
-      {props.doc.blindSpots && props.doc.blindSpots.runs.length > 0 && (
+      {props.doc.blindSpots && props.doc.blindSpots.runs.length > 0 && !props.povId && (
         <div data-testid="blind-spots" style={{ right: 12 + inset }} className="absolute bottom-20 z-20 rounded-full bg-red-600/90 px-3 py-1 text-[11px] font-semibold text-white shadow">
           Red = not seen by any camera
         </div>

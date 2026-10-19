@@ -238,8 +238,16 @@ export const measuredPxPerFt = (page: Page) =>
 export async function handleCenter(page: Page, kind: string, index = 0) {
   const h = page.locator(`[data-handle="${kind}"]`).nth(index);
   await expect(h).toBeVisible();
-  const b = (await h.boundingBox())!;
-  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  // Wait until it has settled (the view redraws on the next frame after an edit).
+  let last = { x: NaN, y: NaN };
+  for (let i = 0; i < 20; i++) {
+    const b = (await h.boundingBox())!;
+    const p = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    if (Math.hypot(p.x - last.x, p.y - last.y) < 0.5) return p;
+    last = p;
+    await page.waitForTimeout(60);
+  }
+  return last;
 }
 
 /** Drag from a point to another in small steps. */

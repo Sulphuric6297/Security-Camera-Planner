@@ -1,4 +1,3 @@
-import { Type } from "lucide-react";
 import { generateId } from "../../constants";
 import { FEET_PER_METER, GeoBounds, fetchJson, latLonCentroid, pointInLatLonPolygon } from "./core";
 
