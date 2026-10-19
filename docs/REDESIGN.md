@@ -227,6 +227,22 @@ preview:
   length and in the color picked, with the paint recolored and trim, chrome, lights and glass
   kept. Each type loads only when one is on the map (about 0.5 MB) and every car of a type shares
   one mesh, so 60 cars draw faster than the old generated ones did.
+- A vehicle has one size: its length, with width and height scaled to match (a size slider, corner
+  handles on the map, and "Real size" to go back). Every type faces the same way.
+
+### Ground texture over the satellite photo (done)
+
+- The photo itself says what the ground is, spot by spot: lawn and planting (greener than red or
+  blue, even in shade or dry), concrete (light grey), asphalt (dark grey, hazy blue included),
+  soil, gravel and mulch (warm and grainy), and none of these (pools, painted courts). Deep
+  shadows take what is around them. Worked out in a background worker when the photo loads, so
+  it lines up with the photo exactly and never holds the app up.
+- Real-scale texture of each (grass blades and tufts, concrete grain and hairline cracks, asphalt
+  stones, pebbles) is laid over the photo. Only light and dark detail is added, so the photo's
+  real colors stay; far away the texture fades out by itself and the photo looks as it is.
+- A "Ground texture" switch beside the sun button (on by default, remembered).
+- Possible next step: OpenStreetMap roads, sidewalks and parking areas (with their surface tags)
+  as extra hints where the photo is unclear.
 
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.

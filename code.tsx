@@ -87,7 +87,7 @@ import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ContextInfo, ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
-import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, cameraUnderRoof, heightAt, nearestWall, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
+import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, cameraUnderRoof, heightAt, mountCandidates, nearestWall, roofObstacles, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
 import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, Opening, OpeningKind, OpenPart, OpenPartKind, ParkingItem, PavingItem, PavingKind, PavingSurface, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
@@ -185,6 +185,13 @@ export default function SecurityPlanner() {
   useEffect(() => {
     try { localStorage.setItem("scp.roofPhoto", roofPhoto ? "1" : "0"); } catch { /* ignore */ }
   }, [roofPhoto]);
+  // View preference: real-scale grass, paving and soil texture over the aerial photo (on unless turned off).
+  const [groundDetail, setGroundDetail] = useState(() => {
+    try { return localStorage.getItem("scp.groundDetail") !== "0"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.groundDetail", groundDetail ? "1" : "0"); } catch { /* ignore */ }
+  }, [groundDetail]);
   // Layout: the workflow sidebar on the left can be hidden for more map.
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // What the placing tools create (chosen in the tool panel before clicking).
@@ -3425,7 +3432,9 @@ export default function SecurityPlanner() {
     items.forEach(item => {
       if (item.type === "building") {
         const b = item as BuildingItem;
-        // A porch or carport (roof on posts): people under it and the view through it are clear.
+        // Porch and carport roofs: clear under them, not through them
+        obstacles.push(...roofObstacles(b, upf));
+        // A carport or pavilion (roof on posts): no walls, people under it are in the clear
         if (b.openSides) return;
         obstacles.push({ kind: "building", id: b.id, points: getBuildingEdgePointsWorld(b), heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf, ...(b.openParts?.length ? { walls: buildingWallSegments(b) } : {}) });
       } else if (item.type === "tree") {
@@ -3446,11 +3455,13 @@ export default function SecurityPlanner() {
       showExportNotice("Tick which buildings are part of your camera plan first (under \"Buildings in my camera plan\"), so cameras go on them.", "info", { label: "Show buildings", run: () => handleWorkflowStep("buildings") });
       return;
     }
+    // Every spot worth trying: the walls at the eaves, and under porch and carport roofs
     const buildings = own.map(b => ({
       id: b.id,
       points: getBuildingEdgePointsWorld(b),
       heightFt: (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf,
-      mountHeightFt: mountHeightForBuilding(b)
+      mountHeightFt: mountHeightForBuilding(b),
+      mounts: mountCandidates(b, upf, 8, DEFAULT_CAMERA_HEIGHT_FT, mountHeightForBuilding(b))
     }));
     const suggestions = suggestCameras({
       targets: targetItems.map(t => ({ id: t.id, x: t.x, y: t.y, goal: t.goal })),
@@ -3479,7 +3490,7 @@ export default function SecurityPlanner() {
         range: sug.range,
         height: sug.heightFt,
         mount: sug.mount
-          ? { type: "building" as const, buildingId: sug.mount.buildingId, edgeIndex: sug.mount.edgeIndex, edgeT: sug.mount.edgeT, height: sug.heightFt }
+          ? { type: "building" as const, buildingId: sug.mount.buildingId, edgeIndex: sug.mount.edgeIndex, edgeT: sug.mount.edgeT, ...(sug.mount.at ? { at: sug.mount.at } : {}), height: sug.heightFt }
           : { type: "free" as const, edgeT: 0.5, height: sug.heightFt },
         description: `Suggested to cover ${covers.join(", ")}`
       } as CameraItem;
@@ -3691,10 +3702,11 @@ export default function SecurityPlanner() {
     targetStatus: Object.fromEntries(targetItems.map(t => [t.id, targetStatus(targetResults.get(t.id))])),
     blindSpots: blindSpots ? { runs: blindSpots.runs, area: blindSpots.area } : null,
     roofPhoto,
+    groundDetail,
     geo: !!planGeoRef,
     sun: sunNow
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto, sunNow]);
+  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto, groundDetail, sunNow]);
 
   // A sample of what a click would place, for the preview under the cursor.
   const placePreview = useMemo(() => {
@@ -5967,6 +5979,8 @@ export default function SecurityPlanner() {
                     )}
                   </div>
                 )}
+                {(siteLocation || backgroundImg) && (
+                <div className="flex items-center gap-1.5">
                 {siteLocation && (
                   <div className="relative pointer-events-auto">
                     <button
@@ -6050,6 +6064,14 @@ export default function SecurityPlanner() {
                     )}
                   </div>
                 )}
+                {backgroundImg && (
+                  <label className="flex items-center gap-1.5 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg px-2 py-1 text-[11px] font-semibold text-slate-200 cursor-pointer hover:bg-zinc-800 pointer-events-auto" title="Grass, concrete, asphalt and gravel texture where the satellite photo shows them (shows up close)">
+                    <input type="checkbox" checked={groundDetail} onChange={e => setGroundDetail(e.target.checked)} className="accent-emerald-500" aria-label="Ground texture" />
+                    Ground texture
+                  </label>
+                )}
+                </div>
+                )}
                 {(hasTerrain || (backgroundImg && items.some(i => i.type === "building"))) && (
                 <div className="flex items-center gap-1 rounded-lg bg-zinc-900/90 border border-white/10 shadow-lg p-0.5 pointer-events-auto">
                 {hasTerrain && (
@@ -6077,6 +6099,7 @@ export default function SecurityPlanner() {
                     Photo on roofs
                   </label>
                 )}
+
                 </div>
                 )}
                 {hasTerrain && elevationOverlay !== "off" && (

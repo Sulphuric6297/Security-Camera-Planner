@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p .",
     "test:e2e": "playwright test",
     "check": "npm run typecheck && npm run build && npm run test:e2e",
-    "look": "vite build && playwright test -c look.config.ts"
+    "look": "vite build && playwright test -c look.config.ts",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@types/react-grid-layout": "^1.3.6",

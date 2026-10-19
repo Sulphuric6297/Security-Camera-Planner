@@ -6,3 +6,6 @@ dist
 test-results
 playwright-report
 /look/
+# Private scratch files (the owner's own plans and screenshots): never committed
+/tests/look/zz-*
+zz-*

@@ -6,10 +6,14 @@ import type { CameraItem } from "../types";
 import { LENS_PRESETS, RESOLUTION_PRESETS, doriDistanceFt, suggestPitchForDistance, vFovFromH } from "./camera";
 import { cameraSees, levelRank, type CoverageCamera, type DoriLevelId, type Obstacle } from "./coverage";
 import { getEdgeOutwardNormal } from "./geometry";
+import type { MountCandidate } from "./planGeom";
 
 type P = { x: number; y: number };
 
-export type SuggestBuilding = { id: string; points: P[]; heightFt: number; mountHeightFt: number };
+/** A building cameras can go on: its outline and eave mount height, and (from planGeom's
+ * mountCandidates) every spot worth trying on it, porches and carports included. Without `mounts`,
+ * spots along its outside walls at `mountHeightFt`. */
+export type SuggestBuilding = { id: string; points: P[]; heightFt: number; mountHeightFt: number; mounts?: MountCandidate[] };
 export type SuggestTarget = { id: string; x: number; y: number; goal: DoriLevelId };
 export type Suggestion = {
   x: number;
@@ -21,7 +25,10 @@ export type Suggestion = {
   hFov: number;
   resolutionWidth: number;
   range: number;
-  mount: { buildingId: string; edgeIndex: number; edgeT: number } | null;
+  /** On a wall (`at`: a wall inside a porch set into the house), or null: a pole, or hung under a porch or carport roof. */
+  mount: { buildingId: string; edgeIndex: number; edgeT: number; at?: P } | null;
+  /** Under a porch or carport roof. */
+  covered?: boolean;
   /** Spots this camera newly covers. */
   covers: string[];
 };
@@ -34,23 +41,22 @@ const POLE_HEIGHT_FT = 12;
 const fakeCamera = (hFov: number, width: number): CameraItem =>
   ({ id: "s", type: "camera", x: 0, y: 0, rotation: 0, label: "", fov: hFov, hFov, range: 9999, color: "#000", resolutionWidth: width }) as CameraItem;
 
-/** Mount points along the walls of buildings, a little out from the wall, facing out. */
-const wallCandidates = (buildings: SuggestBuilding[], spacing: number) => {
-  const out: { p: P; normal: P; building: SuggestBuilding; edgeIndex: number; edgeT: number }[] = [];
-  buildings.forEach(b => {
-    for (let i = 0; i < b.points.length; i++) {
-      const a = b.points[i];
-      const c = b.points[(i + 1) % b.points.length];
-      const len = Math.hypot(c.x - a.x, c.y - a.y);
-      if (len < 4) continue;
-      const n = getEdgeOutwardNormal(b.points, i);
-      const steps = Math.max(1, Math.round(len / spacing));
-      for (let k = 0; k <= steps; k++) {
-        const t = Math.min(0.97, Math.max(0.03, k / steps)); // stay off the exact corner
-        out.push({ p: { x: a.x + (c.x - a.x) * t, y: a.y + (c.y - a.y) * t }, normal: n, building: b, edgeIndex: i, edgeT: t });
-      }
+/** Mount points along the outside walls of a building, half a foot out from the wall, facing out. */
+const wallCandidates = (b: SuggestBuilding, spacing: number, upf: number): MountCandidate[] => {
+  const out: MountCandidate[] = [];
+  for (let i = 0; i < b.points.length; i++) {
+    const a = b.points[i];
+    const c = b.points[(i + 1) % b.points.length];
+    const len = Math.hypot(c.x - a.x, c.y - a.y);
+    if (len < 4) continue;
+    const n = getEdgeOutwardNormal(b.points, i);
+    const steps = Math.max(1, Math.round(len / spacing));
+    for (let k = 0; k <= steps; k++) {
+      const t = Math.min(0.97, Math.max(0.03, k / steps)); // stay off the exact corner
+      const p = { x: a.x + (c.x - a.x) * t + n.x * 0.5 * upf, y: a.y + (c.y - a.y) * t + n.y * 0.5 * upf };
+      out.push({ p, facing: n, heightFt: b.mountHeightFt, covered: false, kind: "wall", mount: { buildingId: b.id, edgeIndex: i, edgeT: t } });
     }
-  });
+  }
   return out;
 };
 
@@ -73,7 +79,7 @@ export const suggestCameras = (opts: {
   // Only buildings within reach of a spot are worth trying.
   const reach = 120 * upf;
   const near = opts.buildings.filter(b => opts.targets.some(t => b.points.some(p => Math.hypot(p.x - t.x, p.y - t.y) < reach)));
-  const candidates = wallCandidates(near, 8 * upf);
+  const candidates = near.flatMap(b => b.mounts ?? wallCandidates(b, 8 * upf, upf));
   const maxCameras = opts.maxCameras ?? opts.targets.length;
 
   for (let round = 0; round < maxCameras; round++) {
@@ -83,7 +89,7 @@ export const suggestCameras = (opts: {
 
     // From one mount point: aim to take in as many open spots as fit in the lens at once (the
     // middle of each group of spots that fits the field of view), not just one spot straight on.
-    const consider = (pos: P, heightFt: number, mount: Suggestion["mount"], facing: P | null) => {
+    const consider = (pos: P, heightFt: number, mount: Suggestion["mount"], facing: P | null, covered = false) => {
       const ref = facing ? Math.atan2(facing.y, facing.x) : Math.atan2(open[0].y - pos.y, open[0].x - pos.x);
       const seen = open
         .map(t => {
@@ -140,6 +146,7 @@ export const suggestCameras = (opts: {
                   resolutionWidth: optic.width,
                   range: Math.round(cam.range),
                   mount,
+                  covered,
                   covers: covers.map(t => t.id)
                 }
               };
@@ -149,11 +156,9 @@ export const suggestCameras = (opts: {
       });
     };
 
-    candidates.forEach(c => {
-      // Sit just outside the wall so the wall itself never blocks the camera.
-      const pos = { x: c.p.x + c.normal.x * 0.5 * upf, y: c.p.y + c.normal.y * 0.5 * upf };
-      consider(pos, c.building.mountHeightFt, { buildingId: c.building.id, edgeIndex: c.edgeIndex, edgeT: c.edgeT }, c.normal);
-    });
+    // (Each spot sits just out from its wall, so the wall itself never blocks the camera.)
+    // A camera hung under a porch or carport roof can turn any way (the walls still block it)
+    candidates.forEach(c => consider(c.p, c.heightFt, c.mount, c.kind === "corner" ? null : c.facing, c.covered));
     if (!best) {
       // No wall works: a pole camera ~25 ft from the first open spot, on the side toward the buildings.
       const t = open[0];

@@ -3,8 +3,9 @@
 // see past buildings and trees. Pure functions over plan data (plan units, usually feet).
 import { CAMERA_WALL_SNAP_FT, OBJECT_ELEVATION_OFFSET, clamp } from "../constants";
 import type { BuildingItem, CameraItem, CanvasItem, TreeItem } from "../types";
+import type { Obstacle } from "./coverage";
 import { getEdgeOutwardNormal, pointInPolygonXY, rectanglePoints } from "./geometry";
-import { attachEdge, enclosedWalls, insetParts, openPartsOf, partRoof } from "./openParts";
+import { attachEdge, enclosedWalls, insetParts, openPartsOf, partRoof, partSides } from "./openParts";
 
 type P = { x: number; y: number };
 
@@ -200,6 +201,125 @@ export const cameraUnderRoof = (p: P, items: CanvasItem[], upf = 1, wantFt = 9) 
     return { x: wall.point.x, y: wall.point.y, rotation: wall.rotation, heightFt, mount: { type: "building" as const, buildingId: b.id, edgeIndex: wall.edgeIndex, edgeT: wall.edgeT, at: wall.at, height: heightFt } };
   }
   return { x: p.x, y: p.y, rotation: under.rotation, heightFt, mount: { type: "free" as const, edgeT: 0.5, height: heightFt } };
+};
+
+/**
+ * The porch and carport roofs of a building as obstacles for coverage: each roof of its own on a
+ * porch or carport (sloping down away from the house), and the whole roof of an open-sided
+ * building. Under them the view is clear; through them it isn't.
+ */
+export const roofObstacles = (b: BuildingItem, upf = 1): Obstacle[] => {
+  const wall = b.wallHeight ?? 14 * upf;
+  const local = buildingLocalPoints(b);
+  const toWorld = (q: P) => { const r = rotatePoint(q, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
+  if (b.openSides) return [{ kind: "roof", id: b.id, points: local.map(toWorld), bottomFt: wall / upf, thicknessFt: 1 }];
+  return openPartsOf(b)
+    .filter(pt => partRoof(local, pt) === "own")
+    .map(pt => {
+      const k = attachEdge(local, pt.pts);
+      return {
+        kind: "roof" as const,
+        id: b.id,
+        points: pt.pts.map(toWorld),
+        bottomFt: (wall - 0.6 * upf) / upf,
+        thicknessFt: 1,
+        slope: { a: toWorld(pt.pts[k]), b: toWorld(pt.pts[(k + 1) % pt.pts.length]), ftPerUnit: (pt.pitch ?? 3) / 12 / upf }
+      };
+    });
+};
+
+/** A spot a camera could be mounted on a building, for "Suggest cameras". */
+export type MountCandidate = {
+  /** Where the camera sits (plan), just out from what it is mounted on. */
+  p: P;
+  /** Straight out from the wall (or out from under the roof), unit length. */
+  facing: P;
+  heightFt: number;
+  /** Under a porch or carport roof: out of the weather and the sun, harder to reach. */
+  covered: boolean;
+  kind: "wall" | "porch" | "corner";
+  /** On a wall (with `at` for a wall inside a porch set into the house), or null: hung from the roof. */
+  mount: { buildingId: string; edgeIndex: number; edgeT: number; at?: P } | null;
+};
+
+/**
+ * Every spot on a building worth trying for a camera, about `spacingFt` apart: its outside walls at
+ * the eaves; under a porch or carport roof, the house wall behind it (low enough to stay under that
+ * roof) and the walls of a porch set into the house; the outer corners of porch and carport roofs;
+ * and the corners of an open-sided building (a carport on posts). A stretch of outline left open by
+ * a porch set into the house has no wall to mount on, and a wall above a porch roof can't see past it.
+ */
+export const mountCandidates = (b: BuildingItem, upf = 1, spacingFt = 8, wantFt = 9, eaveMountFt = 9): MountCandidate[] => {
+  const out: MountCandidate[] = [];
+  const local = buildingLocalPoints(b);
+  const toWorld = (q: P) => { const r = rotatePoint(q, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
+  const dir = (v: P) => { const r = rotatePoint(v, b.rotation); const l = Math.hypot(r.x, r.y) || 1; return { x: r.x / l, y: r.y / l }; };
+  const wallFt = (b.wallHeight ?? 14 * upf) / upf;
+  const under = (ceilingFt: number, floorFt: number) => Math.max(6, Math.min(Math.max(wantFt, floorFt + 7.5), Math.floor((ceilingFt - 0.75) * 2) / 2));
+  const along = (a: P, c: P, f: (q: P, t: number) => void) => {
+    const len = Math.hypot(c.x - a.x, c.y - a.y);
+    if (len < 4 * upf) return;
+    const steps = Math.max(1, Math.round(len / (spacingFt * upf)));
+    for (let k = 0; k <= steps; k++) {
+      const t = Math.min(0.97, Math.max(0.03, k / steps));
+      f({ x: a.x + (c.x - a.x) * t, y: a.y + (c.y - a.y) * t }, t);
+    }
+  };
+  if (b.openSides) {
+    // A carport or pavilion on posts: hung under its roof at each corner, looking out
+    const c = { x: local.reduce((s, v) => s + v.x, 0) / local.length, y: local.reduce((s, v) => s + v.y, 0) / local.length };
+    local.forEach(v => {
+      const d = Math.hypot(v.x - c.x, v.y - c.y) || 1;
+      const q = { x: v.x - ((v.x - c.x) / d) * 0.75 * upf, y: v.y - ((v.y - c.y) / d) * 0.75 * upf };
+      out.push({ p: toWorld(q), facing: dir({ x: v.x - c.x, y: v.y - c.y }), heightFt: under(wallFt, 0), covered: true, kind: "corner", mount: null });
+    });
+    return out;
+  }
+  const parts = openPartsOf(b);
+  const roofed = parts.filter(pt => partRoof(local, pt) !== "none");
+  const inPart = (q: P, roof: "main" | "own") => roofed.find(pt => partRoof(local, pt) === roof && pointInPolygonXY(q, pt.pts));
+  const items = [b as CanvasItem];
+  // Outside walls
+  for (let i = 0; i < local.length; i++) {
+    const a = local[i], c = local[(i + 1) % local.length];
+    const n = getEdgeOutwardNormal(local, i);
+    along(a, c, (q, t) => {
+      const inside = { x: q.x - n.x * 0.5 * upf, y: q.y - n.y * 0.5 * upf };
+      const outside = { x: q.x + n.x * 0.5 * upf, y: q.y + n.y * 0.5 * upf };
+      // Open here: a porch or carport set into the house
+      if (inPart(inside, "main")) return;
+      const porch = inPart(outside, "own");
+      const mount = { buildingId: b.id, edgeIndex: i, edgeT: t };
+      if (porch) {
+        const roof = roofOver(toWorld(outside), items, upf);
+        if (!roof) return;
+        out.push({ p: toWorld(outside), facing: dir(n), heightFt: under(roof.ceiling / upf, roof.floor / upf), covered: true, kind: "porch", mount });
+      } else out.push({ p: toWorld(outside), facing: dir(n), heightFt: eaveMountFt, covered: false, kind: "wall", mount });
+    });
+  }
+  // The walls inside a porch or carport set into the house
+  for (const w of innerWalls(b)) {
+    along(w.a, w.b, q => {
+      const outside = { x: q.x + w.out.x * 0.5 * upf, y: q.y + w.out.y * 0.5 * upf };
+      const roof = roofOver(toWorld(outside), items, upf);
+      if (!roof) return;
+      out.push({ p: toWorld(outside), facing: dir(w.out), heightFt: under(roof.ceiling / upf, roof.floor / upf), covered: true, kind: "porch", mount: { buildingId: b.id, edgeIndex: 0, edgeT: 0.5, at: q } });
+    });
+  }
+  // The outer corners of porch and carport roofs, hung from the roof and looking out
+  for (const pt of roofed) {
+    const c = { x: pt.pts.reduce((s, v) => s + v.x, 0) / pt.pts.length, y: pt.pts.reduce((s, v) => s + v.y, 0) / pt.pts.length };
+    const ends = partSides(local, pt).flatMap(sd => [sd.a, sd.b]);
+    const corners = pt.pts.filter(v => ends.some(e => Math.hypot(e.x - v.x, e.y - v.y) < 1.5 * upf));
+    for (const v of corners) {
+      const d = Math.hypot(v.x - c.x, v.y - c.y) || 1;
+      const q = { x: v.x - ((v.x - c.x) / d) * 0.75 * upf, y: v.y - ((v.y - c.y) / d) * 0.75 * upf };
+      const roof = roofOver(toWorld(q), items, upf);
+      if (!roof) continue;
+      out.push({ p: toWorld(q), facing: dir({ x: v.x - c.x, y: v.y - c.y }), heightFt: under(roof.ceiling / upf, roof.floor / upf), covered: true, kind: "corner", mount: null });
+    }
+  }
+  return out;
 };
 
 /** Nearest wall to a point, with the angle that faces straight out from it. */

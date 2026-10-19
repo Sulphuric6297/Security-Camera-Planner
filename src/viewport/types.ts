@@ -24,6 +24,8 @@ export type ViewDoc = {
   blindSpots: { runs: Rect[]; area: Rect } | null;
   /** Aerial photo on roofs (off: solid roofs, easier to read). */
   roofPhoto: boolean;
+  /** Real-scale grass, paving and soil texture over the aerial photo, where the photo shows them. */
+  groundDetail: boolean;
   /** North arrow shown when the plan is georeferenced. */
   geo: boolean;
   /** Where the sun is for the chosen date and time at the site (degrees: azimuth clockwise from

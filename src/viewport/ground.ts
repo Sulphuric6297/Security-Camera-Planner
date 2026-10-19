@@ -5,6 +5,7 @@ import { MAP_OVERLAY_OFFSET } from "../constants";
 import { heightAt } from "../lib/planGeom";
 import { elevationColor } from "../lib/terrain";
 import { disposeObjectDeep } from "../three/dispose";
+import { addGroundDetail, coverTexture, groundDetailTexture, type GroundDetailUniforms } from "../three/groundDetail";
 import type { ViewDoc } from "./types";
 
 const noRaycast = (o: THREE.Object3D) => { o.raycast = () => {}; return o; };
@@ -21,6 +22,10 @@ export class Ground {
   private key = "";
   private heightsRef: Record<string, number> | null = null;
   private overlayKey = "";
+  /** Real-scale grass, concrete, asphalt and soil texture over the photo (see three/groundDetail). */
+  readonly detail: GroundDetailUniforms = { coverMap: { value: null }, detailMap: { value: null }, groundDetail: { value: 0 }, groundFeet: { value: 1 } };
+  private photoFt = 0;
+  private wantDetail = true;
 
   constructor(private renderer: THREE.WebGLRenderer, private onChanged: () => void) {
     this.group.name = "ground";
@@ -36,6 +41,13 @@ export class Ground {
     const bg = doc.background;
     const key = JSON.stringify([doc.canvas, doc.gridSize, bg.rect, bg.opacity, !!bg.url, doc.showGrid]);
     let changed = false;
+    this.photoFt = bg.rect.width / (doc.unitsPerFoot || 1);
+    this.detail.groundFeet.value = 1 / (doc.unitsPerFoot || 1);
+    if (this.wantDetail !== doc.groundDetail) {
+      this.wantDetail = doc.groundDetail;
+      this.detail.groundDetail.value = doc.groundDetail && this.detail.coverMap.value && this.detail.detailMap.value ? 1 : 0;
+      changed = true;
+    }
     if (key !== this.key || !this.terrain) {
       this.key = key;
       this.rebuild(doc);
@@ -64,16 +76,42 @@ export class Ground {
     const mat = this.mapPlane?.material as THREE.MeshBasicMaterial | undefined;
     if (this.photo) this.photo.dispose();
     this.photo = null;
+    this.setCover(null);
     if (!url) {
       if (mat) { mat.map = null; mat.visible = false; mat.needsUpdate = true; }
       return;
     }
-    const tex = new THREE.TextureLoader().load(url, () => this.onChanged());
+    const tex = new THREE.TextureLoader().load(url, () => {
+      this.onChanged();
+      // What the ground is made of (lawn, paving, soil), worked out in the background
+      const image = tex.image as HTMLImageElement;
+      setTimeout(() => {
+        if (this.photo !== tex) return;
+        void coverTexture(image, this.photoFt).then(cover => {
+          if (this.photo !== tex) { cover?.dispose(); return; }
+          this.setCover(cover);
+          this.onChanged();
+        });
+      }, 0);
+    });
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     this.photo = tex;
     if (mat) { mat.map = tex; mat.visible = true; mat.needsUpdate = true; }
+  }
+
+  private setCover(cover: THREE.DataTexture | null) {
+    this.detail.coverMap.value?.dispose();
+    this.detail.coverMap.value = cover;
+    this.detail.groundDetail.value = 0;
+    if (!cover) return;
+    void groundDetailTexture().then(tex => {
+      if (!tex || this.detail.coverMap.value !== cover) return;
+      this.detail.detailMap.value = tex;
+      this.detail.groundDetail.value = this.wantDetail ? 1 : 0;
+      this.onChanged();
+    });
   }
 
   private draped(doc: ViewDoc, x: number, y: number, w: number, d: number, lift: number) {
@@ -152,6 +190,7 @@ export class Ground {
         polygonOffsetUnits: -4
       })
     );
+    addGroundDetail(mapPlane.material as THREE.Material, this.detail);
     mapPlane.name = "terrain-map-plane";
     mapPlane.renderOrder = -1;
     mapPlane.receiveShadow = true;
@@ -271,5 +310,6 @@ export class Ground {
   dispose() {
     disposeObjectDeep(this.group);
     this.photo?.dispose();
+    this.setCover(null);
   }
 }

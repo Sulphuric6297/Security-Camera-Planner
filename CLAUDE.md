@@ -11,6 +11,9 @@ Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no ba
 - Examples, fixtures and walkthroughs use made-up places ("123 Main St, Springfield").
 - The owner's own plan files and screenshots of them stay local (scratch folders, git-excluded
   `zz-*` files) and are never committed. Git authors use the owner's GitHub no-reply email.
+- A check runs on every commit (`scripts/privacy-check.mjs`, hooked up by `npm ci`): it refuses a
+  non-no-reply author, any added email address and any `zz-*` file. It can't recognize an address
+  or a town, so that part is on you: read your diff and commit message for anything personal.
 
 ## How to work
 
@@ -65,7 +68,7 @@ Useful commands:
 | --- | --- |
 | `smoke.spec.ts` | App loads, onboarding, steps, 2D/3D/camera-wall views, tool and view shortcuts |
 | `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
-| `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types, dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning, wheel zoom never spins a turned view, vehicles shown as their real 3D model (length, paint) |
+| `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types (all facing the same way, resized as a whole), dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning, wheel zoom never spins a turned view, vehicles shown as their real 3D model (length, paint) |
 | `camera.spec.ts` | Aim handle sets rotation and tilt, field-of-view and range handles, dragging a camera onto a wall mounts it, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation; the brush works as fast at a low frame rate; Woods brush plants/clears trees, with Undo |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
@@ -83,7 +86,8 @@ Useful commands:
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view, the picture fills the window with Settings beside it, closing with its X/tabs/steps; camera pictures rendered from the 3D scene |
 | `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |
 | `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows; a hand-labelled real satellite photo of a parking lot (`tests/fixtures/aerial`) (pure logic) |
-| `house-editing.spec.ts` | Hands-on editing of a porch house (mouse and keyboard, checked on screen): the picked door's dot on the door, windows dragged up the wall and the bottom square for the sill, locked houses still edit their windows/porches but don't move, copy/paste windows (Ctrl+C/V) and porches (right-click), steps from a railing's right-click, menus stay on screen, cameras under porches and carports, floor height (crawl space) |
+| `house-editing.spec.ts` | Hands-on editing of a porch house (mouse and keyboard, checked on screen): the picked door's dot on the door, windows dragged up the wall and the bottom square for the sill, locked houses still edit their windows/porches but don't move, copy/paste windows (Ctrl+C/V) and porches (right-click), steps from a railing's right-click, menus stay on screen, cameras under porches and carports, floor height (crawl space), a patio's handles on the patio |
+| `ground.spec.ts` | Ground texture over the photo: lawn, concrete, asphalt, soil and pools told apart by color and graininess, shadows filled from around them, a real parking-lot photo (pure logic); the texture is on after an import, the Ground texture switch |
 | `paving.spec.ts` | Driveways, walkways and patios: draped on sloping ground, cut to the terrain grid, a drawn driveway becomes the spot to protect (pure logic); placing one with W, surface/kind, corner and bend handles |
 
 When you add a feature in a new area, add a new spec file and a row to this table.

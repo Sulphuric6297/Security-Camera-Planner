@@ -2,6 +2,7 @@
 // Pure functions (plan units in, results out) so they can be unit tested.
 import type { CameraItem } from "../types";
 import { DORI_LEVELS, doriLevelAt } from "./camera";
+import { pointInPolygonXY } from "./geometry";
 
 type P = { x: number; y: number };
 export type DoriLevelId = (typeof DORI_LEVELS)[number]["id"];
@@ -33,7 +34,11 @@ export type CoverageCamera = {
 
 export type Obstacle =
   | { kind: "building"; id: string; points: P[]; heightFt: number; /** Walls that block, when not the whole outline (open parts). */ walls?: [P, P][] }
-  | { kind: "tree"; id: string; x: number; y: number; radius: number; bottomFt: number; topFt: number };
+  | { kind: "tree"; id: string; x: number; y: number; radius: number; bottomFt: number; topFt: number }
+  /** A porch or carport roof over `points`: its ceiling is `bottomFt` up (along `slope.a`-`slope.b`,
+   * the side against the house, dropping `slope.ftPerUnit` per plan unit away from it), and the
+   * roof is `thicknessFt` thick. */
+  | { kind: "roof"; id: string; points: P[]; bottomFt: number; thicknessFt: number; slope?: { a: P; b: P; ftPerUnit: number } };
 
 export type SightResult = {
   level: DoriLevelId | null;
@@ -84,6 +89,28 @@ export const cameraSees = (cam: CoverageCamera, pt: P, obstacles: Obstacle[], un
       for (const [a, b] of walls) {
         const t = segIntersectT(from, pt, a, b);
         if (t !== null && t > startT && t < 0.999 && zAt(t) < o.heightFt) return { level: null, distanceFt, reason: "blocked", blockedBy: o.id };
+      }
+    } else if (o.kind === "roof") {
+      // Where the sight line is under the roof's outline, does it pass through the roof? (A camera
+      // hung under it, looking out, stays under it.)
+      const ts = [startT, 0.999];
+      o.points.forEach((a, i) => {
+        const t = segIntersectT(from, pt, a, o.points[(i + 1) % o.points.length]);
+        if (t !== null && t > startT && t < 0.999) ts.push(t);
+      });
+      ts.sort((a, b) => a - b);
+      const ceiling = (t: number) => {
+        if (!o.slope) return o.bottomFt;
+        const { a, b } = o.slope, q = { x: cam.x + dx * t, y: cam.y + dy * t };
+        const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        return o.bottomFt - o.slope.ftPerUnit * Math.abs(((q.x - a.x) * (b.y - a.y) - (q.y - a.y) * (b.x - a.x)) / len);
+      };
+      for (let k = 0; k + 1 < ts.length; k++) {
+        const m = (ts[k] + ts[k + 1]) / 2;
+        if (!pointInPolygonXY({ x: cam.x + dx * m, y: cam.y + dy * m }, o.points)) continue;
+        // Height above the ceiling at both ends of this stretch (it changes evenly in between)
+        const f0 = zAt(ts[k]) - ceiling(ts[k]), f1 = zAt(ts[k + 1]) - ceiling(ts[k + 1]);
+        if (Math.max(f0, f1) >= 0 && Math.min(f0, f1) <= o.thicknessFt) return { level: null, distanceFt, reason: "blocked", blockedBy: o.id };
       }
     } else {
       const len2 = dx * dx + dy * dy || 1;

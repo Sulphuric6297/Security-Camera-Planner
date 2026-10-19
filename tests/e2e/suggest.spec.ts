@@ -3,6 +3,8 @@ import { test, expect } from "@playwright/test";
 import { suggestCameras, type SuggestBuilding } from "../../src/lib/suggest";
 import { cameraSees, levelRank, type CoverageCamera, type Obstacle } from "../../src/lib/coverage";
 import { vFovFromH } from "../../src/lib/camera";
+import { buildingWorldPoints, mountCandidates, roofObstacles } from "../../src/lib/planGeom";
+import type { BuildingItem } from "../../src/types";
 
 // A 60 x 40 ft house centered at the origin, 12 ft eaves.
 const house: SuggestBuilding = {
@@ -84,5 +86,45 @@ test.describe("suggest cameras", () => {
     expect(s).toHaveLength(1);
     expect(s[0].covers.sort()).toEqual(["left", "right"]);
     for (const t of targets) expect(cameraSees(asCamera(s[0]), t, obs).level).not.toBeNull();
+  });
+
+  test("a front door under a porch: the camera goes under the porch roof, where it can see the door", () => {
+    // A 50 x 36 ft house with a porch on its own roof along the south wall (floor 2 ft up)
+    const home = {
+      id: "home", type: "building", x: 0, y: 0, width: 50, height: 36, rotation: 0, wallHeight: 12, label: "Home", color: "#ccc",
+      openParts: [{ kind: "porch", pts: [{ x: -15, y: 18 }, { x: 15, y: 18 }, { x: 15, y: 26 }, { x: -15, y: 26 }], floor: 2, roof: "own" }]
+    } as unknown as BuildingItem;
+    const pts = buildingWorldPoints(home);
+    const obs: Obstacle[] = [{ kind: "building", id: home.id, points: pts, heightFt: 12 }, ...roofObstacles(home)];
+    const mounts = mountCandidates(home, 1, 8, 9, 11);
+    // No camera spot on the wall above the porch roof; some under it
+    expect(mounts.some(m => m.covered && m.kind === "porch")).toBe(true);
+    expect(mounts.some(m => m.covered && m.kind === "corner")).toBe(true);
+    const door = { id: "door", x: 4, y: 20, goal: "identify" as const };
+    const s = suggestCameras({ targets: [door], buildings: [{ id: home.id, points: pts, heightFt: 12, mountHeightFt: 11, mounts }], obstacles: obs, existing: [] });
+    expect(s).toHaveLength(1);
+    expect(s[0].covered).toBe(true);
+    // Under the porch ceiling (11.4 ft at the house, lower further out) and out of reach on the porch floor
+    expect(s[0].heightFt).toBeLessThan(11.4);
+    expect(s[0].heightFt).toBeGreaterThanOrEqual(9.5);
+    const r = cameraSees(asCamera(s[0]), door, obs);
+    expect(r.level !== null && levelRank(r.level) <= levelRank("identify")).toBe(true);
+  });
+
+  test("a carport on posts: its roof blocks the view from above, a camera under it sees the car spot", () => {
+    const carport = {
+      id: "carport", type: "building", x: 0, y: 0, width: 20, height: 20, rotation: 0, wallHeight: 9, label: "Carport", color: "#ccc", openSides: true
+    } as unknown as BuildingItem;
+    const obs = roofObstacles(carport);
+    const spot = { id: "car", x: 2, y: 2, goal: "recognize" as const };
+    // From a pole 25 ft up beside it, looking down through the roof: blocked
+    const above = asCamera({ x: 30, y: 2, rotation: 180, pitch: -35, heightFt: 25, lensId: "4mm", hFov: 90, resolutionWidth: 3840, range: 120, mount: null, covers: [] });
+    expect(cameraSees(above, spot, obs).reason).toBe("blocked");
+    const s = suggestCameras({ targets: [spot], buildings: [{ id: carport.id, points: buildingWorldPoints(carport), heightFt: 9, mountHeightFt: 8, mounts: mountCandidates(carport, 1, 8, 9, 8) }], obstacles: obs, existing: [] });
+    expect(s).toHaveLength(1);
+    expect(s[0].covered).toBe(true);
+    expect(s[0].heightFt).toBeLessThanOrEqual(8.25);
+    const r = cameraSees(asCamera(s[0]), spot, obs);
+    expect(r.level !== null && levelRank(r.level) <= levelRank("recognize")).toBe(true);
   });
 });
