@@ -117,6 +117,7 @@ export interface TreeItem extends BaseItem {
   width?: number;   // Canopy width multiplier (default 1)
   treeType?: 'deciduous' | 'conifer' | 'palm' | 'bush';  // Tree type
   color: string;
+  importSource?: "photo"; // Found on the imported aerial photo (replaced on re-import)
 }
 
 export interface ParkingItem extends BaseItem {
@@ -126,6 +127,7 @@ export interface ParkingItem extends BaseItem {
   color: string;
   vehicleType?: 'sedan' | 'suv' | 'truck' | 'sports' | 'van' | 'hatchback';
   vehicleHeight?: number;
+  importSource?: "photo"; // Found on the imported aerial photo (replaced on re-import)
 }
 
 export interface LabelItem extends BaseItem {

@@ -1,19 +1,55 @@
-import { test, expect, itemsOfType, placeWithKey, planPoint } from "./fixtures";
+import { test, expect, drag, handleCenter, itemBox, itemsOfType, placeWithKey, screenOf } from "./fixtures";
 
 test.describe("cameras", () => {
-  test("aim handle points the camera at the cursor (2D and stored rotation agree)", async ({ page }) => {
+  test("aim handle points the camera where it is dragged (rotation and tilt)", async ({ page }) => {
     await placeWithKey(page, "c", 0.5, 0.5);
-    const handle = page.locator("circle.cursor-crosshair").first();
-    const hb = (await handle.boundingBox())!;
     const [cam] = await itemsOfType(page, "camera");
-    await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
-    await page.mouse.down();
-    const center = await planPoint(page, 0.5, 0.5);
-    await page.mouse.move(center.x + 250, center.y, { steps: 8 }); // straight right of the camera
-    await page.mouse.up();
+    const handle = await handleCenter(page, "aim");
+    const target = await screenOf(page, cam.x + 40, cam.y); // 40 ft due east
+    await drag(page, handle, target, 8);
     const [aimed] = await itemsOfType(page, "camera");
-    expect(Math.min(aimed.rotation, 360 - aimed.rotation)).toBeLessThan(4);
+    expect(Math.min(aimed.rotation, 360 - aimed.rotation)).toBeLessThan(3);
     expect(aimed.rotation).not.toBe(cam.rotation);
+    // Tilted to look at head height 40 ft away
+    expect(aimed.pitch).toBeLessThan(0);
+    expect(aimed.pitch).toBeGreaterThan(-15);
+    // The dot sits where the camera now looks
+    const after = await handleCenter(page, "aim");
+    expect(Math.hypot(after.x - target.x, after.y - target.y)).toBeLessThan(12);
+  });
+
+  test("field of view and range handles", async ({ page }) => {
+    await placeWithKey(page, "c", 0.5, 0.5);
+    const [cam] = await itemsOfType(page, "camera");
+    const range = await handleCenter(page, "range");
+    const c = await screenOf(page, cam.x, cam.y);
+    await drag(page, range, { x: c.x + (range.x - c.x) * 0.5, y: c.y + (range.y - c.y) * 0.5 }, 6);
+    const [shorter] = await itemsOfType(page, "camera");
+    expect(shorter.range).toBeLessThan(cam.range * 0.7);
+
+    const edge = await handleCenter(page, "fov-r");
+    // Swing the edge further out: the view widens
+    const a = Math.atan2(edge.y - c.y, edge.x - c.x) + 0.35;
+    const r = Math.hypot(edge.x - c.x, edge.y - c.y);
+    await drag(page, edge, { x: c.x + Math.cos(a) * r, y: c.y + Math.sin(a) * r }, 6);
+    const [wider] = await itemsOfType(page, "camera");
+    expect(wider.hFov).toBeGreaterThan(cam.hFov + 20);
+  });
+
+  test("dragging a camera next to a wall mounts it there", async ({ page }) => {
+    await placeWithKey(page, "b", 0.35, 0.35);
+    await page.keyboard.press("Escape");
+    await placeWithKey(page, "c", 0.35, 0.7);
+    const [b] = await itemsOfType(page, "building");
+    const [cam] = await itemsOfType(page, "camera");
+    expect(cam.mount.type).toBe("free");
+    const box = await itemBox(page, b.id);
+    const from = await screenOf(page, cam.x, cam.y, 9);
+    await drag(page, from, { x: box.x + box.width / 2, y: box.y + box.height + 4 }, 10);
+    const [mounted] = await itemsOfType(page, "camera");
+    expect(mounted.mount.type).toBe("building");
+    expect(mounted.mount.buildingId).toBe(b.id);
+    expect(Math.round(mounted.rotation)).toBe(90); // facing out of the south wall
   });
 
   test("presets update lens, mount and the coverage distances", async ({ page }) => {
@@ -44,9 +80,9 @@ test.describe("cameras", () => {
   test("camera placed next to a wall mounts at eave height facing out", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     const [b] = await itemsOfType(page, "building");
-    const poly = (await page.getByTestId("plan").locator("polygon").first().boundingBox())!;
+    const box = await itemBox(page, b.id);
     await page.keyboard.press("c");
-    await page.mouse.click(poly.x + poly.width / 2, poly.y + poly.height + 2); // just below the south wall
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height + 2); // just below the south wall
     const [cam] = await itemsOfType(page, "camera");
     expect(cam.mount.type).toBe("building");
     expect(cam.mount.buildingId).toBe(b.id);
@@ -63,12 +99,13 @@ test.describe("cameras", () => {
 
   test("rotating a building rotates its mounted cameras", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
-    const poly = (await page.getByTestId("plan").locator("polygon").first().boundingBox())!;
+    const [b] = await itemsOfType(page, "building");
+    const box = await itemBox(page, b.id);
     await page.keyboard.press("c");
-    await page.mouse.click(poly.x + poly.width / 2, poly.y + poly.height + 2);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height + 2);
     const [cam] = await itemsOfType(page, "camera");
     // select the building and turn it 90° with the rotation slider
-    await page.mouse.click(poly.x + poly.width / 2, poly.y + poly.height / 2);
+    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
     // Rotation is an advanced building setting (the action bar rotates in 15° steps)
     await page.getByRole("button", { name: /More options/ }).click();
     const slider = page.locator('label:has-text("Rotation") + input[type=range]').first();
