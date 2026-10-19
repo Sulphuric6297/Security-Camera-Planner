@@ -118,7 +118,7 @@ Figma, SketchUp, Blender and three.js editor patterns) points to one view with o
   2D and 3D tabs animate between looking straight down (north up) and a tilted view; tilting with
   the mouse switches the tab to match.
 - Map-style navigation everywhere: drag empty ground to pan (the ground stays under the cursor),
-  scroll or pinch zooms at the cursor, two-finger trackpad scroll pans, right-drag or Shift/Ctrl+
+  scroll (mouse wheel or two fingers up/down) or pinch zooms at the cursor, a sideways two-finger swipe slides the map, right-drag or Shift/Ctrl+
   drag rotates and tilts, double-click zooms in. Compass (click for north up, snaps within 7°),
   zoom, fit, tilt and turn buttons; keys 2/3, Q/E, N, 0, F, +/-.
 - Hit-test first: a press on a handle or a selected item edits it, a press on empty ground pans,

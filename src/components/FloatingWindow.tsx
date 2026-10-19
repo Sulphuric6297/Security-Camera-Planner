@@ -47,8 +47,8 @@ export function FloatingWindow({ title, storageKey, width, onWidth, minWidth = 2
     const el = ref.current;
     const parent = el?.offsetParent as HTMLElement | null;
     if (!el || !parent) return { x: 0, y: 0 };
-    // Centered, sitting just above the tool dock at the bottom of the map
-    return { x: (parent.clientWidth - el.offsetWidth) / 2, y: parent.clientHeight - el.offsetHeight - 84 };
+    // Centered, just above the tool dock and the hint line at the bottom of the map
+    return { x: (parent.clientWidth - el.offsetWidth) / 2, y: parent.clientHeight - el.offsetHeight - 124 };
   };
 
   useLayoutEffect(() => {

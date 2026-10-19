@@ -510,6 +510,10 @@ export class SiteView {
     cam.near = 1;
     cam.far = span * 4;
     cam.updateProjectionMatrix();
+    // Offset surfaces by a couple of shadow-map texels, so sloped roofs don't shadow themselves in stripes.
+    const texel = (span * 1.6) / this.sun.shadow.mapSize.x;
+    this.sun.shadow.normalBias = Math.max(0.6, texel * 2.5);
+    this.sun.shadow.bias = -0.001;
   }
 
   private updateLimits() {
@@ -1664,15 +1668,15 @@ export class SiteView {
     e.preventDefault();
     e.stopPropagation();
     const line = e.deltaMode !== 0;
-    const mouseWheel = line || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
-    if (!e.ctrlKey && !mouseWheel) {
-      // Two-finger trackpad scroll: move the map with the fingers.
+    // Scroll up/down (mouse wheel or two fingers) and pinch zoom at the cursor; a sideways
+    // two-finger swipe slides the map sideways. Panning is a drag.
+    if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       const g0 = this.groundAt(e.clientX, e.clientY);
-      const g1 = g0 && this.planeAt(e.clientX - e.deltaX, e.clientY - e.deltaY, g0.y);
+      const g1 = g0 && this.planeAt(e.clientX - e.deltaX, e.clientY, g0.y);
       if (g0 && g1) this.shift(g0.x - g1.x, g0.z - g1.z);
       return;
     }
-    const delta = (line ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.0015);
+    const delta = (line ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.002);
     this.zoomAt(e.clientX, e.clientY, Math.exp(delta));
   }
 

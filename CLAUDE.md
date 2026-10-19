@@ -2,17 +2,22 @@
 
 Static React + Vite + TypeScript app, hosted on GitHub Pages. No API keys, no backend.
 
-## How to work: speed and accuracy first, then tests
+## How to work
 
-- **Edit directly.** Use the editor's exact find-and-replace edits on the files. Don't write
-  long scripts to make changes, and don't re-read or re-check things that haven't changed.
-- **Make all the changes for the task, then test once at the end.** Don't run tests, builds or
-  screenshots after each small edit; `npm run typecheck` is fine as a quick sanity check.
-- Then run the full check below and fix whatever it points out.
+- **Look at the real app, not just the tests.** Tests check stored numbers; they don't show
+  whether the screen looks right or is easy to use. For any UI change or UI bug:
+  1. Reproduce it on screen first: `npm run look` (screenshots of the main screens, see below).
+  2. Fix it.
+  3. Look again at the same screens and compare.
+  4. Show the user the before/after screenshots.
+- **Say only what you have seen.** Describe a feature as working only after using it in the
+  browser. Say "live" only after the deployed site serves the new build. If something is still
+  deploying, unchecked or a guess, say so plainly.
+- **Edit directly** with exact find-and-replace edits; keep changes focused.
+- Run the full check once a batch of changes is done (not after every small edit).
 
 ## The testing rule
 
-Work through a batch of related changes first; you don't need to run tests after every small edit.
 **Before committing or pushing, the whole batch must pass the full check:**
 
 ```bash
@@ -38,6 +43,7 @@ Useful commands:
 
 | Command | What it does |
 | --- | --- |
+| `npm run look` | Build, then screenshot the main screens into `look/` (add `-- -g camera` for one) |
 | `npm run typecheck` | Type errors only (fast) |
 | `npx playwright test tests/e2e/camera.spec.ts` | One area, while iterating |
 | `npx playwright test -g "aim handle"` | One test by name |

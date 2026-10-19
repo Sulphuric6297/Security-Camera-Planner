@@ -35,6 +35,13 @@ test.describe("3D, camera views and report", () => {
     });
     // Fog used to darken the far side of big sites.
     expect(info.fog).toBeNull();
+    // The satellite photo is drawn over the terrain (it used to end up hidden under it).
+    const photo = await page.evaluate(() => {
+      let m: any = null;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (o.name === "terrain-map-plane") m = o.material; });
+      return m && { visible: m.visible, hasMap: !!m.map, transparent: m.transparent };
+    });
+    expect(photo).toEqual({ visible: true, hasMap: true, transparent: true });
     // The shadow camera must reach every corner of the site (the default covered ~10 ft).
     expect(info.halfW).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
     expect(info.halfH).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p .",
     "test:e2e": "playwright test",
-    "check": "npm run typecheck && npm run build && npm run test:e2e"
+    "check": "npm run typecheck && npm run build && npm run test:e2e",
+    "look": "vite build && playwright test -c look.config.ts"
   },
   "dependencies": {
     "@types/react-grid-layout": "^1.3.6",

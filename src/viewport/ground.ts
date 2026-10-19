@@ -143,7 +143,8 @@ export class Ground {
         color: 0xffffff,
         map: this.photo,
         visible: !!this.photo,
-        transparent: doc.background.opacity < 1,
+        // Drawn in the transparent pass so it lands on top of the (opaque) terrain under it.
+        transparent: true,
         opacity: doc.background.opacity,
         depthWrite: false,
         polygonOffset: true,

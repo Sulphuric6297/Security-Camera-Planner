@@ -27,6 +27,19 @@ test.describe("guided workflow and plan tools", () => {
     await expect(page.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
   });
 
+  test("steps are ticked only when finished, not by adding one thing", async ({ page }) => {
+    await placeWithKey(page, "b", 0.4, 0.4);
+    await placeWithKey(page, "c", 0.6, 0.6);
+    await page.keyboard.press("Escape");
+    await expect(step(page, 1)).toHaveAttribute("data-done", "false");
+    await expect(step(page, 2)).toHaveAttribute("data-done", "false");
+    // "Next" finishes a step
+    await step(page, 1).click();
+    await page.getByTestId("step-panel").getByRole("button", { name: /Next: Cameras/ }).click();
+    await expect(step(page, 1)).toHaveAttribute("data-done", "true");
+    await expect(step(page, 2)).toHaveAttribute("data-done", "false");
+  });
+
   test("the selection action bar duplicates, rotates and deletes", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     const bar = page.getByRole("toolbar", { name: "Selection actions" });
