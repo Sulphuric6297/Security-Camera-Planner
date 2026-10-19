@@ -15,18 +15,20 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ["T", "Add a tree"],
       ["P", "Add a vehicle"],
       ["L", "Add text"],
+      ["M", "Mark a spot to protect"],
       ["Esc", "Cancel / deselect"]
     ]
   },
   {
     title: "View",
     keys: [
-      ["2", "2D plan"],
-      ["3", "3D view"],
-      ["0", "Zoom to fit the whole site"],
-      ["F", "Zoom to the selection"],
-      ["Scroll", "Zoom"],
-      ["Space + drag", "Pan"],
+      ["Drag", "Pan the map"],
+      ["Scroll / pinch", "Zoom at the cursor"],
+      ["Right-drag", "Rotate and tilt (or Shift+drag)"],
+      ["2 / 3", "Look straight down / tilt into 3D"],
+      ["Q / E", "Turn the view"],
+      ["N", "North up"],
+      ["0 / F", "Fit the site / the selection"],
       ["?", "This list"]
     ]
   },
@@ -39,7 +41,8 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       [`${mod}+C / ${mod}+V`, "Copy / paste"],
       ["Delete", "Delete the selection"],
       ["Arrows", "Nudge 1 ft (Shift: 10 ft)"],
-      ["Shift+click edge", "Add a corner to a building"],
+      ["Drag edge dot", "Add a corner to a building"],
+      ["Double-click corner", "Remove a corner"],
       [`${mod}+S`, "Save the plan"]
     ]
   }

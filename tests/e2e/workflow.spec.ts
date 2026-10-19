@@ -1,4 +1,4 @@
-import { test, expect, importSite, itemsOfType, placeWithKey, stubNetwork } from "./fixtures";
+import { test, expect, importSite, itemBox, itemsOfType, measuredPxPerFt, placeWithKey, stubNetwork } from "./fixtures";
 
 const step = (page: any, i: number) => page.locator('nav[aria-label="Steps"] button').nth(i);
 
@@ -44,27 +44,22 @@ test.describe("guided workflow and plan tools", () => {
 
   test("scale bar matches real distances; zoom to selection and fit", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
-    // Real on-screen pixels per plan unit (= per foot here), from the plan's own transform
-    const pxPerFt = () =>
-      page.getByTestId("plan").evaluate((svg: any) => {
-        const g = Array.from(svg.querySelectorAll("g")).find((el: any) => /scale\(/.test(el.getAttribute("transform") || "")) as any;
-        return g.getScreenCTM().a as number;
-      });
     const barPxPerFt = async () => {
       const bar = (await page.getByTestId("scale-bar").boundingBox())!.width;
       const feet = parseFloat(((await page.getByTestId("scale-bar-label").textContent()) ?? "").replace(/,/g, ""));
       return bar / feet;
     };
-    const a = await pxPerFt();
+    const a = await measuredPxPerFt(page);
     expect(Math.abs((await barPxPerFt()) - a) / a).toBeLessThan(0.03);
 
     await page.keyboard.press("f"); // zoom to the selected building
-    await expect.poll(pxPerFt).toBeGreaterThan(a * 2);
-    const b = await pxPerFt();
+    await expect.poll(() => measuredPxPerFt(page)).toBeGreaterThan(a * 2);
+    await page.waitForTimeout(700); // let the animation settle
+    const b = await measuredPxPerFt(page);
     expect(Math.abs((await barPxPerFt()) - b) / b).toBeLessThan(0.03);
 
     await page.keyboard.press("0"); // back to the whole site
-    await expect.poll(async () => Math.round((await pxPerFt()) * 1000)).toBe(Math.round(a * 1000));
+    await expect.poll(async () => Math.round((await measuredPxPerFt(page)) * 100)).toBe(Math.round(a * 100));
   });
 
   test("after importing a site the plan zooms to the property and shows north", async ({ page }) => {
@@ -72,8 +67,8 @@ test.describe("guided workflow and plan tools", () => {
     await page.getByRole("button", { name: "Open in 2D" }).click();
     await expect(page.getByLabel("North arrow")).toBeVisible();
     // The 58 ft house fills a good part of the view, not a speck
-    const house = (await page.getByTestId("plan").locator("polygon").first().boundingBox())!;
-    expect(house.width).toBeGreaterThan(120);
+    const [first] = await itemsOfType(page, "building");
+    await expect.poll(async () => (await itemBox(page, first.id)).width).toBeGreaterThan(120);
   });
 
   test("keyboard shortcuts list opens with ? and from the menu", async ({ page }) => {
@@ -98,9 +93,9 @@ test.describe("guided workflow and plan tools", () => {
   test("handles are bigger on touch screens", async ({ page, browser }) => {
     const handleSize = async (p: any) => {
       await placeWithKey(p, "b", 0.5, 0.5);
-      // corner handles of the selected building
-      const sizes = await p.getByTestId("plan").locator("circle").evaluateAll((cs: any[]) => cs.map(c => Number(c.getAttribute("r"))).filter(r => r > 0));
-      return Math.max(...sizes);
+      const corner = p.locator('[data-handle="corner"]').first();
+      await expect(corner).toBeVisible();
+      return (await corner.boundingBox())!.width;
     };
     const desktop = await handleSize(page);
     const ctx = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 1600, height: 1000 } });
@@ -114,5 +109,17 @@ test.describe("guided workflow and plan tools", () => {
     expect(touchSize / desktop).toBeGreaterThan(1.3);
     await ctx.close();
   });
-});
 
+  test("tilting the view switches the tab to 3D; N turns north up", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Tilt into 3D" }).click();
+    await expect(page.getByRole("tab", { name: "3D" })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("button", { name: "Rotate view right" }).click();
+    await expect.poll(() => page.evaluate(() => Math.round((window as any).__scpView.viewInfo().heading))).toBe(23);
+    await page.keyboard.press("n");
+    await expect.poll(() => page.evaluate(() => Math.round((window as any).__scpView.viewInfo().heading) % 360)).toBe(0);
+    await page.getByRole("tab", { name: "2D" }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__scpView.viewInfo().tiltDeg)).toBeLessThan(1);
+  });
+});

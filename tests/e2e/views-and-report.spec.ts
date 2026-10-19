@@ -1,4 +1,4 @@
-import { test, expect, importSite, placeWithKey } from "./fixtures";
+import { test, expect, drag, importSite, placeWithKey } from "./fixtures";
 
 test.describe("3D, camera views and report", () => {
   test("3D view and the camera preview render", async ({ page }) => {
@@ -40,7 +40,7 @@ test.describe("3D, camera views and report", () => {
     expect(info.halfH).toBeGreaterThanOrEqual(info.span * Math.SQRT1_2);
   });
 
-  test("3D buildings get real roofs textured with the photo; the roof can be changed", async ({ page }) => {
+  test("3D buildings get real roofs, solid by default; photo roofs are an option; the roof can be changed", async ({ page }) => {
     await importSite(page);
     await page.getByRole("button", { name: "Open in 3D" }).click();
     await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
@@ -54,16 +54,51 @@ test.describe("3D, camera views and report", () => {
       });
     await expect.poll(async () => (await roofs()).length).toBe(2);
     const before = await roofs();
-    expect(before.every(r => r.photo)).toBe(true);
+    expect(before.every(r => !r.photo)).toBe(true);
     expect(before.some(r => r.kind === "hip" || r.kind === "gable")).toBe(true);
+
+    // The satellite photo on roofs is a choice
+    await page.getByLabel("Photo on roofs").check();
+    await expect.poll(async () => (await roofs()).every(r => r.photo)).toBe(true);
+    await page.getByLabel("Photo on roofs").uncheck();
+    await expect.poll(async () => (await roofs()).every(r => !r.photo)).toBe(true);
 
     // Change one building's roof to flat in the inspector
     const target = before.find(r => r.kind !== "flat")!;
-    await page.keyboard.press("2");
     await page.evaluate(id => (window as any).__scpSelect?.(id), target.id);
     await page.getByRole("group", { name: "Roof shape" }).getByRole("button", { name: "flat" }).click();
-    await page.keyboard.press("3");
     await expect.poll(async () => (await roofs()).find(r => r.id === target.id)?.kind).toBe("flat");
+  });
+
+  test("the camera view is a window you can move and resize; it starts centered", async ({ page }) => {
+    await page.evaluate(() => { localStorage.removeItem("scp.cameraViewPos"); localStorage.removeItem("scp.cameraViewWidth"); });
+    await page.reload();
+    await placeWithKey(page, "c", 0.3, 0.3);
+    const win = page.getByRole("dialog", { name: "Camera view" });
+    await expect(win).toBeVisible();
+    const map = (await page.getByTestId("plan").boundingBox())!;
+    const box = (await win.boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - (map.x + map.width / 2))).toBeLessThan(4);
+    expect(box.y + box.height).toBeGreaterThan(map.y + map.height * 0.6);
+
+    // Drag it by the title bar
+    const bar = (await win.getByTestId("window-titlebar").boundingBox())!;
+    await drag(page, { x: bar.x + 60, y: bar.y + bar.height / 2 }, { x: bar.x - 140, y: bar.y + bar.height / 2 - 200 });
+    const moved = (await win.boundingBox())!;
+    expect(moved.x).toBeCloseTo(box.x - 200, -1);
+    expect(moved.y).toBeCloseTo(box.y - 200, -1);
+
+    // Resize from the corner; the picture gets bigger too
+    const grip = (await win.getByTestId("window-resize").boundingBox())!;
+    await drag(page, { x: grip.x + 8, y: grip.y + 8 }, { x: grip.x + 128, y: grip.y + 8 });
+    expect((await win.boundingBox())!.width).toBeCloseTo(box.width + 120, -1);
+    await expect.poll(() => win.locator("canvas").evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(500);
+
+    // Where you put it is remembered
+    await page.waitForTimeout(1200); // autosave
+    await page.reload();
+    await page.evaluate(() => (window as any).__scpSelect((window as any).__scpProject().items[0].id));
+    await expect.poll(async () => Math.round((await win.boundingBox())!.x)).toBe(Math.round(moved.x));
   });
 
   test("Camera wall shows one tile per camera", async ({ page }) => {

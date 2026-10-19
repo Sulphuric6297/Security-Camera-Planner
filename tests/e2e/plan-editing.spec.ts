@@ -1,6 +1,6 @@
-import { test, expect, itemsOfType, placeWithKey, planPoint, project } from "./fixtures";
+import { test, expect, drag, handleCenter, itemBox, itemsOfType, placeWithKey, planPoint, project, screenOf } from "./fixtures";
 
-test.describe("2D plan editing", () => {
+test.describe("plan editing", () => {
   test("places every item type with shortcuts", async ({ page }) => {
     await placeWithKey(page, "b", 0.4, 0.4);
     await placeWithKey(page, "c", 0.6, 0.6);
@@ -12,25 +12,44 @@ test.describe("2D plan editing", () => {
     expect(types).toEqual(["building", "camera", "label", "parking", "tree"]);
   });
 
-  test("a selected building drags from anywhere, Shift+click edge adds a corner", async ({ page }) => {
+  test("a selected building drags from anywhere; pulling an edge's middle adds a corner", async ({ page }) => {
     await placeWithKey(page, "b", 0.4, 0.4);
     const [before] = await itemsOfType(page, "building");
-    const poly = page.getByTestId("plan").locator("polygon").first();
-    const box = (await poly.boundingBox())!;
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); // select
-    await page.mouse.move(box.x + box.width * 0.15, box.y + box.height * 0.3); // near the edge (used to insert a corner)
-    await page.mouse.down();
-    await page.mouse.move(box.x + 83, box.y + box.height * 0.3 + 40, { steps: 6 });
-    await page.mouse.up();
+    const box = await itemBox(page, before.id);
+    // Placing selects it, so a drag moves it (from anywhere on it)
+    await drag(page, { x: box.x + box.width * 0.2, y: box.y + box.height * 0.35 }, { x: box.x + box.width * 0.2 + 80, y: box.y + box.height * 0.35 + 40 });
     const [after] = await itemsOfType(page, "building");
     expect(after.x).toBeGreaterThan(before.x + 10);
     expect(after.points).toHaveLength(4);
 
-    const box2 = (await poly.boundingBox())!;
-    await page.keyboard.down("Shift");
-    await page.mouse.click(box2.x + box2.width / 2, box2.y + 8); // within the ~14 px edge threshold
-    await page.keyboard.up("Shift");
-    expect((await itemsOfType(page, "building"))[0].points.length).toBe(5);
+    // Corner and edge-middle handles on the selection; dragging a middle one adds a corner there.
+    await page.keyboard.press("f"); // zoom in on it
+    await page.waitForTimeout(800);
+    await expect(page.locator('[data-handle="corner"]')).toHaveCount(4);
+    const mid = await handleCenter(page, "mid", 0);
+    await drag(page, mid, { x: mid.x, y: mid.y - 30 }, 5);
+    const [shaped] = await itemsOfType(page, "building");
+    expect(shaped.points).toHaveLength(5);
+    await expect(page.locator('[data-handle="corner"]')).toHaveCount(5);
+    // Undo takes the new corner away again
+    await page.keyboard.press("Control+z");
+    await expect.poll(async () => (await itemsOfType(page, "building"))[0].points.length).toBe(4);
+  });
+
+  test("an unselected building pans the map instead of moving; click selects it", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    const [b] = await itemsOfType(page, "building");
+    const start = await screenOf(page, b.x, b.y);
+    await drag(page, start, { x: start.x - 100, y: start.y - 50 }, 5);
+    const [same] = await itemsOfType(page, "building");
+    expect(same.x).toBeCloseTo(b.x, 5);
+    // The map moved with the cursor: the building is now under the end point
+    const moved = await screenOf(page, b.x, b.y);
+    expect(moved.x - start.x).toBeCloseTo(-100, -1);
+    expect(moved.y - start.y).toBeCloseTo(-50, -1);
+    await page.mouse.click(moved.x, moved.y);
+    await expect(page.getByRole("toolbar", { name: "Selection actions" })).toBeVisible();
   });
 
   test("delete shows an Undo toast; undo/redo/duplicate/nudge work", async ({ page }) => {
@@ -54,19 +73,41 @@ test.describe("2D plan editing", () => {
     expect(await itemsOfType(page, "camera")).toHaveLength(2);
   });
 
-  test("panning keeps the plan under the cursor", async ({ page }) => {
+  test("panning the empty map keeps the ground under the cursor", async ({ page }) => {
     await placeWithKey(page, "b", 0.5, 0.5);
     await page.keyboard.press("Escape");
-    const poly = page.getByTestId("plan").locator("polygon").first();
-    const before = (await poly.boundingBox())!;
-    const start = await planPoint(page, 0.8, 0.8);
-    await page.mouse.move(start.x, start.y);
-    await page.mouse.down();
-    await page.mouse.move(start.x - 100, start.y - 50, { steps: 5 });
-    await page.mouse.up();
-    const after = (await poly.boundingBox())!;
+    const [b] = await itemsOfType(page, "building");
+    const before = await screenOf(page, b.x, b.y);
+    const start = await planPoint(page, 0.85, 0.85);
+    await drag(page, start, { x: start.x - 100, y: start.y - 50 }, 5);
+    const after = await screenOf(page, b.x, b.y);
     expect(after.x - before.x).toBeCloseTo(-100, -1);
     expect(after.y - before.y).toBeCloseTo(-50, -1);
+  });
+
+  test("building rotation handle, and height handle in 3D", async ({ page }) => {
+    await placeWithKey(page, "b", 0.4, 0.5);
+    const [b] = await itemsOfType(page, "building");
+    const r = await handleCenter(page, "rotate");
+    const c = await screenOf(page, b.x, b.y);
+    // The knob sits below the building; swing it round to the right: a quarter turn back
+    const radius = Math.hypot(r.x - c.x, r.y - c.y);
+    expect(r.y).toBeGreaterThan(c.y);
+    await page.keyboard.down("Shift");
+    await drag(page, r, { x: c.x + radius, y: c.y }, 10);
+    await page.keyboard.up("Shift");
+    const [turned] = await itemsOfType(page, "building");
+    expect(turned.rotation).toBe(270);
+
+    // Height is dragged in 3D (looking straight down it's in the inspector)
+    await expect(page.locator('[data-handle="height"]')).toBeHidden();
+    await page.keyboard.press("3");
+    await expect.poll(() => page.evaluate(() => (window as any).__scpView.viewInfo().tiltDeg)).toBeGreaterThan(40);
+    await page.waitForTimeout(500);
+    const h = await handleCenter(page, "height");
+    await drag(page, h, { x: h.x, y: h.y - 60 }, 6);
+    const [taller] = await itemsOfType(page, "building");
+    expect(taller.wallHeight).toBeGreaterThan(b.wallHeight + 5);
   });
 
   test("vehicles are placed at real size; picking a type sets its size", async ({ page }) => {
@@ -81,16 +122,18 @@ test.describe("2D plan editing", () => {
     expect(truck.height).toBeLessThan(21);
   });
 
-  test("placing in the 3D view uses the same real sizes", async ({ page }) => {
+  test("placing and moving in the tilted 3D view uses the same real sizes", async ({ page }) => {
     await page.keyboard.press("3");
-    await expect.poll(() => page.evaluate(() => !!(window as any).__scpThree()?.scene)).toBe(true);
-    await page.keyboard.press("p");
-    const canvas = page.locator("canvas").first();
-    const box = (await canvas.boundingBox())!;
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect.poll(() => page.evaluate(() => (window as any).__scpView.viewInfo().tiltDeg)).toBeGreaterThan(40);
+    await placeWithKey(page, "p", 0.5, 0.5);
     await expect.poll(async () => (await itemsOfType(page, "parking")).length).toBe(1);
     const [car] = await itemsOfType(page, "parking");
     expect(car.width).toBeLessThan(8);
     expect(car.height).toBeLessThan(20);
+    // Drag it in 3D: it follows the ground
+    const at = await screenOf(page, car.x, car.y, 2);
+    await drag(page, at, { x: at.x + 120, y: at.y }, 8);
+    const [moved] = await itemsOfType(page, "parking");
+    expect(Math.hypot(moved.x - car.x, moved.y - car.y)).toBeGreaterThan(10);
   });
 });

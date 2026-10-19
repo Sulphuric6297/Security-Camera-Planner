@@ -107,6 +107,38 @@ would mostly be wrong. Marking them takes one click each.
   edits it.
 - Night/IR range, storage estimate (days × bitrate), measure tool.
 
+### Navigation and editing v2: one map view for 2D and 3D (done)
+
+Why: two separate views (an SVG plan and an orbit-only 3D scene) each had their own navigation, and
+editing in 3D was limited. Research on map and 3D editors (Google Earth/Maps 3D, Mapbox GL,
+Figma, SketchUp, Blender and three.js editor patterns) points to one view with one camera, where
+"2D" is just looking straight down.
+
+- One view (`src/viewport/SiteView.ts`) with a perspective camera driven by camera-controls. The
+  2D and 3D tabs animate between looking straight down (north up) and a tilted view; tilting with
+  the mouse switches the tab to match.
+- Map-style navigation everywhere: drag empty ground to pan (the ground stays under the cursor),
+  scroll or pinch zooms at the cursor, two-finger trackpad scroll pans, right-drag or Shift/Ctrl+
+  drag rotates and tilts, double-click zooms in. Compass (click for north up, snaps within 7°),
+  zoom, fit, tilt and turn buttons; keys 2/3, Q/E, N, 0, F, +/-.
+- Hit-test first: a press on a handle or a selected item edits it, a press on empty ground pans,
+  and a click (under 4 px of movement) selects, places or deselects. Big things (buildings) only
+  move once selected, so dragging across a map full of buildings still pans.
+- Constant-size handles drawn as HTML over the scene: building corners, edge middles (drag to add
+  a corner; double-click a corner to remove it), height bar, rotate knob (Shift snaps 15°); camera
+  aim dot (sets turn and tilt so the camera looks there), field-of-view edges, range tip and a
+  height bar; tree crown size; vehicle and overlay rotation. All work the same top-down or tilted.
+- Placement shows a see-through preview of what a click will place, at real size, including the
+  camera's coverage and where it would mount on a wall.
+- A selected building turns see-through so the photo shows for lining it up.
+- Buildings look solid by default (walls, darker pitched or lighter flat roofs, crisp outlines,
+  soft contact shading); the satellite photo on roofs is an option ("Photo on roofs").
+- Trees and parked cars are found on the imported photo and placed for you (`src/lib/geo/detect.ts`):
+  crowns are vegetation that is darker and lumpier than the lawn over about a meter (lawns and
+  shadows are smooth), cars are car-sized, car-shaped paint blobs on pavement. They are marked
+  "from the photo", replaced on re-import, and listed in the import message so wrong ones get removed.
+- The printed plan is a clean vector drawing of the whole site (`src/lib/planSvg.ts`).
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

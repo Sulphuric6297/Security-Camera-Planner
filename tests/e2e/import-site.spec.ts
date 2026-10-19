@@ -1,4 +1,4 @@
-import { test, expect, importSite, itemsOfType, project, terrainRelief, SITE, ROOFS, DETECTED_CENTER } from "./fixtures";
+import { test, expect, importSite, itemsOfType, project, terrainRelief, SITE, ROOFS, DETECTED_CENTER, PHOTO_TREE, PHOTO_CAR } from "./fixtures";
 
 test.describe("Import Site", () => {
   test("search, select area, review buildings, import imagery + elevation + buildings", async ({ page }) => {
@@ -35,6 +35,23 @@ test.describe("Import Site", () => {
     const buildings = await itemsOfType(page, "building");
     expect(buildings).toHaveLength(2);
     expect(buildings.every(b => b.importSource === "osm")).toBe(true);
+
+    // The tree crown and the parked car on the photo were placed as a tree and a vehicle
+    await expect(done).toContainText(/Placed 1 tree and 1 parked car found on the photo/);
+    const geo = await page.evaluate(() => (window as any).__scpProject().planGeoRef);
+    const toPlan = (p: { lat: number; lon: number }) => ({
+      x: geo.area.x + ((p.lon - geo.bounds.west) / (geo.bounds.east - geo.bounds.west)) * geo.area.width,
+      y: geo.area.y + ((geo.bounds.north - p.lat) / (geo.bounds.north - geo.bounds.south)) * geo.area.height
+    });
+    const [tree] = await itemsOfType(page, "tree");
+    const treeAt = toPlan(PHOTO_TREE);
+    expect(Math.hypot(tree.x - treeAt.x, tree.y - treeAt.y)).toBeLessThan(5);
+    expect(tree.radius).toBeGreaterThan(9);
+    expect(tree.radius).toBeLessThan(18);
+    const [car] = await itemsOfType(page, "parking");
+    const carAt = toPlan(PHOTO_CAR);
+    expect(Math.hypot(car.x - carAt.x, car.y - carAt.y)).toBeLessThan(4);
+    expect(Math.round(car.rotation) % 180).toBe(90); // parked east-west
 
     await page.getByRole("button", { name: "Open in 3D" }).click();
     await expect(page.getByRole("tab", { name: "3D" })).toHaveAttribute("aria-selected", "true");

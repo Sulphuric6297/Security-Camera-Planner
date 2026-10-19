@@ -46,6 +46,10 @@ export const ROOFS = [
   }
 ];
 
+// A tree crown on the lawn and a red car parked on a driveway, for "place trees and cars from the photo".
+export const PHOTO_TREE = { lat: SITE.lat - 0.00018, lon: SITE.lon - 0.00025, radiusM: 4 };
+export const PHOTO_CAR = { lat: SITE.lat - 0.00022, lon: SITE.lon + 0.00022, lengthM: 4.6, widthM: 1.9, drivewayM: 13 };
+
 /** Imagery tile: textured grass with the stub buildings' roofs (and their shadows) drawn where they really are. */
 const imageryTile = (z: number, tx: number, ty: number) => {
   const size = 256;
@@ -62,6 +66,22 @@ const imageryTile = (z: number, tx: number, ty: number) => {
       const h = Math.sin(gx * 12.9898 + gy * 78.233) * 43758.5453;
       const n = (h - Math.floor(h) - 0.5) * 30;
       let col = [80 + n, 120 + n, 60 + n * 0.5];
+      const cosLat = Math.cos((SITE.lat * Math.PI) / 180);
+      const eastM = (lon - SITE.lon) * M_PER_DEG * cosLat;
+      const northM = (lat - SITE.lat) * M_PER_DEG;
+      // Tree crown: darker, lumpy leaf clusters (~0.5 m)
+      const treeE = eastM - (PHOTO_TREE.lon - SITE.lon) * M_PER_DEG * cosLat;
+      const treeN = northM - (PHOTO_TREE.lat - SITE.lat) * M_PER_DEG;
+      if (Math.hypot(treeE, treeN) < PHOTO_TREE.radiusM) {
+        const c = Math.sin(Math.floor(treeE / 0.5) * 91.7 + Math.floor(treeN / 0.5) * 47.3) * 9631.7;
+        const leaf = (c - Math.floor(c) - 0.5) * 60;
+        col = [40 + leaf * 0.6, 75 + leaf, 32 + leaf * 0.4];
+      }
+      // Driveway with a parked car (long side east-west)
+      const carE = eastM - (PHOTO_CAR.lon - SITE.lon) * M_PER_DEG * cosLat;
+      const carN = northM - (PHOTO_CAR.lat - SITE.lat) * M_PER_DEG;
+      if (Math.abs(carE) < PHOTO_CAR.drivewayM / 2 && Math.abs(carN) < PHOTO_CAR.drivewayM / 2) col = [95 + n * 0.2, 95 + n * 0.2, 98 + n * 0.2];
+      if (Math.abs(carE) < PHOTO_CAR.lengthM / 2 && Math.abs(carN) < PHOTO_CAR.widthM / 2) col = [180, 30, 35];
       for (const r of ROOFS) {
         const dLon = r.d; // same shape as the stub footprints (square() offsets lat and lon equally)
         const inRoof = Math.abs(lat - r.lat) <= r.d && Math.abs(lon - r.lon) <= dLon;
@@ -177,6 +197,54 @@ export async function planPoint(page: Page, fx: number, fy: number) {
   return { x: box.x + box.width * fx, y: box.y + box.height * fy };
 }
 
+/** Where a plan point (on the ground) is on screen. */
+export const screenOf = (page: Page, x: number, y: number, lift = 0) =>
+  page.evaluate(([x, y, lift]) => (window as any).__scpView.toClient(x, y, lift), [x, y, lift] as const) as Promise<{ x: number; y: number }>;
+
+/** Plan point under a screen point (null off the ground). */
+export const planAt = (page: Page, x: number, y: number) =>
+  page.evaluate(([x, y]) => (window as any).__scpView.toPlan(x, y), [x, y] as const) as Promise<{ x: number; y: number } | null>;
+
+/** An item's box on screen (page coordinates). */
+export async function itemBox(page: Page, id: string) {
+  const b = await page.evaluate(id => {
+    const v = (window as any).__scpView;
+    const r = v.screenBox(id);
+    const c = document.querySelector('[data-testid="plan"]')!.getBoundingClientRect();
+    return r ? { x: r.x + c.left, y: r.y + c.top, width: r.width, height: r.height } : null;
+  }, id);
+  if (!b) throw new Error(`item ${id} is not on screen`);
+  return b;
+}
+
+/** On-screen pixels per foot at the middle of the view (measured, not from the scale bar). */
+export const measuredPxPerFt = (page: Page) =>
+  page.evaluate(() => {
+    const v = (window as any).__scpView;
+    const r = document.querySelector('[data-testid="plan"]')!.getBoundingClientRect();
+    const mid = v.toPlan(r.left + r.width / 2, r.top + r.height / 2);
+    const a = v.toClient(mid.x - 50, mid.y);
+    const b = v.toClient(mid.x + 50, mid.y);
+    const upf = (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1;
+    return Math.hypot(b.x - a.x, b.y - a.y) / (100 / upf);
+  });
+
+/** Center of a selection handle (e.g. "aim", "corner", "mid", "height", "rotate"). */
+export async function handleCenter(page: Page, kind: string, index = 0) {
+  const h = page.locator(`[data-handle="${kind}"]`).nth(index);
+  await expect(h).toBeVisible();
+  const b = (await h.boundingBox())!;
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+}
+
+/** Drag from a point to another in small steps. */
+export async function drag(page: Page, from: { x: number; y: number }, to: { x: number; y: number }, steps = 8) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps });
+  await page.mouse.up();
+}
+
 export async function placeWithKey(page: Page, key: string, fx: number, fy: number) {
   await page.keyboard.press(key);
   const p = await planPoint(page, fx, fy);
@@ -212,6 +280,9 @@ export const test = base.extend<Fixtures>({
     await page.goto("/");
     await page.evaluate(async () => {
       localStorage.clear();
+      // Park the floating camera view top-left, out of the way of map clicks (its default is tested on its own).
+      localStorage.setItem("scp.cameraViewPos", JSON.stringify({ x: 8, y: 60 }));
+      localStorage.setItem("scp.cameraViewWidth", "300");
       await new Promise<void>(resolve => {
         const req = indexedDB.deleteDatabase("security-camera-planner");
         req.onsuccess = req.onerror = req.onblocked = () => resolve();

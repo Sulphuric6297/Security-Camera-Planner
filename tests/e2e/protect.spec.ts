@@ -23,7 +23,7 @@ test.describe("what to protect and coverage", () => {
     await page.keyboard.press("Escape");
 
     // Select the door and point the camera at it
-    const pin = page.getByTestId("target-pin").first().locator("circle").nth(1);
+    const pin = page.getByTestId("target-pin").first().locator("b");
     const box = (await pin.boundingBox())!;
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await page.getByRole("button", { name: "Camera 1", exact: true }).click();
@@ -115,7 +115,7 @@ test.describe("what to protect and coverage", () => {
     await page.getByRole("button", { name: /→ Door 1/ }).click();
     await page.keyboard.press("Escape");
     // Door 1 only needs "notice someone": covered by day...
-    const pin = page.getByTestId("target-pin").first().locator("circle").nth(1);
+    const pin = page.getByTestId("target-pin").first().locator("b");
     const box = (await pin.boundingBox())!;
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await page.getByRole("button", { name: "Notice someone" }).click();

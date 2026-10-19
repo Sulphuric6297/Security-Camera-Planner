@@ -63,6 +63,7 @@ import { AppHeader, WorkflowStepId } from "./src/components/AppHeader";
 import { StepPanel } from "./src/components/StepPanel";
 import { ToolPanel, type ToolDefaults } from "./src/components/ToolPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
+import { FloatingWindow } from "./src/components/FloatingWindow";
 import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
 import { suggestCameras } from "./src/lib/suggest";
@@ -76,6 +77,7 @@ import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/li
 import { shiftGeoPoints } from "./src/lib/geo/align";
 import { TARGET_KINDS, VEHICLE_SIZES, createItem, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
+import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, PlanGeoRef, SITE_MAX_WIDTH_FT, SiteLocation, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
 import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
@@ -85,8 +87,14 @@ import { adjustColor, getEdgeOutwardNormal, getPointsBounds, pointInPolygonXY, i
 import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { disposeObjectDeep } from "./src/three/dispose";
-import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, type PhotoRect } from "./src/three/buildings";
-import { create3dCar, create3dTree, getCarSignature, getItemTypeLabel, getTreeSignature, resolveVehicleType } from "./src/three/models";
+import { type PhotoRect } from "./src/three/buildings";
+import { createBuildingModel } from "./src/three/buildingMesh";
+import { create3dCar, create3dTree, getItemTypeLabel, resolveVehicleType } from "./src/three/models";
+import { SiteViewport } from "./src/viewport/SiteViewport";
+import type { SiteView } from "./src/viewport/SiteView";
+import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
+import { planSvg } from "./src/lib/planSvg";
+import { cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
 import { BaseItem, BuildingItem, BuildingLabelDefaults, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, InteractionType, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
@@ -121,6 +129,7 @@ export default function SecurityPlanner() {
   const [pickerView, setPickerView] = useState({ lat: 39.5, lon: -98.35, zoom: 4, key: 0 });
   const [pickerDrawing, setPickerDrawing] = useState(false);
   const [importBuildings, setImportBuildings] = useState(true);
+  const [importTreesCars, setImportTreesCars] = useState(true);
   const [buildingCandidates, setBuildingCandidates] = useState<BuildingCandidate[]>([]);
   const [buildingScan, setBuildingScan] = useState<{ state: "idle" | "loading" | "done" | "error"; message: string }>({ state: "idle", message: "" });
   // Lining the found footprints up with the photo: automatic, with manual nudges as a fallback.
@@ -143,8 +152,6 @@ export default function SecurityPlanner() {
     startMouse: { x: number; y: number };
     startTransform: { x: number; y: number; scale: number; rotation: number };
   } | null>(null);
-  const [isBackgroundDragging, setIsBackgroundDragging] = useState(false);
-  const [bgDragStart, setBgDragStart] = useState({ x: 0, y: 0, bgX: 0, bgY: 0 });
   const [mapMoveMode, setMapMoveMode] = useState(false);
   const [buildingLabelDefaults, setBuildingLabelDefaults] = useProjectField("buildingLabelDefaults");
 
@@ -172,11 +179,13 @@ export default function SecurityPlanner() {
     includeTitle: true,
     includeCameraViews: true
   });
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  // On-screen size of the plan SVG (for the scale bar and the floating action bar).
-  const [planRect, setPlanRect] = useState({ width: 0, height: 0 });
-  const [show3dMenu, setShow3dMenu] = useState(false);
+  // View preference: the aerial photo on roofs (off = solid roofs, which read better).
+  const [roofPhoto, setRoofPhoto] = useState(() => {
+    try { return localStorage.getItem("scp.roofPhoto") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.roofPhoto", roofPhoto ? "1" : "0"); } catch { /* ignore */ }
+  }, [roofPhoto]);
   // Layout: the workflow sidebar on the left can be hidden for more map.
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // What the placing tools create (chosen in the tool panel before clicking).
@@ -191,13 +200,6 @@ export default function SecurityPlanner() {
   // Recorder storage estimate (Report step and the PDF).
   const [recordDays, setRecordDays] = useState(30);
   const [recordMode, setRecordMode] = useState<"continuous" | "motion">("continuous");
-  // Set when a press already did its job (aimed a camera, placed an item on top of another), so the
-  // click that follows doesn't also deselect or place again.
-  const consumedClickRef = useRef(false);
-  const [isPanning, setIsPanning] = useState(false);
-  const [panStart, setPanStart] = useState({ x: 0, y: 0, panX: 0, panY: 0 });
-  const [isSpacePressed, setIsSpacePressed] = useState(false);
-  const isSpacePressedRef = useRef(false);
 
   const [mode, setMode] = useState<ToolMode>("select");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -249,7 +251,6 @@ export default function SecurityPlanner() {
   if (typeof window !== "undefined") {
     // Read access for the automated test suite: undo stack position.
     (window as any).__scpHistory = () => ({ index: historyIndexRef.current, length: historyRef.current.length });
-    (window as any).__scpThree = () => threeStateRef.current;
     (window as any).__scpSelect = (id: string | null) => setSelectedId(id);
   }
   const canUndo = historyVersion >= 0 && historyIndexRef.current > 0;
@@ -387,17 +388,10 @@ export default function SecurityPlanner() {
     };
   }, []);
 
-  // Interaction State
-  const [interactionState, setInteractionState] = useState<{
-    type: InteractionType;
-    itemId: string | null;
-    startMouse: { x: number; y: number };
-    startVal: any;
-    variant?: string;
-    snap?: boolean;
-  }>({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
-  const interactionStateRef = useRef(interactionState);
-  useEffect(() => { interactionStateRef.current = interactionState; }, [interactionState]);
+  // True while a drag on the map (move, reshape, aim, brush) is in progress: undo steps and the
+  // camera preview wait until it ends.
+  const [interacting, setInteracting] = useState(false);
+  const interactingRef = useRef(false);
 
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
@@ -473,19 +467,7 @@ export default function SecurityPlanner() {
 
   // Bilinear interpolation between terrain vertices so objects sit smoothly on slopes
   // (exact at grid vertices, so terrain meshes are unaffected).
-  const getGridHeight = (x: number, y: number, map = terrainHeights) => {
-    const grid = gridSize || 20;
-    const fx = x / grid;
-    const fy = y / grid;
-    const ix = Math.floor(fx);
-    const iy = Math.floor(fy);
-    const tx = fx - ix;
-    const ty = fy - iy;
-    const at = (gx: number, gy: number) => map[`${gx * grid},${gy * grid}`] || 0;
-    const top = at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx;
-    const bottom = at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx;
-    return top * (1 - ty) + bottom * ty;
-  };
+  const getGridHeight = (x: number, y: number, map = terrainHeights) => heightAt(map, gridSize, x, y);
 
   // Base elevation for a camera: building-mounted cameras sit on the building, not the ground under them.
   const getCameraBaseHeight = (camera: CameraItem, camPos = getCameraPlanPosition(camera)) => {
@@ -824,8 +806,7 @@ export default function SecurityPlanner() {
     bgSettingsRef.current = nextBg;
     setItems(nextItems);
     setTerrainHeights({});
-    setPanOffset({ x: 0, y: 0 });
-    setZoom(1);
+    requestFit(null);
   };
 
   const openElevationDialog = () => {
@@ -1076,8 +1057,7 @@ export default function SecurityPlanner() {
         canvasSizeRef.current = canvas;
         backgroundImgRef.current = map.url;
         bgSettingsRef.current = nextBg;
-        setPanOffset({ x: 0, y: 0 });
-        setZoom(1);
+        requestFit(null);
         setShowGrid(false);
       }
       setGridSize(nextGrid);
@@ -1180,16 +1160,29 @@ export default function SecurityPlanner() {
           const mid = { x: area.x + area.width / 2, y: area.y + area.height / 2 };
           const nearby = newBuildings.filter(b => Math.hypot(b.x - mid.x, b.y - mid.y) < 150 * unitsPerFoot);
           const near = boundsOfPoints(nearby.flatMap(b => (b.points ?? []).map(p => ({ x: b.x + p.x, y: b.y + p.y }))));
-          if (near) {
-            const f = fitBounds(near, canvasSizeRef.current, { margin: 1.4, minSpan: 220 * unitsPerFoot });
-            if (f.zoom > 1.05) {
-              setZoom(f.zoom);
-              setPanOffset(f.pan);
-            }
-          }
+          if (near) requestFit(near, { margin: 1.4, minSpan: 220 * unitsPerFoot });
           buildingText = newBuildings.length > 0
             ? ` Added ${newBuildings.length} building${newBuildings.length === 1 ? "" : "s"}. Click one in the plan to adjust its height.`
             : " No buildings were added. Draw them over the satellite image with the Building tool.";
+        }
+      }
+
+      // Trees and parked cars found on the photo (replacing ones found by an earlier import).
+      let objectsText = "";
+      if (importTreesCars && imagery === "satellite" && importedImage) {
+        setElevationStatus({ state: "loading", message: "Finding trees and parked cars on the photo…" });
+        const buildingsNow = currentItemsRef.current.filter(i => i.type === "building") as BuildingItem[];
+        const found = await detectSiteObjects(importedImage, { x: 0, y: 0, width: canvas.width, height: canvas.height }, unitsPerFoot, buildingsNow).catch(err => {
+          console.warn("Tree/car detection failed", err);
+          return null;
+        });
+        if (found) {
+          setItems(prev => [...prev.filter(i => !((i.type === "tree" || i.type === "parking") && (i as TreeItem | ParkingItem).importSource === "photo")), ...found.trees, ...found.vehicles]);
+          const parts = [
+            found.trees.length ? `${found.trees.length} tree${found.trees.length === 1 ? "" : "s"}` : "",
+            found.vehicles.length ? `${found.vehicles.length} parked car${found.vehicles.length === 1 ? "" : "s"}` : ""
+          ].filter(Boolean);
+          if (parts.length) objectsText = ` Placed ${parts.join(" and ")} found on the photo; remove any that are wrong.`;
         }
       }
 
@@ -1199,7 +1192,7 @@ export default function SecurityPlanner() {
         : `${Math.round(reliefFt)} ft of elevation change${exaggeration !== 1 ? ` (shown ${exaggeration}× taller)` : ""}.`;
       setElevationStatus({
         state: "done",
-        message: `Site imported. ${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${buildingText}${partialImagery ? " Some map tiles were unavailable." : ""}`
+        message: `Site imported. ${reliefText}${imagerySource ? ` Imagery: ${imagerySource}.` : ""} Elevation: ${result.source}.${buildingText}${objectsText}${partialImagery ? " Some map tiles were unavailable." : ""}`
       });
       window.setTimeout(() => saveHistory(undefined, terrainHeightsRef.current), 400);
     } catch (err) {
@@ -1269,10 +1262,6 @@ export default function SecurityPlanner() {
   const terrainFlattenSampleRef = useRef(terrainFlattenSample);
   const demDataRef = projectRef("demData");
   const demPreviewRef = useRef(demPreview);
-  const prevCanvasSizeRef = useRef(canvasSize);
-  const prevGridSizeRef = useRef(gridSize);
-  const prevBgSettingsRef = useRef(bgSettings);
-  const prevBackgroundImgRef = useRef(backgroundImg);
   useEffect(() => { terrainToolRef.current = terrainTool; }, [terrainTool]);
   useEffect(() => { terrainBrushSizeRef.current = terrainBrushSize; }, [terrainBrushSize]);
   useEffect(() => { terrainBrushStrengthRef.current = terrainBrushStrength; }, [terrainBrushStrength]);
@@ -1280,40 +1269,14 @@ export default function SecurityPlanner() {
   useEffect(() => { terrainFlattenTargetRef.current = terrainFlattenTarget; }, [terrainFlattenTarget]);
   useEffect(() => { terrainFlattenSampleRef.current = terrainFlattenSample; }, [terrainFlattenSample]);
   useEffect(() => { demPreviewRef.current = demPreview; }, [demPreview]);
-  const prevTerrainHeightsRef = useRef(terrainHeights); // Track updates
-  const terrainStrokeRef = useRef<{
-    active: boolean;
-    tool: TerrainTool;
-    direction: 1 | -1;
-    lastTime: number;
-  } | null>(null);
   const terrainHoverRef = useRef<{ pointX: number; pointZ: number } | null>(null);
 
-  const svgRef = useRef<SVGSVGElement>(null);
   const demMiniRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const elementImageInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const bg3dInputRef = useRef<HTMLInputElement>(null);
   const demInputRef = useRef<HTMLInputElement>(null);
-  const threeContainerRef = useRef<HTMLDivElement>(null);
-  const threeStateRef = useRef<{
-    scene: THREE.Scene;
-    camera: THREE.OrthographicCamera;
-    renderer: THREE.WebGLRenderer;
-    group: THREE.Group;
-    target: THREE.Vector3;
-    zoom: number;
-    size: { width: number; height: number };
-    orbit?: { azimuth: number; polar: number; distance: number };
-  } | null>(null);
-
-  // 3D Object cache for differential updates (avoid full scene rebuilds)
-  const threeObjectCacheRef = useRef<Map<string, THREE.Object3D>>(new Map());
-  // Cache for static scene elements (ground, grid, boundary) that don't need rebuilding
-  const threeStaticElementsRef = useRef<THREE.Object3D[]>([]);
-  // Previous items state for diffing
-  const prevItemsRef = useRef<CanvasItem[]>([]);
 
   // Camera preview renderer cache (prevent memory leaks from frequent recreation)
   const cameraPreviewRendererRef = useRef<{
@@ -1331,6 +1294,13 @@ export default function SecurityPlanner() {
   const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
+  // Width of the floating camera view window (remembered per browser).
+  const [previewWidth, setPreviewWidth] = useState(() => {
+    try { return Number(localStorage.getItem("scp.cameraViewWidth")) || 420; } catch { return 420; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("scp.cameraViewWidth", String(previewWidth)); } catch { /* ignore */ }
+  }, [previewWidth]);
   const [reviewVisited, setReviewVisited] = useState(false);
   // Which workflow step's panel is showing (null = follow progress: the first unfinished step).
   const [activeStepChoice, setActiveStepChoice] = useState<WorkflowStepId | null>(null);
@@ -1398,8 +1368,7 @@ export default function SecurityPlanner() {
   useEffect(() => {
     if (isApplyingHistoryRef.current) return;
     if (historyIndexRef.current < 0) return;
-    if (interactionStateRef.current.type) return;
-    if (threeDragStateRef.current.isDragging) return;
+    if (interactingRef.current) return;
     if (itemsHistoryTimerRef.current) {
       window.clearTimeout(itemsHistoryTimerRef.current);
     }
@@ -1411,22 +1380,10 @@ export default function SecurityPlanner() {
         window.clearTimeout(itemsHistoryTimerRef.current);
       }
     };
-  }, [items, interactionState]);
+  }, [items, interacting]);
 
   // Environment background setup
 
-
-  // 3D Model URLs (for higher quality models)
-
-
-  // Camera placement preview state - for visual feedback when placing cameras
-  const [cameraPlacementPreview, setCameraPlacementPreview] = useState<{
-    buildingId: string;
-    edgeIndex: number;
-    edgeT: number;
-    point: { x: number; y: number };
-    rotation: number; // Auto-calculated to face outward
-  } | null>(null);
 
   // Persistence - autosave to IndexedDB (no 5 MB localStorage limit, so satellite maps and report
   // pages survive a reload). Older localStorage saves are migrated on first load.
@@ -1592,27 +1549,8 @@ export default function SecurityPlanner() {
     return minH;
   };
 
-  const getCameraPlanPosition = (camera: CameraItem) => {
-    if (camera.mount?.type === "building" && camera.mount.buildingId) {
-      const building = getBuildingById(camera.mount.buildingId);
-      if (!building) return { x: camera.x, y: camera.y };
-      const worldPoints = getBuildingEdgePointsWorld(building);
-      if (worldPoints.length < 2) return { x: camera.x, y: camera.y };
-      const edgeIndex = clamp(camera.mount.edgeIndex ?? 0, 0, worldPoints.length - 1);
-      const nextIndex = (edgeIndex + 1) % worldPoints.length;
-      const a = worldPoints[edgeIndex];
-      const b = worldPoints[nextIndex];
-      const t = clamp(camera.mount.edgeT ?? 0.5, 0, 1);
-
-      const pos = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-
-      // Sit just outside the wall (along its outward normal) so the camera doesn't clip into it.
-      const normal = getEdgeOutwardNormal(worldPoints, edgeIndex);
-      const offset = 1.0;
-      return { x: pos.x + normal.x * offset, y: pos.y + normal.y * offset };
-    }
-    return { x: camera.x, y: camera.y };
-  };
+  // On its wall (just outside it) when mounted on a building.
+  const getCameraPlanPosition = (camera: CameraItem) => cameraPlanPosition(camera, items);
 
   const snapCameraToNearestBuilding = (camera: CameraItem) => {
     let best: { buildingId: string; edgeIndex: number; edgeT: number; distance: number; point: { x: number; y: number } } | null = null;
@@ -1650,64 +1588,8 @@ export default function SecurityPlanner() {
   };
 
   // Find nearest building edge from a point and calculate outward-facing rotation
-  const findNearestBuildingEdge = (point: { x: number; y: number }, list: CanvasItem[] = items): BuildingEdgeInfo | null => {
-    let best: BuildingEdgeInfo | null = null;
+  const findNearestBuildingEdge = (point: { x: number; y: number }, list: CanvasItem[] = items): BuildingEdgeInfo | null => nearestWall(point, list);
 
-    list.forEach(item => {
-      if (item.type !== "building") return;
-      const building = item as BuildingItem;
-      const worldPoints = getBuildingEdgePointsWorld(building);
-
-      for (let i = 0; i < worldPoints.length; i += 1) {
-        const nextIndex = (i + 1) % worldPoints.length;
-        const a = worldPoints[i];
-        const b = worldPoints[nextIndex];
-        const ab = { x: b.x - a.x, y: b.y - a.y };
-        const ap = { x: point.x - a.x, y: point.y - a.y };
-        const abLenSq = ab.x * ab.x + ab.y * ab.y || 1;
-        let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
-        t = clamp(t, 0, 1);
-        const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
-        const dist = Math.hypot(point.x - proj.x, point.y - proj.y);
-
-        // Face straight out from the wall
-        const normal = getEdgeOutwardNormal(worldPoints, i);
-        const outwardAngle = Math.atan2(normal.y, normal.x) * (180 / Math.PI);
-
-        if (!best || dist < best.distance) {
-          best = {
-            buildingId: building.id,
-            edgeIndex: i,
-            edgeT: t,
-            distance: dist,
-            point: proj,
-            rotation: outwardAngle
-          };
-        }
-      }
-    });
-    return best;
-  };
-
-  const isoScale = 0.9;
-  const isoOrigin = { x: canvasSize.width / 2, y: 120 };
-  const projectPoint = (point: { x: number; y: number }) => ({
-    x: (point.x - point.y) * isoScale + isoOrigin.x,
-    y: (point.x + point.y) * isoScale * 0.5 + isoOrigin.y
-  });
-
-  // --- Actions ---
-
-  const handleAddItem = (e: React.MouseEvent, type: ToolMode) => {
-    if (!svgRef.current) return;
-    if (viewMode === "iso3d") return;
-
-    const pos = getSvgMousePos(e);
-    const x = snapValue(pos.x);
-    const y = snapValue(pos.y);
-
-    placeNewItemAt(type, x, y);
-  };
 
   // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
   // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
@@ -1746,8 +1628,6 @@ export default function SecurityPlanner() {
         };
         cam.height = buildingHeight;
       }
-      // Clear placement preview
-      setCameraPlacementPreview(null);
     }
 
     setItems(prev => [...prev, newItem]);
@@ -1943,12 +1823,7 @@ export default function SecurityPlanner() {
     setMaximizedCamId(null);
     setViewMode("plan");
     setMode("select");
-    setPanOffset({ x: 0, y: 0 });
-    setZoom(1);
-    setIsPanning(false);
-    setPanStart({ x: 0, y: 0, panX: 0, panY: 0 });
-    setIsSpacePressed(false);
-    isSpacePressedRef.current = false;
+    requestFit(null);
     setShowCameraPreview(true);
     setShowExportPanel(false);
     setClipboard(null);
@@ -1970,7 +1845,6 @@ export default function SecurityPlanner() {
     setDemAutoApply(true);
     setDemAlignTool("move");
     setDemTransformDrag(null);
-    setIsBackgroundDragging(false);
     setMapMoveMode(false);
     setTerrainHeights({});
     setSiteLocation(null);
@@ -1978,7 +1852,6 @@ export default function SecurityPlanner() {
     setPlanGeoRef(null);
     setElevationQuery("");
     setElevationStatus({ state: "idle", message: "" });
-    setCameraPlacementPreview(null);
     resetHistory();
     setRightPanelMode("project");
     setIsRightPanelOpen(true);
@@ -2011,7 +1884,11 @@ export default function SecurityPlanner() {
     return data;
   };
 
-  const traceRoofAt = (pos: { x: number; y: number }) => {
+  const traceRoofAt = async (pos: { x: number; y: number }) => {
+    // The photo may still be decoding right after it was added.
+    if (backgroundImg && !bgImageRef.current?.naturalWidth) {
+      bgImageRef.current = await loadImageElement(backgroundImg).catch(() => null);
+    }
     const data = getMapImageData();
     if (!data) {
       showExportNotice("Import your site (satellite map) first, then click a roof.", "info");
@@ -2071,14 +1948,6 @@ export default function SecurityPlanner() {
     exportNoticeTimerRef.current = window.setTimeout(() => setExportNotice(null), action ? 6000 : 3000);
   };
 
-  const getPlanViewBox = () => {
-    const viewX = -panOffset.x / zoom;
-    const viewY = -panOffset.y / zoom;
-    const viewW = canvasSize.width / zoom;
-    const viewH = canvasSize.height / zoom;
-    return { x: viewX, y: viewY, width: viewW, height: viewH };
-  };
-
   const loadImageElement = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -2086,49 +1955,39 @@ export default function SecurityPlanner() {
     img.src = src;
   });
 
+  // The printed plan: a clean top-down drawing of the whole site (see src/lib/planSvg.ts).
   const renderPlanToDataUrl = async (options?: {
     scale?: number;
     includeGrid?: boolean;
     backgroundColor?: string;
   }) => {
-    if (!svgRef.current) {
-      throw new Error("Plan view is not ready.");
-    }
-
-    const { scale = 2, includeGrid = true, backgroundColor = "#f8fafc" } = options || {};
-    const view = getPlanViewBox();
-    const source = svgRef.current.cloneNode(true) as SVGSVGElement;
-    const panLayer = source.querySelector('g[data-pan-zoom="true"]');
-    if (panLayer) {
-      panLayer.setAttribute("transform", "translate(0 0) scale(1)");
-    }
-    if (!includeGrid) {
-      const grid = source.querySelector("#grid-bg");
-      if (grid) grid.remove();
-    }
-
-    source.setAttribute("viewBox", `${view.x} ${view.y} ${view.width} ${view.height}`);
-    source.setAttribute("width", `${canvasSize.width}`);
-    source.setAttribute("height", `${canvasSize.height}`);
-    source.setAttribute("preserveAspectRatio", "xMidYMid meet");
-
-    const svgData = new XMLSerializer().serializeToString(source);
-    const blob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-
+    const { includeGrid = true, backgroundColor = "#f8fafc" } = options || {};
+    // At least ~2000 px across so the report stays sharp for small sites.
+    const scale = Math.max(options?.scale ?? 2, 2000 / Math.max(1, canvasSize.width));
+    const svg = planSvg({
+      items,
+      canvas: canvasSize,
+      background: backgroundImg ? { url: backgroundImg, ...bgSettings } : null,
+      shadeUrl: hasTerrain && elevationOverlay === "shaded" ? elevationShadeUrl : null,
+      contours: hasTerrain && elevationOverlay !== "off" && contourPaths ? { minor: contourPaths.minor, major: contourPaths.major } : null,
+      gridSize,
+      showGrid: includeGrid && showGrid,
+      targetStatus: Object.fromEntries(targetItems.map(t => [t.id, targetStatus(targetResults.get(t.id))])),
+      dori: showDoriZones,
+      showCones: frustumSettings.visible,
+      unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1
+    });
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
     try {
       const img = await loadImageElement(url);
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(canvasSize.width * scale);
       canvas.height = Math.round(canvasSize.height * scale);
       const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        throw new Error("Failed to prepare export canvas.");
-      }
-      ctx.scale(scale, scale);
+      if (!ctx) throw new Error("Failed to prepare export canvas.");
       ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, canvasSize.width, canvasSize.height);
-      ctx.drawImage(img, 0, 0, canvasSize.width, canvasSize.height);
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       return canvas.toDataURL("image/png");
     } finally {
       URL.revokeObjectURL(url);
@@ -2138,11 +1997,6 @@ export default function SecurityPlanner() {
   // --- Save / Load / Export ---
 
   const handleExportPng = async () => {
-    if (!svgRef.current) {
-      showExportNotice("Plan view is not ready yet.", "error");
-      return;
-    }
-
     const { scale, padding, includeGrid, includeLegend, includeTitle } = exportOptions;
     const timestamp = new Date().toLocaleString();
     const width = canvasSize.width;
@@ -2374,7 +2228,7 @@ export default function SecurityPlanner() {
       if (item.type === "building") {
         const bld = item as BuildingItem;
         const baseH = getBuildingBaseHeight(bld);
-        const mesh = createBuildingMesh3d(bld, baseH, viewRoofPhoto);
+        const mesh = createBuildingModel(bld, baseH, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, photo: roofPhoto ? viewRoofPhoto : null, outlines: false });
         scene.add(mesh);
       }
       if (item.type === "tree") {
@@ -2465,15 +2319,13 @@ export default function SecurityPlanner() {
 
   // Add current 3D view to export list
   const add3dToExportList = () => {
-    const state = threeStateRef.current;
-    if (!state) {
-      showExportNotice("3D view is not ready yet.", "error");
+    const view = viewRef.current;
+    if (!view) {
+      showExportNotice("The map view is not ready yet.", "error");
       return;
     }
     try {
-      state.renderer.render(state.scene, state.camera);
-      const dataUrl = state.renderer.domElement.toDataURL('image/png');
-      addToExportList('3d', '3D Overview', dataUrl);
+      addToExportList('3d', view.viewInfo().tiltDeg > 8 ? '3D Overview' : 'Map view', view.capture());
     } catch (e) {
       console.error("3D export failed", e);
       showExportNotice("Failed to capture 3D view.", "error");
@@ -3149,1216 +3001,13 @@ export default function SecurityPlanner() {
     }
   };
 
-
-
-  const disposeGroup = (group: THREE.Object3D) => {
-    disposeObjectDeep(group);
-    group.clear();
-  };
-
-  const getSpriteFontSize = (fontSize: number) => clamp(Math.round(fontSize * 4), 24, 96);
-
-  const getBuildingLabelSignature = (building: BuildingItem) => {
-    const font = getBuildingLabelFont(building);
-    return `${building.label}|${font.fontFamily}|${font.fontSize}|${font.fontWeight}`;
-  };
-
-  const createTextSprite = (text: string, options?: { fontFamily?: string; fontSize?: number; fontWeight?: number; color?: string }) => {
-    if (!text?.trim()) return null;
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-    const fontSize = options?.fontSize ?? 56;
-    const padding = 24;
-    const fontFamily = options?.fontFamily ?? "Space Grotesk";
-    const fontWeight = options?.fontWeight ?? 700;
-    context.font = `${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;
-    const metrics = context.measureText(text);
-    canvas.width = Math.ceil(metrics.width + padding * 2);
-    canvas.height = Math.ceil(fontSize + padding * 1.6);
-    context.font = `${fontWeight} ${fontSize}px ${fontFamily}, sans-serif`;
-    context.fillStyle = options?.color ?? "rgba(15, 23, 42, 0.9)";
-    context.textBaseline = "middle";
-    context.fillText(text, padding, canvas.height / 2);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-    const sprite = new THREE.Sprite(material);
-    // Readable from the overview without dwarfing the scene: text height scales with the site.
-    const worldH = clamp(Math.max(canvasSize.width, canvasSize.height) / 90, 2.5, 16);
-    sprite.scale.set((canvas.width / canvas.height) * worldH, worldH, 1);
-    return sprite;
-  };
-
-  const createBuildingMesh3d = (building: BuildingItem, baseHeight: number, photo?: { texture: THREE.Texture; rect: PhotoRect } | null) => {
-    const points = getBuildingPoints(building);
-    const buildingHeight = building.wallHeight ?? 60;
-    const unitsPerFoot = planGeoRef?.unitsPerFoot ?? 1;
-
-    // Walls: exact height (no bevel), tinted with the building color.
-    const buildingMaterial = new THREE.MeshStandardMaterial({
-      color: building.color,
-      roughness: 0.85,
-      metalness: 0.02
-    });
-    const mesh = new THREE.Mesh(buildWalls(points, buildingHeight), buildingMaterial);
-    mesh.position.set(building.x, baseHeight, building.y);
-    mesh.rotation.y = -THREE.MathUtils.degToRad(building.rotation);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    // Roof: flat, gable or hip, with the aerial photo on top when there is one.
-    const roofKind = !building.roofType || building.roofType === "auto" ? chooseRoof(points, buildingHeight, unitsPerFoot) : building.roofType;
-    const parts = buildRoof(points, roofKind, { pitch: 0.45, eave: 1.5 * unitsPerFoot, maxRise: Math.min(12 * unitsPerFoot, buildingHeight * 0.6) });
-    if (photo) applyPhotoUVs(parts.roof, { x: building.x, y: building.y, rotation: building.rotation }, photo.rect);
-    const roofMaterial = new THREE.MeshStandardMaterial({
-      color: photo ? 0xffffff : adjustColor(building.color, -35),
-      map: photo?.texture ?? null,
-      roughness: 0.9,
-      metalness: 0,
-      side: THREE.DoubleSide
-    });
-    const roof = new THREE.Mesh(parts.roof, roofMaterial);
-    roof.position.set(0, buildingHeight + (roofKind === "flat" ? 0.05 : 0), 0);
-    roof.name = "building-roof";
-    roof.userData.itemId = building.id;
-    roof.userData.isRoof = true;
-    roof.userData.roofKind = roofKind;
-    roof.castShadow = roofKind !== "flat";
-    roof.receiveShadow = true;
-    mesh.add(roof);
-    if (parts.gables) {
-      const gables = new THREE.Mesh(parts.gables, new THREE.MeshStandardMaterial({ color: building.color, roughness: 0.85, side: THREE.DoubleSide }));
-      gables.userData.itemId = building.id;
-      gables.castShadow = true;
-      roof.add(gables);
-    }
-    const roofTop = buildingHeight + parts.rise;
-
-    const font = getBuildingLabelFont(building);
-    const label = createTextSprite(building.label, {
-      fontFamily: font.fontFamily,
-      fontWeight: font.fontWeight,
-      fontSize: getSpriteFontSize(font.fontSize)
-    });
-    if (label) {
-      const labelOffset = building.labelOffset ?? { x: 0, y: 0 };
-      label.name = "building-label";
-      label.userData.itemId = building.id;
-      label.userData.isLabel = true;
-      label.userData.signature = getBuildingLabelSignature(building);
-      label.position.set(labelOffset.x, roofTop + 10 * unitsPerFoot, labelOffset.y);
-      mesh.add(label);
-    }
-
-    return mesh;
-  };
-
-  const disposeSprite = (sprite: THREE.Sprite) => {
-    const material = sprite.material;
-    if (material instanceof THREE.SpriteMaterial) {
-      if (material.map) material.map.dispose();
-      material.dispose();
-    }
-  };
-
-  const refreshBuildingLabelSprite = (mesh: THREE.Object3D, building: BuildingItem) => {
-    const signature = getBuildingLabelSignature(building);
-    const existing = mesh.getObjectByName("building-label") as THREE.Sprite | null;
-    if (existing && existing.userData?.signature === signature) return existing;
-
-    if (existing) {
-      mesh.remove(existing);
-      disposeSprite(existing);
-    }
-
-    const font = getBuildingLabelFont(building);
-    const label = createTextSprite(building.label, {
-      fontFamily: font.fontFamily,
-      fontWeight: font.fontWeight,
-      fontSize: getSpriteFontSize(font.fontSize)
-    });
-    if (!label) return null;
-    label.name = "building-label";
-    label.userData.itemId = building.id;
-    label.userData.isLabel = true;
-    label.userData.signature = signature;
-    mesh.add(label);
-    return label;
-  };
-
-  // Helper for Ray-Segment Intersection (2D)
-  const getRaySegmentIntersection = (rayOrigin: { x: number, y: number }, rayDir: { x: number, y: number }, segA: { x: number, y: number }, segB: { x: number, y: number }) => {
-    const rx = rayOrigin.x; const ry = rayOrigin.y;
-    const dx = rayDir.x; const dy = rayDir.y;
-    const ax = segA.x; const ay = segA.y;
-    const bx = segB.x; const by = segB.y;
-
-    // Ray: r + t*d
-    // Seg: a + u*(b-a)
-    const v1x = rx - ax;
-    const v1y = ry - ay;
-    const v2x = bx - ax;
-    const v2y = by - ay;
-    const v3x = -dy;
-    const v3y = dx;
-
-    const dot = v2x * v3x + v2y * v3y;
-    if (Math.abs(dot) < 0.000001) return null;
-
-    const t1 = (v2x * v1y - v2y * v1x) / dot; // t (Ray dist)
-    const t2 = (v1x * v3x + v1y * v3y) / dot; // u (Seg param)
-
-    if (t1 >= 0 && (t2 >= 0 && t2 <= 1)) return t1;
-    return null;
-  };
-
-  const getVisibilityPolygon = (origin: { x: number, y: number }, range: number, fov: number, rotation: number, obstacles: (BuildingItem | TreeItem)[]) => {
-    const segments = obstacles.flatMap(item => {
-      if (item.type === "building") {
-        const b = item as BuildingItem;
-        const pts = getBuildingEdgePointsWorld(b);
-        if (pts.length < 2) return [];
-        return pts.map((p, i) => [p, pts[(i + 1) % pts.length]]);
-      } else if (item.type === "tree") {
-        const t = item as TreeItem;
-        // Approximate circle with Octagon
-        const pts: { x: number, y: number }[] = [];
-        const sides = 8;
-        for (let i = 0; i < sides; i++) {
-          const angle = (i / sides) * Math.PI * 2;
-          pts.push({
-            x: t.x + t.radius * Math.cos(angle),
-            y: t.y + t.radius * Math.sin(angle)
-          });
-        }
-        return pts.map((p, i) => [p, pts[(i + 1) % pts.length]]);
-      }
-      return [];
-    }).filter(([a, b]) => {
-      // Only walls within the camera's range can block it (huge saving with many imported buildings).
-      const abx = b.x - a.x;
-      const aby = b.y - a.y;
-      const len2 = abx * abx + aby * aby || 1;
-      const t = Math.max(0, Math.min(1, ((origin.x - a.x) * abx + (origin.y - a.y) * aby) / len2));
-      return Math.hypot(a.x + abx * t - origin.x, a.y + aby * t - origin.y) <= range;
-    });
-
-    const rayCount = 128;
-    const startAngle = (rotation - fov / 2) * (Math.PI / 180);
-    const totalRad = fov * (Math.PI / 180);
-    const step = totalRad / (rayCount > 1 ? rayCount - 1 : 1);
-
-    const pathPoints: { x: number, y: number }[] = [];
-
-    for (let i = 0; i < rayCount; i++) {
-      const theta = startAngle + i * step;
-      const dir = { x: Math.cos(theta), y: Math.sin(theta) };
-      let dist = range;
-
-      for (const seg of segments) {
-        const t = getRaySegmentIntersection(origin, dir, seg[0], seg[1]);
-        if (t !== null && t < dist) dist = t;
-      }
-      pathPoints.push({ x: dist * dir.x, y: dist * dir.y });
-    }
-    return pathPoints;
-  };
-
-  const refreshCarObject = (item: ParkingItem, obj: THREE.Object3D | undefined, state: { group: THREE.Group }) => {
-    const signature = getCarSignature(item);
-    if (obj && obj.userData?.signature === signature) return obj;
-    const parent = obj?.parent ?? state.group;
-    const car = create3dCar(item);
-    car.userData.itemId = item.id;
-    car.userData.signature = signature;
-    parent.add(car);
-    if (obj) {
-      parent.remove(obj);
-      if (obj instanceof THREE.Group) {
-        disposeGroup(obj);
-      } else {
-        obj.traverse(child => {
-          const mesh = child as THREE.Mesh;
-          if (mesh.geometry) mesh.geometry.dispose();
-          if (mesh.material) {
-            if (Array.isArray(mesh.material)) {
-              mesh.material.forEach(material => material.dispose());
-            } else {
-              mesh.material.dispose();
-            }
-          }
-        });
-      }
-    }
-    threeObjectCacheRef.current.set(item.id, car);
-    return car;
-  };
-
-  const refreshTreeObject = (item: TreeItem, obj: THREE.Object3D | undefined, state: { group: THREE.Group }) => {
-    const signature = getTreeSignature(item);
-    if (obj && obj.userData?.signature === signature) return obj;
-    const parent = obj?.parent ?? state.group;
-    const tree = create3dTree(item);
-    tree.userData.itemId = item.id;
-    tree.userData.signature = signature;
-    tree.renderOrder = 1;
-    parent.add(tree);
-    if (obj) {
-      parent.remove(obj);
-      if (obj instanceof THREE.Group) {
-        disposeGroup(obj);
-      } else {
-        obj.traverse(child => {
-          const mesh = child as THREE.Mesh;
-          if (mesh.geometry) mesh.geometry.dispose();
-          if (mesh.material) {
-            if (Array.isArray(mesh.material)) {
-              mesh.material.forEach(material => material.dispose());
-            } else {
-              mesh.material.dispose();
-            }
-          }
-        });
-      }
-    }
-    threeObjectCacheRef.current.set(item.id, tree);
-    return tree;
-  };
-
-  const ensureNamedGroup = (parent: THREE.Object3D, name: string) => {
-    let group = parent.getObjectByName(name) as THREE.Group | null;
-    if (!group) {
-      group = new THREE.Group();
-      group.name = name;
-      parent.add(group);
-    }
-    return group;
-  };
-
-  const updateCameraFrustum = (
-    cameraGroup: THREE.Group,
-    cameraItem: CameraItem,
-    cameraPos: { x: number; y: number },
-    absHeight: number,
-    pitchRad: number,
-    rotAngle: number,
-    hFov: number,
-    range: number,
-    state: { group: THREE.Group }
-  ) => {
-    const shouldShow = frustumSettings.visible && ((frustumSettings.showAll !== false) || cameraItem.id === selectedId);
-    const staleLocalFrustum = cameraGroup.getObjectByName("camera-frustum") as THREE.Group | null;
-    if (staleLocalFrustum) {
-      disposeGroup(staleLocalFrustum);
-      staleLocalFrustum.parent?.remove(staleLocalFrustum);
-    }
-    const frustumGroup = ensureNamedGroup(state.group, `camera-frustum-${cameraItem.id}`);
-    const staleFloor = state.group.getObjectByName(`camera-floor-${cameraItem.id}`) as THREE.Group | null;
-    if (staleFloor) {
-      disposeGroup(staleFloor);
-      staleFloor.parent?.remove(staleFloor);
-    }
-
-    frustumGroup.visible = shouldShow;
-
-    if (frustumGroup.visible) {
-      disposeGroup(frustumGroup);
-      const lensOffset = (cameraGroup.userData?.lensOffset as number | undefined) ?? 0;
-      const yaw = THREE.MathUtils.degToRad(cameraItem.rotation);
-      const forward = new THREE.Vector3(
-        Math.cos(yaw) * Math.cos(pitchRad),
-        Math.sin(pitchRad),
-        Math.sin(yaw) * Math.cos(pitchRad)
-      ).normalize();
-      const up = new THREE.Vector3(0, 1, 0);
-      const right = new THREE.Vector3().crossVectors(forward, up).normalize();
-      const correctedUp = new THREE.Vector3().crossVectors(right, forward).normalize();
-
-      const basis = new THREE.Matrix4().makeBasis(forward, correctedUp, right);
-      frustumGroup.quaternion.setFromRotationMatrix(basis);
-
-      frustumGroup.position.set(
-        cameraPos.x + forward.x * lensOffset,
-        absHeight + forward.y * lensOffset,
-        cameraPos.y + forward.z * lensOffset
-      );
-
-      const aspect = cameraItem.aspect ?? 16 / 9;
-      const displayRange = Math.max(1, range);
-      const vFovRad = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(hFov) / 2) / aspect);
-      const farHeight = 2 * Math.tan(vFovRad / 2) * displayRange;
-      const farWidth = farHeight * aspect;
-
-      const vertices = [
-        0, 0, 0,
-        displayRange, farHeight / 2, -farWidth / 2,
-        displayRange, -farHeight / 2, -farWidth / 2,
-        0, 0, 0,
-        displayRange, -farHeight / 2, -farWidth / 2,
-        displayRange, -farHeight / 2, farWidth / 2,
-        0, 0, 0,
-        displayRange, -farHeight / 2, farWidth / 2,
-        displayRange, farHeight / 2, farWidth / 2,
-        0, 0, 0,
-        displayRange, farHeight / 2, farWidth / 2,
-        displayRange, farHeight / 2, -farWidth / 2,
-        displayRange, -farHeight / 2, farWidth / 2,
-        displayRange, -farHeight / 2, -farWidth / 2,
-        displayRange, farHeight / 2, -farWidth / 2,
-        displayRange, farHeight / 2, farWidth / 2,
-        displayRange, -farHeight / 2, farWidth / 2,
-        displayRange, farHeight / 2, -farWidth / 2
-      ];
-
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-      geometry.computeVertexNormals();
-
-      const frustumMaterial = new THREE.MeshBasicMaterial({
-        color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
-        transparent: true,
-        opacity: frustumSettings.opacity,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
-
-      const frustumMesh = new THREE.Mesh(geometry, frustumMaterial);
-      frustumGroup.add(frustumMesh);
-
-      const edgeVertices = [
-        0, 0, 0, displayRange, farHeight / 2, -farWidth / 2,
-        0, 0, 0, displayRange, -farHeight / 2, -farWidth / 2,
-        0, 0, 0, displayRange, -farHeight / 2, farWidth / 2,
-        0, 0, 0, displayRange, farHeight / 2, farWidth / 2,
-        displayRange, farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, farWidth / 2,
-        displayRange, farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, farWidth / 2,
-        displayRange, -farHeight / 2, farWidth / 2, displayRange, -farHeight / 2, -farWidth / 2,
-        displayRange, -farHeight / 2, -farWidth / 2, displayRange, farHeight / 2, -farWidth / 2
-      ];
-      const edgeGeometry = new THREE.BufferGeometry();
-      edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(edgeVertices, 3));
-      const edges = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({
-        color: frustumSettings.useCameraColor ? cameraItem.color : frustumSettings.color,
-        transparent: true,
-        opacity: frustumSettings.edgeOpacity
-      }));
-      frustumGroup.add(edges);
-    } else {
-      disposeGroup(frustumGroup);
-    }
-
-    // Ground footprint: what the camera covers on the (terrain-following) ground, colored by DORI zone.
-    if (shouldShow) {
-      const obstacles = itemsRef.current.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
-      const poly = getVisibilityPolygon(cameraPos, range, hFov, cameraItem.rotation, obstacles);
-      const zones = getDoriDistances(cameraItem);
-      const mountH = cameraItem.mount?.height ?? cameraItem.height ?? DEFAULT_CAMERA_HEIGHT_FT;
-      const vf = cameraItem.vFov ?? vFovFromH(hFov, getCameraAspectValue(cameraItem));
-      const coverage = getGroundCoverage(mountH, THREE.MathUtils.radToDeg(pitchRad), vf);
-      const start = Number.isFinite(coverage.near) ? Math.min(coverage.near, range) : range;
-      const end = Math.min(range, Number.isFinite(coverage.far) ? coverage.far : range);
-      if (poly.length > 1 && end > start) {
-        const stops = new Set<number>([start, end]);
-        zones.forEach(z => { if (z.distance > start && z.distance < end) stops.add(z.distance); });
-        const step = Math.max(2, (end - start) / 14);
-        for (let d = start + step; d < end; d += step) stops.add(d);
-        const radii = Array.from(stops).sort((a, b) => a - b);
-        const bandColor = (d: number) => {
-          if (!showDoriZones) return new THREE.Color(cameraItem.color);
-          const zone = zones.find(z => d <= z.distance);
-          return new THREE.Color(zone ? zone.color : cameraItem.color);
-        };
-        const positions: number[] = [];
-        const colors: number[] = [];
-        const vertex = (dir: { x: number; y: number }, len: number, r: number) => {
-          const t = Math.min(r, len);
-          const wx = cameraPos.x + dir.x * t;
-          const wz = cameraPos.y + dir.y * t;
-          positions.push(wx, getGridHeight(wx, wz) + 0.3, wz);
-        };
-        const rays = poly.map(p => {
-          const len = Math.hypot(p.x, p.y);
-          return { dir: { x: p.x / (len || 1), y: p.y / (len || 1) }, len };
-        });
-        for (let i = 0; i < rays.length - 1; i++) {
-          const a = rays[i];
-          const b = rays[i + 1];
-          for (let j = 0; j < radii.length - 1; j++) {
-            const r0 = radii[j];
-            const r1 = radii[j + 1];
-            if (r0 >= a.len && r0 >= b.len) break;
-            const c = bandColor((r0 + r1) / 2);
-            vertex(a.dir, a.len, r0); vertex(b.dir, b.len, r0); vertex(a.dir, a.len, r1);
-            vertex(b.dir, b.len, r0); vertex(b.dir, b.len, r1); vertex(a.dir, a.len, r1);
-            for (let k = 0; k < 6; k++) colors.push(c.r, c.g, c.b);
-          }
-        }
-        if (positions.length) {
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-          geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-          const floor = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-            vertexColors: true,
-            transparent: true,
-            opacity: 0.32,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-            polygonOffset: true,
-            polygonOffsetFactor: -4,
-            polygonOffsetUnits: -8
-          }));
-          floor.name = `camera-floor-${cameraItem.id}`;
-          floor.renderOrder = 2;
-          floor.raycast = () => {};
-          state.group.add(floor);
-        }
-      }
-    }
-  };
-
-  // Fast position-only update for 3D objects (used during dragging)
-  const updateThreeScenePositions = () => {
-    const state = threeStateRef.current;
-    if (!state) return;
-
-    const cache = threeObjectCacheRef.current;
-    let needsRender = false;
-
-    items.forEach(item => {
-      const obj = cache.get(item.id);
-      if (!obj && item.type !== "parking") return;
-
-      // Get terrain height for the item
-      const h = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
-
-      if (item.type === "parking") {
-        const carObj = refreshCarObject(item as ParkingItem, obj, state);
-        carObj.position.set(item.x, h, item.y);
-        carObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-        needsRender = true;
-      } else if (item.type === "tree") {
-        const treeObj = refreshTreeObject(item as TreeItem, obj, state);
-        treeObj.position.set(item.x, h, item.y);
-        treeObj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-        needsRender = true;
-      } else if (item.type === "building") {
-        if (!obj) return;
-        const building = item as BuildingItem;
-        const baseH = getBuildingBaseHeight(building);
-        obj.position.set(building.x, baseH, building.y);
-        obj.rotation.y = -THREE.MathUtils.degToRad(item.rotation);
-        const label = refreshBuildingLabelSprite(obj, building);
-        if (label) {
-          const offset = building.labelOffset ?? { x: 0, y: 0 };
-          const buildingHeight = building.wallHeight ?? 60;
-          label.position.set(offset.x, buildingHeight + 15, offset.y);
-        }
-        needsRender = true;
-      } else if (item.type === "camera") {
-        const cam = item as CameraItem;
-        const camPos = getCameraPlanPosition(cam);
-        const camH = getCameraBaseHeight(cam, camPos); // Base height at camera pivot (building base if mounted)
-        const camMountHeight = cam.mount?.height ?? cam.height ?? 10;
-
-        if (!obj) return;
-        obj.position.set(camPos.x, camH + camMountHeight, camPos.y);
-        obj.rotation.order = 'YZX';
-        obj.rotation.y = -THREE.MathUtils.degToRad(cam.rotation);
-        obj.rotation.x = 0;
-        obj.rotation.z = THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH);
-        updateCameraFrustum(
-          obj as THREE.Group,
-          cam,
-          camPos,
-          camH + camMountHeight,
-          THREE.MathUtils.degToRad(cam.pitch ?? DEFAULT_CAMERA_PITCH),
-          -THREE.MathUtils.degToRad(cam.rotation),
-          cam.hFov ?? cam.fov,
-          cam.range,
-          state
-        );
-        needsRender = true;
-      } else if (item.type === "image" && obj) {
-        const img = item as ImageItem;
-        obj.position.set(img.x, h + 0.25, img.y);
-        obj.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
-        needsRender = true;
-      } else if (item.type === "label" && obj) {
-        obj.position.set(item.x, h + 8, item.y);
-        needsRender = true;
-      }
-    });
-
-    if (needsRender) {
-      state.renderer.render(state.scene, state.camera);
-    }
-  };
-
-  const bgSettingsEqual = (a: typeof bgSettings, b: typeof bgSettings) =>
-    a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.opacity === b.opacity;
-
-  // Tints terrain vertices by elevation so hills/slopes are readable even without a base map.
-  const applyTerrainVertexColors = (geometry: THREE.BufferGeometry) => {
-    const posAttr = geometry.attributes.position as THREE.BufferAttribute;
-    let colorAttr = geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
-    if (!colorAttr || colorAttr.count !== posAttr.count) {
-      colorAttr = new THREE.BufferAttribute(new Float32Array(posAttr.count * 3), 3);
-      geometry.setAttribute("color", colorAttr);
-    }
-    const flat = new THREE.Color(0x18181b);
-    const color = new THREE.Color();
-    const range = terrainStats.relief;
-    for (let i = 0; i < posAttr.count; i++) {
-      if (range <= 0.01) {
-        color.copy(flat);
-      } else {
-        const [r, g, b] = elevationColor((posAttr.getZ(i) - terrainStats.min) / range);
-        color.setRGB((r / 255) * 0.8, (g / 255) * 0.8, (b / 255) * 0.8, THREE.SRGBColorSpace);
-      }
-      colorAttr.setXYZ(i, color.r, color.g, color.b);
-    }
-    colorAttr.needsUpdate = true;
-  };
-
-  // Contour lines draped on the 3D terrain (index contour every 5th line is brighter).
-  const updateTerrainContours3d = (group: THREE.Group) => {
-    const existing = group.getObjectByName("terrain-contours");
-    if (existing) {
-      disposeGroup(existing as THREE.Group);
-      existing.parent?.remove(existing);
-    }
-    if (elevationOverlay === "off" || contourSegments.length === 0) return;
-    const contours = new THREE.Group();
-    contours.name = "terrain-contours";
-    const minor: number[] = [];
-    const major: number[] = [];
-    const lift = 0.25;
-    contourSegments.forEach(seg => {
-      const isMajor = Math.abs(Math.round(seg.level / contourInterval) % 5) === 0;
-      (isMajor ? major : minor).push(seg.x1, seg.level + lift, seg.y1, seg.x2, seg.level + lift, seg.y2);
-    });
-    const addLines = (verts: number[], opacity: number) => {
-      if (verts.length === 0) return;
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-      const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-        color: 0xfff7e6,
-        transparent: true,
-        opacity,
-        depthWrite: false
-      }));
-      lines.renderOrder = 0;
-      lines.raycast = () => {};
-      contours.add(lines);
-    };
-    addLines(minor, 0.35);
-    addLines(major, 0.8);
-    group.add(contours);
-  };
-
-  // Solid "cut-away" sides around the terrain so the site reads as a block of ground instead of a floating sheet.
-  const updateTerrainSkirt = (group: THREE.Group) => {
-    const existing = group.getObjectByName("terrain-skirt");
-    if (existing) {
-      disposeGroup(existing as THREE.Group);
-      existing.parent?.remove(existing);
-    }
-    const flatBoundary = group.getObjectByName("canvas-boundary");
-    if (flatBoundary) flatBoundary.visible = !hasTerrain;
-    if (!hasTerrain) return;
-    const grid = gridSize || 20;
-    const base = Math.min(0, terrainStats.min) - Math.max(2, terrainStats.relief * 0.08);
-    const edgePoints = (from: { x: number; z: number }, to: { x: number; z: number }) => {
-      const length = Math.hypot(to.x - from.x, to.z - from.z);
-      const steps = Math.max(1, Math.round(length / grid));
-      return Array.from({ length: steps + 1 }, (_, i) => ({
-        x: from.x + ((to.x - from.x) * i) / steps,
-        z: from.z + ((to.z - from.z) * i) / steps
-      }));
-    };
-    const w = canvasSize.width;
-    const d = canvasSize.height;
-    const corners = [{ x: 0, z: 0 }, { x: w, z: 0 }, { x: w, z: d }, { x: 0, z: d }];
-    const positions: number[] = [];
-    const outline: number[] = [];
-    corners.forEach((corner, ci) => {
-      const pts = edgePoints(corner, corners[(ci + 1) % 4]);
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = pts[i];
-        const b = pts[i + 1];
-        const ha = getGridHeight(a.x, a.z);
-        const hb = getGridHeight(b.x, b.z);
-        positions.push(a.x, ha, a.z, a.x, base, a.z, b.x, hb, b.z);
-        positions.push(b.x, hb, b.z, a.x, base, a.z, b.x, base, b.z);
-        outline.push(a.x, ha + 0.1, a.z, b.x, hb + 0.1, b.z);
-      }
-    });
-    const skirt = new THREE.Group();
-    skirt.name = "terrain-skirt";
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geo.computeVertexNormals();
-    const walls = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x4a3a2a, roughness: 1, metalness: 0, side: THREE.DoubleSide }));
-    walls.raycast = () => {};
-    skirt.add(walls);
-    const outlineGeo = new THREE.BufferGeometry();
-    outlineGeo.setAttribute("position", new THREE.Float32BufferAttribute(outline, 3));
-    const edge = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0x94a3b8 }));
-    edge.raycast = () => {};
-    skirt.add(edge);
-    group.add(skirt);
-  };
-
-  const updateTerrainMesh = () => {
-    const state = threeStateRef.current;
-    if (!state) return false;
-
-    const { group } = state;
-    const terrainMesh = group.getObjectByName("terrain-mesh") as THREE.Mesh | null;
-    if (!terrainMesh || !(terrainMesh.geometry instanceof THREE.PlaneGeometry)) return false;
-
-    const segW = Math.round(canvasSize.width / gridSize);
-    const segH = Math.round(canvasSize.height / gridSize);
-    const terrainGeo = terrainMesh.geometry as THREE.PlaneGeometry;
-    const tParams = terrainGeo.parameters as any;
-    if (
-      tParams.width !== canvasSize.width ||
-      tParams.height !== canvasSize.height ||
-      tParams.widthSegments !== segW ||
-      tParams.heightSegments !== segH
-    ) {
-      return false;
-    }
-
-    const posAttr = terrainGeo.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i);
-      const vy = posAttr.getY(i);
-      const worldX = (canvasSize.width / 2) + vx;
-      const worldZ = (canvasSize.height / 2) - vy;
-      const h = getGridHeight(worldX, worldZ);
-      posAttr.setZ(i, h);
-    }
-    posAttr.needsUpdate = true;
-    terrainGeo.computeVertexNormals();
-    applyTerrainVertexColors(terrainGeo);
-    updateTerrainContours3d(group);
-    updateTerrainSkirt(group);
-
-    const mapPlane = group.getObjectByName("terrain-map-plane") as THREE.Mesh | null;
-    if (mapPlane && mapPlane.geometry instanceof THREE.PlaneGeometry) {
-      if (mapPlane.material && !Array.isArray(mapPlane.material)) {
-        mapPlane.material.depthWrite = false;
-      }
-      mapPlane.renderOrder = -1;
-      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
-      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
-      const mapGeo = mapPlane.geometry as THREE.PlaneGeometry;
-      const mParams = mapGeo.parameters as any;
-      if (
-        mParams.width !== bgSettings.width ||
-        mParams.height !== bgSettings.height ||
-        mParams.widthSegments !== mapSegW ||
-        mParams.heightSegments !== mapSegH
-      ) {
-        return false;
-      }
-
-      const mapPosAttr = mapGeo.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < mapPosAttr.count; i++) {
-        const localX = mapPosAttr.getX(i);
-        const localY = mapPosAttr.getY(i);
-        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
-        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
-        const h = getGridHeight(worldX, worldZ);
-        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET);
-      }
-      mapPosAttr.needsUpdate = true;
-      mapGeo.computeVertexNormals();
-    }
-
-    return true;
-  };
-
-  const syncSceneRefs = () => {
-    prevItemsRef.current = [...items];
-    prevTerrainHeightsRef.current = terrainHeights;
-    prevCanvasSizeRef.current = canvasSize;
-    prevGridSizeRef.current = gridSize;
-    prevBgSettingsRef.current = bgSettings;
-    prevBackgroundImgRef.current = backgroundImg;
-  };
-
-  // Check if items have structural changes requiring full rebuild
-  const needsFullRebuild = (prev: CanvasItem[], next: CanvasItem[]): boolean => {
-    if (prev.length !== next.length) return true;
-
-    const prevIds = new Set(prev.map(i => i.id));
-    const nextIds = new Set(next.map(i => i.id));
-
-    // Check for added/removed items
-    for (const id of nextIds) {
-      if (!prevIds.has(id)) return true;
-    }
-    for (const id of prevIds) {
-      if (!nextIds.has(id)) return true;
-    }
-
-    // Check for type changes or significant property changes that require geometry rebuild
-    for (const nextItem of next) {
-      const prevItem = prev.find(p => p.id === nextItem.id);
-      if (!prevItem) return true;
-      if (prevItem.type !== nextItem.type) return true;
-
-      // For buildings, check if points/size changed (requires geometry rebuild)
-      if (nextItem.type === "building") {
-        const prevB = prevItem as BuildingItem;
-        const nextB = nextItem as BuildingItem;
-        if (prevB.width !== nextB.width || prevB.height !== nextB.height || prevB.wallHeight !== nextB.wallHeight) return true;
-        if (JSON.stringify(prevB.points) !== JSON.stringify(nextB.points)) return true;
-        if (prevB.color !== nextB.color) return true;
-        if (prevB.roofType !== nextB.roofType) return true;
-      }
-
-      if (nextItem.type === "label") {
-        const a = prevItem as LabelItem;
-        const b = nextItem as LabelItem;
-        if (a.text !== b.text || a.fontSize !== b.fontSize || a.color !== b.color) return true;
-      }
-      if (nextItem.type === "image") {
-        const a = prevItem as ImageItem;
-        const b = nextItem as ImageItem;
-        if (a.src !== b.src || a.width !== b.width || a.height !== b.height) return true;
-      }
-
-      // For trees, geometry updates are handled via cache refresh (no full rebuild)
-      if (nextItem.type === "tree") {
-        // no-op
-      }
-
-      // For parking/cars, geometry updates are handled via cache refresh (no full rebuild)
-      if (nextItem.type === "parking") {
-        // no-op
-      }
-
-      // For cameras, check if range/fov changed (frustum geometry)
-      if (nextItem.type === "camera") {
-        const prevC = prevItem as CameraItem;
-        const nextC = nextItem as CameraItem;
-        if (prevC.range !== nextC.range || prevC.fov !== nextC.fov || prevC.hFov !== nextC.hFov) return true;
-        if (prevC.label !== nextC.label) return true; // label sprite
-        if (prevC.color !== nextC.color) return true;
-      }
-    }
-
-    return false;
-  };
-
-  const rebuildThreeScene = () => {
-    const state = threeStateRef.current;
-    if (!state) return;
-
-    const { group, scene, renderer } = state;
-
-    // Check if we can do a fast update without full rebuild
-    const prevItems = prevItemsRef.current;
-    const terrainChanged = prevTerrainHeightsRef.current !== terrainHeights;
-    const canvasChanged = prevCanvasSizeRef.current.width !== canvasSize.width || prevCanvasSizeRef.current.height !== canvasSize.height;
-    const gridChanged = prevGridSizeRef.current !== gridSize;
-    const bgSettingsChanged = !bgSettingsEqual(prevBgSettingsRef.current, bgSettings);
-    const bgImgChanged = prevBackgroundImgRef.current !== backgroundImg;
-    const fullRebuildNeeded =
-      prevItems.length === 0 ||
-      needsFullRebuild(prevItems, items) ||
-      canvasChanged ||
-      gridChanged ||
-      bgSettingsChanged ||
-      bgImgChanged;
-
-    if (!fullRebuildNeeded) {
-      if (terrainChanged) {
-        const updated = updateTerrainMesh();
-        updateThreeScenePositions();
-        if (updated) {
-          renderer.render(scene, state.camera);
-          syncSceneRefs();
-          return;
-        }
-      } else {
-        updateTerrainContours3d(group);
-        updateThreeScenePositions();
-        renderer.render(scene, state.camera);
-        syncSceneRefs();
-        return;
-      }
-    }
-
-    // Full rebuild needed - clear cache and group
-    threeObjectCacheRef.current.clear();
-    disposeGroup(group);
-
-    // Terrain Mesh (Dynamic Grid Height)
-    // Removed static groundPlane and canvasPlane
-    const segW = Math.round(canvasSize.width / gridSize);
-    const segH = Math.round(canvasSize.height / gridSize);
-    const terrainGeometry = new THREE.PlaneGeometry(canvasSize.width, canvasSize.height, segW, segH);
-
-    // Apply Heights
-    const posAttr = terrainGeometry.attributes.position;
-    for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i);
-      const vy = posAttr.getY(i); // Plane Y corresponds to World Z (after rotation)
-
-      // Transform to World Coordinates to lookup height
-      // Plane Center (0,0) -> World Center (W/2, H/2)
-      // vy goes +H/2 (Top) to -H/2 (Bottom)
-      // World Z goes 0 (Top) to H (Bottom)
-      const worldX = (canvasSize.width / 2) + vx;
-      const worldZ = (canvasSize.height / 2) - vy;
-
-      const h = getGridHeight(worldX, worldZ);
-      posAttr.setZ(i, h);
-    }
-    terrainGeometry.computeVertexNormals();
-    applyTerrainVertexColors(terrainGeometry);
-
-    const terrainMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      vertexColors: true,
-      roughness: 0.95,
-      metalness: 0.0
-    });
-
-    const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
-    terrainMesh.rotation.x = -Math.PI / 2;
-    terrainMesh.position.set(canvasSize.width / 2, 0, canvasSize.height / 2);
-    terrainMesh.receiveShadow = true;
-    terrainMesh.name = "terrain-mesh";
-    group.add(terrainMesh);
-    updateTerrainContours3d(group);
-    updateTerrainSkirt(group);
-
-    // Canvas boundary outline
-    const boundaryGeometry = new THREE.BufferGeometry();
-    const boundaryVertices = new Float32Array([
-      0, 0.1, 0,
-      canvasSize.width, 0.1, 0,
-      canvasSize.width, 0.1, canvasSize.height,
-      0, 0.1, canvasSize.height,
-      0, 0.1, 0
-    ]);
-    boundaryGeometry.setAttribute('position', new THREE.BufferAttribute(boundaryVertices, 3));
-    const boundaryLine = new THREE.Line(
-      boundaryGeometry,
-      new THREE.LineBasicMaterial({ color: 0x94a3b8, linewidth: 2 })
-    );
-    boundaryLine.name = "canvas-boundary";
-    boundaryLine.visible = !hasTerrain;
-    group.add(boundaryLine);
-
-    // Background image
-    let roofPhoto: { texture: THREE.Texture; rect: PhotoRect } | null = null;
-    if (backgroundImg) {
-      const mapPlaneMaterial = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: bgSettings.opacity,
-        depthWrite: false,
-        // Avoids z-fighting with the terrain on steep or distant slopes
-        polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -4
-      });
-      // One texture for the ground and every roof (roofs sample the photo straight below them).
-      const texture = new THREE.TextureLoader().load(backgroundImg, () => renderer.render(scene, state.camera));
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-      // Mipmaps + anisotropic filtering keep the satellite image sharp at grazing 3D angles.
-      texture.generateMipmaps = true;
-      texture.minFilter = THREE.LinearMipmapLinearFilter;
-      texture.magFilter = THREE.LinearFilter;
-      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-      mapPlaneMaterial.map = texture;
-      roofPhoto = { texture, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height } };
-
-      // Create subdivided geometry to deform with terrain
-      const mapSegW = Math.max(Math.round(bgSettings.width / gridSize), 1);
-      const mapSegH = Math.max(Math.round(bgSettings.height / gridSize), 1);
-      const mapGeometry = new THREE.PlaneGeometry(bgSettings.width, bgSettings.height, mapSegW, mapSegH);
-
-      // Apply terrain heights to map geometry
-      const mapPosAttr = mapGeometry.attributes.position;
-      for (let i = 0; i < mapPosAttr.count; i++) {
-        const localX = mapPosAttr.getX(i);
-        const localY = mapPosAttr.getY(i); // This becomes Z after rotation
-
-        // Transform local geometry coords to world coords
-        // Local plane center (0,0) -> World position at bgSettings center
-        const worldX = (bgSettings.x + bgSettings.width / 2) + localX;
-        const worldZ = (bgSettings.y + bgSettings.height / 2) - localY;
-
-        const h = getGridHeight(worldX, worldZ);
-        mapPosAttr.setZ(i, h + MAP_OVERLAY_OFFSET); // Slight offset above terrain to prevent z-fighting
-      }
-      mapGeometry.computeVertexNormals();
-
-    const mapPlane = new THREE.Mesh(mapGeometry, mapPlaneMaterial);
-    mapPlane.renderOrder = -1;
-    mapPlane.rotation.x = -Math.PI / 2;
-    mapPlane.position.set(
-      bgSettings.x + bgSettings.width / 2,
-      0,
-      bgSettings.y + bgSettings.height / 2
-    );
-    mapPlane.receiveShadow = true;
-    mapPlane.name = "terrain-map-plane";
-    group.add(mapPlane);
-  }
-
-    // Process all items
-    items.forEach(item => {
-      const terrainH = getGridHeight(item.x, item.y) + OBJECT_ELEVATION_OFFSET;
-
-      // Buildings with improved materials
-      if (item.type === "building") {
-        const building = item as BuildingItem;
-        const baseH = getBuildingBaseHeight(building);
-        const mesh = createBuildingMesh3d(building, baseH, roofPhoto);
-        mesh.userData.itemId = building.id;
-        mesh.renderOrder = 1;
-        threeObjectCacheRef.current.set(building.id, mesh); // Cache for position updates
-        group.add(mesh);
-      }
-
-      // Cars (Parking Items treated as cars)
-      if (item.type === "parking") {
-        const carItem = item as ParkingItem;
-        const car = create3dCar(carItem);
-        car.userData.itemId = item.id;
-        car.userData.signature = getCarSignature(carItem);
-        car.renderOrder = 1;
-        threeObjectCacheRef.current.set(item.id, car); // Cache for position updates
-        group.add(car);
-      }
-
-      // Trees
-      if (item.type === "tree") {
-        const tree = create3dTree(item as TreeItem);
-        tree.userData.itemId = item.id;
-        tree.userData.signature = getTreeSignature(item as TreeItem);
-        tree.renderOrder = 1;
-        threeObjectCacheRef.current.set(item.id, tree); // Cache for position updates
-        group.add(tree);
-      }
-
-      // Camera with proper 3D frustum
-      if (item.type === "camera") {
-        const cameraItem = item as CameraItem;
-        const cameraPos = getCameraPlanPosition(cameraItem);
-
-        // Recalculate height at specific camera pivot
-        const camTerrainH = getCameraBaseHeight(cameraItem, cameraPos);
-        const cameraMountHeight = cameraItem.mount?.height ?? cameraItem.height ?? 10;
-        const absHeight = camTerrainH + cameraMountHeight;
-        const cameraHeight = cameraMountHeight;
-        const pitch = cameraItem.pitch ?? DEFAULT_CAMERA_PITCH;
-        const hFov = cameraItem.hFov ?? cameraItem.fov;
-        const vFov = cameraItem.vFov ?? vFovFromH(hFov, cameraItem.aspect ?? 16 / 9);
-        const range = cameraItem.range;
-
-        // Convert 2D rotation to 3D Y-axis rotation
-        // Must be consistent with building rotation which uses: -THREE.MathUtils.degToRad(building.rotation)
-        // In 2D SVG: 0° = right (+X direction in screen)
-        // In Three.js: Y-rotation of 0° = +X direction, negative rotation = clockwise when viewed from above
-        // The camera model has lens pointing in +X local, so no offset needed
-        const rotAngle = -THREE.MathUtils.degToRad(cameraItem.rotation);
-        const pitchRad = THREE.MathUtils.degToRad(pitch);
-
-        // Camera body - Unifi-style bullet camera (smaller, no pedestal)
-        const cameraGroup = new THREE.Group();
-        cameraGroup.userData.itemId = cameraItem.id; // For raycasting selection
-        cameraGroup.renderOrder = 1;
-
-        // ~2 ft long: real bullet cameras are under a foot, slightly enlarged so they stay visible
-        // (the colored view cone and label mark them from afar).
-        const cameraScale = 0.12 * (planGeoRef?.unitsPerFoot ?? 1);
-        const bodyRadius = 4.2 * cameraScale;
-        const bodyLength = 16 * cameraScale;
-        const bezelLength = 3.2 * cameraScale;
-        const lensRadius = 2.1 * cameraScale;
-
-        const bodyMaterial = new THREE.MeshStandardMaterial({
-          color: "#e2e8f0",
-          roughness: 0.45,
-          metalness: 0.2
-        });
-        const bezelMaterial = new THREE.MeshStandardMaterial({
-          color: "#0f172a",
-          roughness: 0.3,
-          metalness: 0.5
-        });
-        const lensMaterial = new THREE.MeshStandardMaterial({
-          color: "#0b1220",
-          roughness: 0.2,
-          metalness: 0.8
-        });
-        const accentMaterial = new THREE.MeshStandardMaterial({
-          color: "#1f2937",
-          roughness: 0.6,
-          metalness: 0.2
-        });
-
-        // Main cylindrical body
-        const bodyGeometry = new THREE.CylinderGeometry(bodyRadius, bodyRadius, bodyLength, 20);
-        bodyGeometry.rotateZ(Math.PI / 2);
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.castShadow = true;
-        cameraGroup.add(body);
-
-        // Front bezel and lens
-        const bezelGeometry = new THREE.CylinderGeometry(bodyRadius * 0.95, bodyRadius * 0.95, bezelLength, 20);
-        bezelGeometry.rotateZ(Math.PI / 2);
-        const bezel = new THREE.Mesh(bezelGeometry, bezelMaterial);
-        bezel.position.set(bodyLength / 2 - bezelLength / 2, 0, 0);
-        bezel.castShadow = true;
-        cameraGroup.add(bezel);
-
-        const lensGeometry = new THREE.CylinderGeometry(lensRadius * 0.9, lensRadius, 2.2 * cameraScale, 16);
-        lensGeometry.rotateZ(Math.PI / 2);
-        const lens = new THREE.Mesh(lensGeometry, lensMaterial);
-        lens.position.set(bodyLength / 2 + 0.6 * cameraScale, 0, 0);
-        lens.castShadow = true;
-        cameraGroup.add(lens);
-        cameraGroup.userData.lensOffset = bodyLength / 2 + 1.4 * cameraScale;
-
-        // Mount collar + short arm (no pedestal)
-        const collarGeometry = new THREE.TorusGeometry(bodyRadius * 0.7, bodyRadius * 0.12, 10, 20);
-        const collar = new THREE.Mesh(collarGeometry, accentMaterial);
-        collar.position.set(-bodyLength / 2 + bodyRadius * 0.25, 0, 0);
-        collar.rotation.y = Math.PI / 2;
-        cameraGroup.add(collar);
-
-        const armGeometry = new THREE.CylinderGeometry(bodyRadius * 0.22, bodyRadius * 0.28, 2.8 * cameraScale, 12);
-        const arm = new THREE.Mesh(armGeometry, accentMaterial);
-        arm.position.set(-bodyLength / 2 + bodyRadius * 0.35, -bodyRadius * 0.6, 0);
-        arm.castShadow = true;
-        cameraGroup.add(arm);
-
-        const mountPuck = new THREE.Mesh(new THREE.CylinderGeometry(bodyRadius * 0.55, bodyRadius * 0.6, 1.1 * cameraScale, 16), accentMaterial);
-        mountPuck.position.set(-bodyLength / 2 + bodyRadius * 0.35, -bodyRadius * 1.05, 0);
-        mountPuck.castShadow = true;
-        cameraGroup.add(mountPuck);
-
-        // Indicator light
-        const lightGeometry = new THREE.SphereGeometry(1.2 * cameraScale, 8, 8);
-        const lightMaterial = new THREE.MeshBasicMaterial({ color: cameraItem.color });
-        const light = new THREE.Mesh(lightGeometry, lightMaterial);
-        light.position.set(-bodyLength * 0.1, bodyRadius * 0.65, bodyRadius * 0.2);
-        cameraGroup.add(light);
-
-        // Position and rotate camera body
-        // For a camera facing +X locally:
-        // - Y rotation controls azimuth (horizontal direction)
-        // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
-        // - Y rotation controls azimuth (horizontal direction)
-        // - X rotation (on the group after Y rotation) controls pitch (tilt up/down)
-        cameraGroup.position.set(cameraPos.x, absHeight, cameraPos.y);
-        // The lens points along local +X, so pitch is a rotation about local Z applied after the yaw.
-        cameraGroup.rotation.order = 'YZX';
-        cameraGroup.rotation.y = rotAngle;
-        cameraGroup.rotation.z = pitchRad; // Pitch: positive = look up, negative = look down
-        threeObjectCacheRef.current.set(cameraItem.id, cameraGroup); // Cache for position updates
-        group.add(cameraGroup);
-
-        // No pedestal/pole for the refined camera model
-
-
-
-        updateCameraFrustum(
-          cameraGroup,
-          cameraItem,
-          cameraPos,
-          absHeight,
-          pitchRad,
-          rotAngle,
-          hFov,
-          range,
-          state
-        );
-
-
-
-
-        // Camera label
-        const camLabel = createTextSprite(cameraItem.label);
-        if (camLabel) {
-          camLabel.position.set(cameraPos.x, cameraHeight + clamp(Math.max(canvasSize.width, canvasSize.height) / 60, 4, 24), cameraPos.y);
-          group.add(camLabel);
-        }
-      }
-
-      // Images
-      if (item.type === "image") {
-        const img = item as ImageItem;
-        const geometry = new THREE.PlaneGeometry(img.width, img.height);
-        const material = new THREE.MeshStandardMaterial({
-          color: 0xffffff,
-          roughness: 0.9
-        });
-        new THREE.TextureLoader().load(img.src, texture => {
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.minFilter = THREE.LinearFilter;
-          material.map = texture;
-          material.needsUpdate = true;
-          renderer.render(scene, state.camera);
-        });
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.position.set(img.x, 0.25, img.y);
-        mesh.rotation.z = -THREE.MathUtils.degToRad(img.rotation);
-        mesh.userData.itemId = img.id;
-        threeObjectCacheRef.current.set(img.id, mesh); // Cache for position updates
-        group.add(mesh);
-      }
-
-      // Labels
-      if (item.type === "label") {
-        const labelItem = item as LabelItem;
-        const label = createTextSprite(labelItem.text);
-        if (label) {
-          label.position.set(labelItem.x, 8, labelItem.y);
-          label.userData.itemId = labelItem.id;
-          threeObjectCacheRef.current.set(labelItem.id, label); // Cache for position updates
-          group.add(label);
-        }
-      }
-    });
-
-    // Update camera position from existing orbit state (preserve user's view)
-    if (state.orbit) {
-      const { azimuth, polar, distance } = state.orbit;
-      const x = state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance;
-      const z = state.target.z + Math.sin(azimuth) * Math.cos(polar) * distance;
-      const y = state.target.y + Math.sin(polar) * distance;
-      state.camera.position.set(x, y, z);
-      state.camera.lookAt(state.target);
-    }
-
-    renderer.render(scene, state.camera);
-
-    // Update previous refs for next diff comparison
-    syncSceneRefs();
-  };
+  // --- The map view (2D and 3D are one view; see src/viewport) ---
+  const viewRef = useRef<SiteView | null>(null);
 
   const handleCaptureSnapshot = () => {
-    const state = threeStateRef.current;
-    if (!state) return;
-    const dataUrl = state.renderer.domElement.toDataURL("image/png");
-    const createdAt = new Date().toLocaleString();
-    setSnapshots(prev => [{ id: generateId(), dataUrl, createdAt }, ...prev]);
+    const dataUrl = viewRef.current?.capture();
+    if (!dataUrl) return;
+    setSnapshots(prev => [{ id: generateId(), dataUrl, createdAt: new Date().toLocaleString() }, ...prev]);
   };
 
   const handleExportSnapshot = (dataUrl: string, fileName: string) => {
@@ -4371,31 +3020,8 @@ export default function SecurityPlanner() {
   };
 
   const handleExportCurrent3d = () => {
-    const state = threeStateRef.current;
-    if (!state) return;
-    const dataUrl = state.renderer.domElement.toDataURL("image/png");
-    handleExportSnapshot(dataUrl, "security_plan_3d.png");
-  };
-
-  const handleReset3dView = () => {
-    const state = threeStateRef.current;
-    if (!state) return;
-    state.zoom = 1;
-    state.target.set(canvasSize.width / 2, 0, canvasSize.height / 2);
-    if (state.orbit) {
-      state.orbit.azimuth = Math.PI / 4;
-      state.orbit.polar = Math.PI / 4;
-      state.orbit.distance = Math.max(canvasSize.width, canvasSize.height) * 0.9;
-      const { azimuth, polar, distance } = state.orbit;
-      const x = state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance;
-      const z = state.target.z + Math.sin(azimuth) * Math.cos(polar) * distance;
-      const y = state.target.y + Math.sin(polar) * distance;
-      state.camera.position.set(x, y, z);
-    }
-    state.camera.zoom = state.zoom;
-    state.camera.updateProjectionMatrix();
-    state.camera.lookAt(state.target);
-    state.renderer.render(state.scene, state.camera);
+    const dataUrl = viewRef.current?.capture();
+    if (dataUrl) handleExportSnapshot(dataUrl, "security_plan_3d.png");
   };
 
   // A copy offset from the original. Building-mounted cameras become free-standing so the copy
@@ -4431,29 +3057,32 @@ export default function SecurityPlanner() {
     const r = item.type === "tree" ? (item as TreeItem).radius : Math.max((item as any).width ?? 0, (item as any).height ?? 0) / 2;
     return { minX: item.x - r, minY: item.y - r, maxX: item.x + r, maxY: item.y + r };
   };
-  const zoomToBounds = (b: Bounds | null, minSpanFt = 60, canvas = canvasSizeRef.current) => {
+  // Fit requests run after the map view has the latest plan (e.g. right after an import).
+  const fitRequestRef = useRef<{ bounds: Bounds | null; minSpan?: number; margin?: number } | null>(null);
+  const [fitSignal, setFitSignal] = useState(0);
+  function requestFit(bounds: Bounds | null, opts: { minSpan?: number; margin?: number } = {}) {
+    fitRequestRef.current = { bounds, ...opts };
+    setFitSignal(s => s + 1);
+  }
+  useEffect(() => {
+    const req = fitRequestRef.current;
+    const view = viewRef.current;
+    if (!req || !view) return;
+    fitRequestRef.current = null;
+    if (req.bounds) view.fitBounds(req.bounds, { minSpan: req.minSpan, margin: req.margin });
+    else view.fitSite();
+  }, [fitSignal]);
+  const zoomToBounds = (b: Bounds | null, minSpanFt = 60) => {
     if (!b) return;
-    const f = fitBounds(b, canvas, { margin: 1.3, minSpan: minSpanFt * (planGeoRef?.unitsPerFoot ?? 1) });
-    setZoom(f.zoom);
-    setPanOffset(f.pan);
+    viewRef.current?.fitBounds(b, { margin: 1.3, minSpan: minSpanFt * (planGeoRef?.unitsPerFoot ?? 1) });
   };
-  const zoomToFit = () => {
-    setZoom(1);
-    setPanOffset({ x: 0, y: 0 });
-  };
+  const zoomToFit = () => viewRef.current?.fitSite();
   const zoomToSelection = () => {
     const item = selectedId ? items.find(i => i.id === selectedId) : null;
     if (item) zoomToBounds(itemPlanBounds(item), item.type === "camera" ? 80 : 50);
     else zoomToFit();
   };
-  const zoomBy = (factor: number) => {
-    // Zoom around the middle of the view
-    const cx = canvasSize.width / 2;
-    const cy = canvasSize.height / 2;
-    const next = clamp(zoom * factor, 0.3, MAX_ZOOM);
-    setPanOffset({ x: cx - ((cx - panOffset.x) / zoom) * next, y: cy - ((cy - panOffset.y) / zoom) * next });
-    setZoom(next);
-  };
+  const zoomBy = (factor: number) => viewRef.current?.zoomBy(factor);
 
   // --- Actions on the selection (shared by the floating action bar and shortcuts) ---
   const duplicateSelected = () => {
@@ -4490,10 +3119,13 @@ export default function SecurityPlanner() {
         if (event.key === "2") { setViewMode("plan"); return; }
         if (event.key === "3") { setViewMode("iso3d"); return; }
         if (event.key === "?") { event.preventDefault(); setShowShortcuts(true); return; }
-        if (viewMode === "plan" && event.key === "0") { event.preventDefault(); zoomToFit(); return; }
-        if (viewMode === "plan" && (event.key === "+" || event.key === "=")) { event.preventDefault(); zoomBy(1.25); return; }
-        if (viewMode === "plan" && event.key === "-") { event.preventDefault(); zoomBy(0.8); return; }
-        if (viewMode === "plan" && event.key.toLowerCase() === "f") { event.preventDefault(); zoomToSelection(); return; }
+        if (event.key === "0") { event.preventDefault(); zoomToFit(); return; }
+        if (event.key === "+" || event.key === "=") { event.preventDefault(); zoomBy(1.25); return; }
+        if (event.key === "-") { event.preventDefault(); zoomBy(0.8); return; }
+        if (event.key.toLowerCase() === "f") { event.preventDefault(); zoomToSelection(); return; }
+        if (event.key.toLowerCase() === "n") { event.preventDefault(); viewRef.current?.resetNorth(); return; }
+        if (event.key.toLowerCase() === "q") { event.preventDefault(); viewRef.current?.rotateBy(-22.5); return; }
+        if (event.key.toLowerCase() === "e") { event.preventDefault(); viewRef.current?.rotateBy(22.5); return; }
         // Nudge the selection with the arrow keys (Shift = 10 ft)
         if (selectedId && event.key.startsWith("Arrow")) {
           const item = items.find(i => i.id === selectedId);
@@ -4510,10 +3142,6 @@ export default function SecurityPlanner() {
         }
       }
 
-      if (event.key === " ") {
-        setIsSpacePressed(true);
-        isSpacePressedRef.current = true;
-      }
 
       if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
         event.preventDefault();
@@ -4590,72 +3218,9 @@ export default function SecurityPlanner() {
     };
 
     window.addEventListener("keydown", handleKeyDown);
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (event.key === " ") {
-        setIsSpacePressed(false);
-        isSpacePressedRef.current = false;
-      }
-    };
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [items, selectedId, handleSaveProject, viewMode, aimingCameraId]);
 
-
-  // Effect to handle environment background updates (HDRI / Panorama)
-  useEffect(() => {
-    if (!threeStateRef.current) return;
-    const { scene, renderer, camera } = threeStateRef.current;
-
-    if (sceneBackgroundImg) {
-      new THREE.TextureLoader().load(sceneBackgroundImg, (texture) => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-
-        // Always keep background dark/hidden as requested
-        scene.background = new THREE.Color("#09090b");
-
-        // Use image for lighting (Reflections) if it's a panorama
-        if (backgroundMode === 'panorama') {
-          texture.mapping = THREE.EquirectangularReflectionMapping;
-          scene.environment = texture;
-        } else {
-          // Fallback to Studio Lighting for flat images
-          const pmremGenerator = new THREE.PMREMGenerator(renderer);
-          scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
-          pmremGenerator.dispose();
-        }
-        renderer.render(scene, camera);
-      });
-    } else {
-      scene.background = new THREE.Color("#09090b");
-      // Default PBR environment
-      const pmremGenerator = new THREE.PMREMGenerator(renderer);
-      scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
-      pmremGenerator.dispose();
-
-      renderer.render(scene, camera);
-    }
-  }, [sceneBackgroundImg, backgroundMode]);
-
-
-  // Refs for 3D interaction state - enhanced for "local drag" pattern
-  // Refs for 3D interaction state - simplified "Hit Offset" pattern
-  // offset: Vector from Hit Point to Object Center (Center = Hit + Offset)
-  const threeDragStateRef = useRef<{
-    isDragging: boolean;
-    itemId: string | null;
-    dragOffset: { x: number; z: number } | null;
-    originalItemPos?: { x: number; y: number };
-    interactionType?: "move" | "resize-height" | "move-label";
-    startHeight?: number;
-    startMouseY?: number;
-    currentHeight?: number;
-    dragStartWorld?: { x: number; z: number };
-    startLabelOffset?: { x: number; y: number };
-    currentLabelOffset?: { x: number; y: number };
-  }>({ isDragging: false, itemId: null, dragOffset: null });
 
   // Refs to track current items and mode in 3D event handlers
   const itemsRef = projectRef("items");
@@ -4665,889 +3230,9 @@ export default function SecurityPlanner() {
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
 
-  // Effect: Handle 3D Selection Highlight (Emissive Glow)
-  useEffect(() => {
-    const scene = threeStateRef.current?.scene;
-    const cache = threeObjectCacheRef.current;
-    if (!scene || !cache) return;
-
-    // Helper to Apply Highlight
-    const setHighlight = (obj: THREE.Object3D, active: boolean, id: string) => {
-      // 1. Cleanup existing handles
-      const existing = obj.getObjectByName("height-handle");
-      if (existing) obj.remove(existing);
-
-      // 2. Emissive Glow Logic
-      obj.traverse((child) => {
-        if (child instanceof THREE.Mesh && child.material) {
-          const materials = Array.isArray(child.material) ? child.material : [child.material];
-
-          materials.forEach(mat => {
-            if ('emissive' in mat) {
-              if (!child.userData.originalEmissive) {
-                child.userData.originalEmissive = mat.emissive.clone();
-              }
-
-              if (active) {
-                mat.emissive.setHex(0x4444ff);
-                mat.emissiveIntensity = 0.5;
-              } else {
-                if (child.userData.originalEmissive) {
-                  mat.emissive.copy(child.userData.originalEmissive);
-                  mat.emissiveIntensity = 1;
-                } else {
-                  mat.emissive.setHex(0x000000);
-                }
-              }
-            }
-          });
-        }
-      });
-
-      // 3. Add Corner Handles for Height Adjustment
-      if (active) {
-        const item = items.find(i => i.id === id);
-        if (item && item.type === "building") {
-          createCornerHandles(obj, item as BuildingItem);
-        }
-      }
-    };
-
-    const createCornerHandles = (obj: THREE.Object3D, building: BuildingItem) => {
-      const roof = obj.getObjectByName("building-roof") as THREE.Mesh;
-      if (!roof) return;
-
-      const points = building.points || [];
-      if (points.length === 0) return; // Should have points if valid building
-
-      // Clean old
-      const oldGroup = roof.getObjectByName("corner-handles_group");
-      if (oldGroup) roof.remove(oldGroup);
-
-      const group = new THREE.Group();
-      group.name = "corner-handles_group";
-
-      points.forEach(p => {
-        const geometry = new THREE.BoxGeometry(5, 5, 5);
-        const material = new THREE.MeshBasicMaterial({
-          color: 0xffffff,
-          toneMapped: false,
-          depthTest: false,
-          transparent: true,
-          opacity: 0.9
-        });
-        const handle = new THREE.Mesh(geometry, material);
-        // Position relative to Roof (Local Space where Y is up relative to Wall Geom, but Roof Geom is Rotated)
-        // Based on previous analysis: p.x, 0, p.y maps correctly to corner
-        handle.position.set(p.x, 0, p.y);
-        handle.name = "height-corner-handle";
-        handle.userData.itemId = building.id;
-        handle.userData.isHandle = true;
-        group.add(handle);
-      });
-
-      roof.add(group);
-    };
-
-    // Update all objects
-    cache.forEach((obj, id) => {
-      setHighlight(obj, id === selectedId, id);
-    });
-
-    // Add Hover Cursor Logic
-    const handlePointerMove = (e: PointerEvent) => {
-      if (!threeStateRef.current) return;
-
-      const rect = threeStateRef.current.renderer.domElement.getBoundingClientRect();
-      const ndc = {
-        x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        y: -((e.clientY - rect.top) / rect.height) * 2 + 1
-      };
-
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), threeStateRef.current.camera);
-      const intersects = raycaster.intersectObjects(threeStateRef.current.scene.children, true);
-
-      // Check for Corner Handle
-      const hitHandle = intersects.find(h => h.object.name === "height-corner-handle");
-
-      if (hitHandle && hitHandle.object.userData.itemId === selectedId) {
-        document.body.style.cursor = "ns-resize";
-        // Optional: Highlight the specific handle?
-        // hitHandle.object.material.color.set(0x...);
-      } else {
-        document.body.style.cursor = "default";
-      }
-    };
-    threeStateRef.current?.renderer.domElement.addEventListener("pointermove", handlePointerMove);
-
-    threeStateRef.current?.renderer.render(threeStateRef.current.scene, threeStateRef.current.camera);
-
-    return () => {
-      threeStateRef.current?.renderer.domElement.removeEventListener("pointermove", handlePointerMove);
-    };
-  }, [selectedId, items]); // Re-run when selection or items change
 
   useEffect(() => {
-    // Terrain Interaction: Cursor & Hover
-    if (!threeStateRef.current) return;
-    const scene = threeStateRef.current.scene;
-    const camera = threeStateRef.current.camera;
-    const renderer = threeStateRef.current.renderer;
-
-    // Brush outline is a line loop re-draped over the terrain on every move.
-    const CURSOR_SEGMENTS = 72;
-    let cursor = scene.getObjectByName("terrain-cursor") as THREE.LineLoop;
-    if (!cursor) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(CURSOR_SEGMENTS * 3), 3));
-      const mat = new THREE.LineBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.95, depthTest: false });
-      cursor = new THREE.LineLoop(geo, mat);
-      cursor.name = "terrain-cursor";
-      cursor.renderOrder = 10;
-      cursor.frustumCulled = false;
-      cursor.raycast = () => {};
-      scene.add(cursor);
-    }
-
-    let cursorDot = scene.getObjectByName("terrain-cursor-dot") as THREE.Mesh;
-    if (!cursorDot) {
-      const geo = new THREE.CircleGeometry(0.18, 16);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide });
-      cursorDot = new THREE.Mesh(geo, mat);
-      cursorDot.rotation.x = -Math.PI / 2;
-      cursorDot.name = "terrain-cursor-dot";
-      cursorDot.raycast = () => {};
-      scene.add(cursorDot);
-    }
-
-    if (!isTerrainMode) {
-      cursor.visible = false;
-      cursorDot.visible = false;
-      renderer.render(scene, camera);
-      const onHover = (e: PointerEvent) => {
-        const rect = renderer.domElement.getBoundingClientRect();
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(
-          ((e.clientX - rect.left) / rect.width) * 2 - 1,
-          -((e.clientY - rect.top) / rect.height) * 2 + 1
-        ), camera);
-        const terrain = scene.getObjectByName("terrain-mesh");
-        const hit = terrain ? raycaster.intersectObject(terrain)[0] : undefined;
-        if (hit) updateElevationReadout(hit.point.x, hit.point.z);
-        else updateElevationReadout(-1, -1);
-      };
-      renderer.domElement.addEventListener("pointermove", onHover);
-      return () => renderer.domElement.removeEventListener("pointermove", onHover);
-    }
-
-    cursor.visible = true;
-    cursorDot.visible = true;
-
-    const onMove = (e: PointerEvent) => {
-      const rect = renderer.domElement.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
-
-      const terrain = scene.getObjectByName("terrain-mesh");
-      if (terrain) {
-        const hits = raycaster.intersectObject(terrain);
-        if (hits.length > 0) {
-          const pt = hits[0].point;
-          const safeGrid = gridSize || 20;
-          terrainHoverRef.current = { pointX: pt.x, pointZ: pt.z };
-          const radius = getBrushRadius(safeGrid);
-          const h = getGridHeight(pt.x, pt.z, terrainHeightsRef.current);
-
-          const cursorMat = cursor.material as THREE.LineBasicMaterial;
-          cursorMat.color.setHex(
-            terrainTool === "sculpt" ? (e.shiftKey ? 0xef4444 : 0xf59e0b) : terrainTool === "smooth" ? 0x38bdf8 : 0x818cf8
-          );
-          const cursorPos = cursor.geometry.attributes.position as THREE.BufferAttribute;
-          for (let i = 0; i < CURSOR_SEGMENTS; i++) {
-            const a = (i / CURSOR_SEGMENTS) * Math.PI * 2;
-            const cx = pt.x + Math.cos(a) * radius;
-            const cz = pt.z + Math.sin(a) * radius;
-            cursorPos.setXYZ(i, cx, getGridHeight(cx, cz, terrainHeightsRef.current) + 0.6, cz);
-          }
-          cursorPos.needsUpdate = true;
-          cursorDot.scale.set(Math.max(1, radius / 20), Math.max(1, radius / 20), 1);
-          cursorDot.position.set(pt.x, h + 0.6, pt.z);
-          updateElevationReadout(pt.x, pt.z);
-
-          renderer.render(scene, camera);
-        }
-      }
-    };
-
-    renderer.domElement.addEventListener("pointermove", onMove);
-    return () => {
-      renderer.domElement.removeEventListener("pointermove", onMove);
-    };
-  }, [isTerrainMode, gridSize, terrainHeights, terrainTool, terrainBrushSize, canvasSize.width, canvasSize.height]);
-
-  useEffect(() => {
-    if (!threeContainerRef.current || threeStateRef.current) return;
-    const container = threeContainerRef.current;
-
-    // Enhanced renderer with better quality settings
-    const renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      preserveDrawingBuffer: true,
-      alpha: true,
-      powerPreference: "high-performance"
-    });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.3;
-    container.appendChild(renderer.domElement);
-
-    // Scene setup with improved atmosphere
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#09090b");
-    // No fog: this is an orthographic overview, and fog darkened the far side of large sites.
-
-    // Orthographic camera for isometric-style view
-    const camera = new THREE.OrthographicCamera(-500, 500, 500, -500, 0.1, 6000);
-    const group = new THREE.Group();
-    scene.add(group);
-
-    // Raycaster for 3D selection and placement
-    const raycaster = new THREE.Raycaster();
-
-    // Improved lighting setup: Hemisphere for nice gradients + Strong Solar Directional Light
-    const hemiLight = new THREE.HemisphereLight(0xddeeff, 0x202020, 0.6);
-    scene.add(hemiLight);
-
-    // Sun from the south-west, with a shadow camera that covers the whole site
-    // (the default one only covered ~10 ft around the origin, so most shadows were missing).
-    const siteSpan = Math.max(canvasSize.width, canvasSize.height);
-    const siteCenter = new THREE.Vector3(canvasSize.width / 2, 0, canvasSize.height / 2);
-    const dirLight = new THREE.DirectionalLight(0xfffee0, 2.0);
-    dirLight.position.copy(siteCenter).add(new THREE.Vector3(-0.5, 1, 0.6).normalize().multiplyScalar(siteSpan * 1.5));
-    dirLight.target.position.copy(siteCenter);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 4096;
-    dirLight.shadow.mapSize.height = 4096;
-    const shadowCam = dirLight.shadow.camera;
-    shadowCam.left = -siteSpan * 0.8;
-    shadowCam.right = siteSpan * 0.8;
-    shadowCam.top = siteSpan * 0.8;
-    shadowCam.bottom = -siteSpan * 0.8;
-    shadowCam.near = 1;
-    shadowCam.far = siteSpan * 4;
-    shadowCam.updateProjectionMatrix();
-    dirLight.shadow.bias = -0.0005;
-    dirLight.shadow.normalBias = 0.5;
-    scene.add(dirLight);
-    scene.add(dirLight.target);
-
-    // Initial orbit state with good default viewing angle
-    const orbit = {
-      azimuth: Math.PI / 5,
-      polar: Math.PI / 5,
-      distance: Math.max(canvasSize.width, canvasSize.height) * 0.8
-    };
-    const state = {
-      scene,
-      camera,
-      renderer,
-      group,
-      raycaster,
-      target: new THREE.Vector3(canvasSize.width / 2, 0, canvasSize.height / 2),
-      zoom: 1,
-      size: { width: 1, height: 1 },
-      orbit
-    };
-    threeStateRef.current = state;
-
-    const resize = () => {
-      const { width, height } = container.getBoundingClientRect();
-      state.size = { width, height };
-      renderer.setSize(width, height);
-      const aspect = width / height;
-      const frustum = Math.max(canvasSize.width, canvasSize.height) * 0.7;
-      camera.left = -frustum * aspect;
-      camera.right = frustum * aspect;
-      camera.top = frustum;
-      camera.bottom = -frustum;
-      camera.zoom = state.zoom;
-      camera.updateProjectionMatrix();
-      renderer.render(scene, camera);
-    };
-
-    const updateCamera = () => {
-      const { azimuth, polar, distance } = orbit;
-      const x = state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance;
-      const z = state.target.z + Math.sin(azimuth) * Math.cos(polar) * distance;
-      const y = state.target.y + Math.sin(polar) * distance;
-      camera.position.set(x, y, z);
-      camera.lookAt(state.target);
-      renderer.render(scene, camera);
-    };
-
-    // Helper: Get normalized device coordinates from pointer event
-    const getNDC = (event: PointerEvent) => {
-      const rect = renderer.domElement.getBoundingClientRect();
-      return {
-        x: ((event.clientX - rect.left) / rect.width) * 2 - 1,
-        y: -((event.clientY - rect.top) / rect.height) * 2 + 1
-      };
-    };
-
-    // Helper: Cast ray to the terrain surface (falls back to the y=0 plane) and return world coords
-    const raycastToGround = (ndc: { x: number; y: number }): { x: number; z: number } | null => {
-      raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
-      const terrainMesh = group.getObjectByName("terrain-mesh");
-      if (terrainMesh) {
-        const terrainHits = raycaster.intersectObject(terrainMesh, false);
-        if (terrainHits.length > 0) {
-          return { x: terrainHits[0].point.x, z: terrainHits[0].point.z };
-        }
-      }
-      const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-      const intersection = new THREE.Vector3();
-      const hit = raycaster.ray.intersectPlane(groundPlane, intersection);
-      if (hit) {
-        return { x: intersection.x, z: intersection.z };
-      }
-      return null;
-    };
-
-    // Helper: Find which item was clicked (if any)
-    const findClickedItem = (ndc: { x: number; y: number }): string | null => {
-      raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
-      const intersects = raycaster.intersectObjects(group.children, true);
-
-      for (const hit of intersects) {
-        // Traverse up to find parent with userData.itemId
-        let obj: THREE.Object3D | null = hit.object;
-        while (obj) {
-          if (obj.userData?.itemId) {
-            return obj.userData.itemId;
-          }
-          obj = obj.parent;
-        }
-      }
-      return null;
-    };
-
-    const onPointerDown = (event: PointerEvent) => {
-      const ndc = getNDC(event);
-      const currentMode = modeRef.current;
-      const currentSelectedId = selectedIdRef.current;
-
-      // Right-drag, or Shift/Alt/Ctrl + drag = rotate (trackpads have no easy right-drag)
-      const rotateGesture = event.button === 2 || (event.button === 0 && (event.altKey || event.ctrlKey || (event.shiftKey && !isTerrainModeRef.current)));
-      if (rotateGesture && !isSpacePressedRef.current) {
-        event.preventDefault();
-        const start = { x: event.clientX, y: event.clientY };
-        const moveHandler = (moveEvent: PointerEvent) => {
-          const dx = moveEvent.clientX - start.x;
-          const dy = moveEvent.clientY - start.y;
-          start.x = moveEvent.clientX;
-          start.y = moveEvent.clientY;
-          // INVERTED: Positive dx rotates azimuth in natural direction
-          orbit.azimuth += dx * 0.005;
-          orbit.polar = clamp(orbit.polar + dy * 0.005, 0.1, Math.PI / 2.1);
-          updateCamera();
-        };
-        const upHandler = () => {
-          window.removeEventListener("pointermove", moveHandler);
-          window.removeEventListener("pointerup", upHandler);
-        };
-        window.addEventListener("pointermove", moveHandler);
-        window.addEventListener("pointerup", upHandler);
-        return;
-      }
-
-      // Middle-click or Space+click = Pan (Google Earth style - camera-relative)
-      if (event.button === 1 || isSpacePressedRef.current) {
-        event.preventDefault();
-        const start = { x: event.clientX, y: event.clientY };
-        const moveHandler = (moveEvent: PointerEvent) => {
-          const dx = moveEvent.clientX - start.x;
-          const dy = moveEvent.clientY - start.y;
-          start.x = moveEvent.clientX;
-          start.y = moveEvent.clientY;
-
-          // Google Earth-style pan: move along camera's local right and forward vectors
-          // projected onto the ground plane (Y=0)
-          const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
-
-          // Get camera's right vector (for horizontal drag)
-          const right = new THREE.Vector3();
-          camera.getWorldDirection(new THREE.Vector3());
-          right.setFromMatrixColumn(camera.matrixWorld, 0); // X axis = right
-          right.y = 0; // Project onto ground plane
-          right.normalize();
-
-          // Get camera's forward vector projected onto ground (for vertical drag)
-          const forward = new THREE.Vector3();
-          camera.getWorldDirection(forward);
-          forward.y = 0; // Project onto ground plane
-          forward.normalize();
-
-          // Apply movement: world follows mouse (grab-and-drag)
-          state.target.x += -right.x * dx * panScale + forward.x * dy * panScale;
-          state.target.z += -right.z * dx * panScale + forward.z * dy * panScale;
-
-          updateCamera();
-        };
-        const upHandler = () => {
-          window.removeEventListener("pointermove", moveHandler);
-          window.removeEventListener("pointerup", upHandler);
-        };
-        window.addEventListener("pointermove", moveHandler);
-        window.addEventListener("pointerup", upHandler);
-        return;
-      }
-
-      // Terrain Edit Mode (Brush-based sculpting)
-      if (isTerrainModeRef.current) {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
-        const terrain = group.getObjectByName("terrain-mesh");
-        if (terrain) {
-          const hits = raycaster.intersectObject(terrain);
-          if (hits.length > 0) {
-            const pt = hits[0].point;
-            const tool = terrainToolRef.current;
-            const direction: 1 | -1 = tool === "sculpt" && event.shiftKey ? -1 : 1;
-
-            if (tool === "flatten" && terrainFlattenSampleRef.current) {
-              const target = getGridHeight(pt.x, pt.z);
-              setTerrainFlattenTarget(target);
-              terrainFlattenTargetRef.current = target;
-            }
-
-            const startTime = performance.now();
-            terrainStrokeRef.current = {
-              active: true,
-              tool,
-              direction,
-              lastTime: startTime
-            };
-
-            const applyAtPoint = (p: THREE.Vector3, now: number) => {
-              if (!terrainStrokeRef.current) return;
-              const last = terrainStrokeRef.current.lastTime;
-              const dt = Math.min((now - last) / 1000, 0.05);
-              terrainStrokeRef.current.lastTime = now;
-              applyBrushStroke(p.x, p.z, tool, direction, dt || 0.016);
-              terrainHoverRef.current = { pointX: p.x, pointZ: p.z };
-            };
-
-            applyAtPoint(pt, startTime);
-            let strokePoint = pt.clone();
-            // Keep applying while held so the brush works without constant mouse movement.
-            let strokeFrame = 0;
-            const strokeTick = () => {
-              applyAtPoint(strokePoint, performance.now());
-              strokeFrame = window.requestAnimationFrame(strokeTick);
-            };
-            strokeFrame = window.requestAnimationFrame(strokeTick);
-
-            const moveHandler = (moveEvent: PointerEvent) => {
-              const moveNdc = getNDC(moveEvent);
-              raycaster.setFromCamera(new THREE.Vector2(moveNdc.x, moveNdc.y), camera);
-              const moveHits = raycaster.intersectObject(terrain);
-              if (moveHits.length > 0) {
-                strokePoint = moveHits[0].point.clone();
-              }
-            };
-
-            const upHandler = () => {
-              window.cancelAnimationFrame(strokeFrame);
-              if (terrainStrokeRef.current?.active) {
-                saveHistory(undefined, terrainHeightsRef.current);
-              }
-              terrainStrokeRef.current = null;
-              window.removeEventListener("pointermove", moveHandler);
-              window.removeEventListener("pointerup", upHandler);
-            };
-
-            window.addEventListener("pointermove", moveHandler);
-            window.addEventListener("pointerup", upHandler);
-            event.stopPropagation();
-            return;
-          }
-        }
-        return;
-      } else {
-        // Normal mode (Selection check)
-        // Only check selection if NOT terrain mode
-      }
-
-      // Left-click handling
-      if (event.button === 0) {
-        event.preventDefault();
-
-        // Check if we're in an "add" mode
-        if (currentMode !== "select") {
-          // Place new item at ground position
-          const groundPos = raycastToGround(ndc);
-          if (groundPos) {
-            // Create synthetic event-like object for handleAddItem
-            // Since handleAddItem expects a React.MouseEvent with specific calculations,
-            // we'll directly create items here for 3D placement
-            const snapSize = gridSizeRef.current || 20;
-            const snapEnabled = snapToGridRef.current;
-            const x = snapEnabled ? Math.round(groundPos.x / snapSize) * snapSize : groundPos.x;
-            const y = snapEnabled ? Math.round(groundPos.z / snapSize) * snapSize : groundPos.z; // z in 3D maps to y in 2D
-
-            if (placeNewItemAtRef.current(currentMode as ToolMode, x, y)) setTimeout(() => saveHistory(), 50);
-          }
-          return;
-        }
-
-        // Select mode: Check for object click or start dragging
-        const clickedItemId = findClickedItem(ndc);
-
-        if (clickedItemId) {
-          setSelectedId(clickedItemId);
-
-          // Get the clicked item's current position
-          const clickedItem = itemsRef.current.find(i => i.id === clickedItemId);
-
-          // Check for Corner Handle Interaction (Height Resize)
-          let isResizingHeight = false;
-          let isLabelDrag = false;
-          raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
-          const intersects = raycaster.intersectObjects(group.children, true);
-          const hit = intersects.find(h => {
-            return h.object.name === "height-corner-handle" && h.object.userData.itemId === clickedItemId;
-          });
-          if (hit) {
-            isResizingHeight = true;
-          }
-          const labelHit = intersects.find(h => {
-            return h.object.userData?.isLabel && h.object.userData?.itemId === clickedItemId;
-          });
-          if (labelHit) {
-            isLabelDrag = true;
-          }
-
-          const groundPos = raycastToGround(ndc);
-
-          if (groundPos && clickedItem) {
-            // "Hit Offset" Pattern
-            threeDragStateRef.current = {
-              isDragging: true,
-              itemId: clickedItemId,
-              interactionType: isResizingHeight ? "resize-height" : isLabelDrag ? "move-label" : "move",
-              startHeight: (clickedItem as BuildingItem).wallHeight ?? 60,
-              startMouseY: event.clientY,
-              dragOffset: isLabelDrag
-                ? null
-                : {
-                  x: clickedItem.x - groundPos.x,
-                  z: clickedItem.y - groundPos.z
-                },
-              dragStartWorld: groundPos,
-              startLabelOffset: (clickedItem as BuildingItem).labelOffset ?? { x: 0, y: 0 }
-            };
-          }
-
-          const moveHandler = (moveEvent: PointerEvent) => {
-            const dragState = threeDragStateRef.current;
-            if (!dragState.isDragging || !dragState.itemId) return;
-
-            // HANDLE RESIZE
-            if (dragState.interactionType === "resize-height") {
-              const dy = (dragState.startMouseY || 0) - moveEvent.clientY;
-              const startH = dragState.startHeight || 60;
-              // Min height 10
-              const newH = Math.max(10, startH + dy);
-              dragState.currentHeight = newH;
-
-              const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
-              if (cachedObj) {
-                cachedObj.scale.y = newH / startH;
-                // Also update handle visual if needed (Handle scales with parent, so valid)
-                state.renderer.render(state.scene, state.camera);
-              }
-              return;
-            }
-
-            // HANDLE LABEL MOVE
-            if (dragState.interactionType === "move-label") {
-              const moveNdc = getNDC(moveEvent);
-              const newGroundPos = raycastToGround(moveNdc);
-              if (!newGroundPos || !dragState.dragStartWorld) return;
-
-              const deltaWorld = {
-                x: newGroundPos.x - dragState.dragStartWorld.x,
-                y: newGroundPos.z - dragState.dragStartWorld.z
-              };
-              const building = itemsRef.current.find(i => i.id === dragState.itemId) as BuildingItem | undefined;
-              if (!building) return;
-              const localDelta = rotatePoint(deltaWorld, -building.rotation);
-              const startOffset = dragState.startLabelOffset ?? { x: 0, y: 0 };
-              const nextOffset = {
-                x: startOffset.x + localDelta.x,
-                y: startOffset.y + localDelta.y
-              };
-              dragState.currentLabelOffset = nextOffset;
-
-              const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
-              if (cachedObj) {
-                const label = cachedObj.getObjectByName("building-label") as THREE.Sprite | null;
-                if (label) {
-                  const buildingHeight = building.wallHeight ?? 60;
-                  label.position.set(nextOffset.x, buildingHeight + 15, nextOffset.y);
-                }
-                state.renderer.render(state.scene, state.camera);
-              }
-              return;
-            }
-
-            // HANDLE MOVE
-            const moveNdc = getNDC(moveEvent);
-            const newGroundPos = raycastToGround(moveNdc);
-            if (!newGroundPos || !dragState.dragOffset) return;
-
-            const rawX = newGroundPos.x + dragState.dragOffset.x;
-            const rawY = newGroundPos.z + dragState.dragOffset.z;
-
-            // Snap to grid (if enabled)
-            const snapSize = gridSizeRef.current || 20;
-            const snapEnabled = snapToGridRef.current;
-            const newX = snapEnabled ? Math.round(rawX / snapSize) * snapSize : rawX;
-            const newY = snapEnabled ? Math.round(rawY / snapSize) * snapSize : rawY;
-
-            // Update Three.js mesh directly
-            const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
-            if (cachedObj) {
-              const itemType = itemsRef.current.find(i => i.id === dragState.itemId)?.type;
-              const terrainY = getGridHeight(newX, newY) + OBJECT_ELEVATION_OFFSET;
-
-              if (itemType === "camera") {
-                const item = itemsRef.current.find(i => i.id === dragState.itemId) as CameraItem | undefined;
-                const camHeight = item?.mount?.height ?? item?.height ?? 10;
-                const baseY = item && item.mount?.type === "building" ? getCameraBaseHeight({ ...item, x: newX, y: newY }) : terrainY;
-                cachedObj.position.set(newX, baseY + camHeight, newY);
-              } else if (itemType === "building") {
-                const building = itemsRef.current.find(i => i.id === dragState.itemId) as BuildingItem | undefined;
-                if (building) {
-                  const nextBuilding = { ...building, x: newX, y: newY };
-                  const baseH = getBuildingBaseHeight(nextBuilding);
-                  cachedObj.position.set(newX, baseH, newY);
-                } else {
-                  cachedObj.position.set(newX, terrainY, newY);
-                }
-              } else if (itemType === "tree" || itemType === "parking") {
-                cachedObj.position.set(newX, terrainY, newY);
-              } else if (itemType === "image") {
-                cachedObj.position.set(newX, terrainY + 0.25, newY);
-              } else if (itemType === "label") {
-                cachedObj.position.set(newX, terrainY + 8, newY);
-              }
-
-              state.renderer.render(state.scene, state.camera);
-            }
-          };
-
-          const upHandler = () => {
-            const dragState = threeDragStateRef.current;
-
-            if (dragState.isDragging && dragState.itemId) {
-              // Commit changes
-              if (dragState.interactionType === "resize-height" && dragState.currentHeight !== undefined) {
-                updateItem(dragState.itemId, { wallHeight: dragState.currentHeight });
-                setTimeout(() => saveHistory(), 50);
-              } else if (dragState.interactionType === "move-label" && dragState.currentLabelOffset) {
-                updateItem(dragState.itemId, { labelOffset: dragState.currentLabelOffset });
-                setTimeout(() => saveHistory(), 50);
-              } else if (dragState.interactionType !== "resize-height") {
-                // Commit Position
-                const cachedObj = threeObjectCacheRef.current.get(dragState.itemId);
-                if (cachedObj) {
-                  const finalX = cachedObj.position.x;
-                  const finalY = cachedObj.position.z;
-                  const dragItemId = dragState.itemId;
-                  setItems(prev => prev.map(item => {
-                    if (item.id !== dragItemId) return item;
-                    if (item.type === "camera") {
-                      // Cameras re-attach to a wall if dropped next to one; otherwise they become free-standing.
-                      const cam = item as CameraItem;
-                      const edge = findNearestBuildingEdge({ x: finalX, y: finalY }, prev);
-                      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
-                        const building = prev.find(b => b.id === edge.buildingId) as BuildingItem | undefined;
-                        const wasMounted = cam.mount?.type === "building";
-                        const height = wasMounted ? cam.mount?.height ?? mountHeightForBuilding(building) : mountHeightForBuilding(building);
-                        return {
-                          ...cam,
-                          x: edge.point.x,
-                          y: edge.point.y,
-                          rotation: wasMounted && cam.mount?.buildingId === edge.buildingId ? cam.rotation : edge.rotation,
-                          mount: { type: "building", buildingId: edge.buildingId, edgeIndex: edge.edgeIndex, edgeT: edge.edgeT, height },
-                          height
-                        } as CameraItem;
-                      }
-                      const height = cam.mount?.type === "building" ? DEFAULT_CAMERA_HEIGHT_FT : cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT;
-                      return { ...cam, x: finalX, y: finalY, mount: { type: "free", edgeT: 0.5, height }, height } as CameraItem;
-                    }
-                    return { ...item, x: finalX, y: finalY };
-                  }));
-                  setTimeout(() => saveHistory(), 50);
-                }
-              }
-            }
-
-            // Reset drag state
-            threeDragStateRef.current = {
-              isDragging: false,
-              itemId: null,
-              dragOffset: null,
-              interactionType: undefined,
-              currentHeight: undefined,
-              dragStartWorld: undefined,
-              startLabelOffset: undefined,
-              currentLabelOffset: undefined
-            };
-            window.removeEventListener("pointermove", moveHandler);
-            window.removeEventListener("pointerup", upHandler);
-          };
-
-          window.addEventListener("pointermove", moveHandler);
-          window.addEventListener("pointerup", upHandler);
-        } else {
-          // Clicked on empty space - deselect and start pan (Google Earth style)
-          setSelectedId(null);
-
-          const start = { x: event.clientX, y: event.clientY };
-          const moveHandler = (moveEvent: PointerEvent) => {
-            const dx = moveEvent.clientX - start.x;
-            const dy = moveEvent.clientY - start.y;
-            start.x = moveEvent.clientX;
-            start.y = moveEvent.clientY;
-
-            // Google Earth-style pan: move along camera's local right and forward vectors
-            const panScale = (Math.max(canvasSize.width, canvasSize.height) * 0.7 / camera.zoom) / 400;
-
-            const right = new THREE.Vector3();
-            camera.getWorldDirection(new THREE.Vector3());
-            right.setFromMatrixColumn(camera.matrixWorld, 0);
-            right.y = 0;
-            right.normalize();
-
-            const forward = new THREE.Vector3();
-            camera.getWorldDirection(forward);
-            forward.y = 0;
-            forward.normalize();
-
-            // Horizontal: Subtract to fix inversion (Ground moves with Mouse)
-            // Vertical: Add (Ground moves with Mouse - already correct)
-            state.target.x += -right.x * dx * panScale + forward.x * dy * panScale;
-            state.target.z += -right.z * dx * panScale + forward.z * dy * panScale;
-
-            updateCamera();
-          };
-          const upHandler = () => {
-            window.removeEventListener("pointermove", moveHandler);
-            window.removeEventListener("pointerup", upHandler);
-          };
-          window.addEventListener("pointermove", moveHandler);
-          window.addEventListener("pointerup", upHandler);
-        }
-      }
-    };
-
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      // Smooth zoom for mouse wheels, trackpad scrolls and pinches (pinch = ctrlKey).
-      const nextZoom = clamp(state.zoom * Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015)), 0.1, 20.0);
-      state.zoom = nextZoom;
-      camera.zoom = state.zoom;
-      camera.updateProjectionMatrix();
-      updateCamera();
-    };
-
-    renderer.domElement.addEventListener("pointerdown", onPointerDown);
-    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
-    renderer.domElement.addEventListener("contextmenu", event => event.preventDefault());
-
-    updateCamera();
-    resize();
-    window.addEventListener("resize", resize);
-
-    return () => {
-      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
-      renderer.domElement.removeEventListener("wheel", onWheel);
-      window.removeEventListener("resize", resize);
-      // Free everything on the GPU and release the WebGL context (browsers cap live contexts at ~16).
-      const sceneToFree = threeStateRef.current?.scene;
-      if (sceneToFree) {
-        disposeObjectDeep(sceneToFree);
-        if (sceneToFree.environment) sceneToFree.environment.dispose();
-        if (sceneToFree.background instanceof THREE.Texture) sceneToFree.background.dispose();
-      }
-      renderer.dispose();
-      renderer.forceContextLoss();
-      container.removeChild(renderer.domElement);
-      threeStateRef.current = null;
-      // Clear object cache on cleanup
-      threeObjectCacheRef.current.clear();
-      prevItemsRef.current = [];
-    };
-  }, [canvasSize.height, canvasSize.width, viewMode]);
-
-  useEffect(() => {
-    if (viewMode !== "iso3d") return;
-    rebuildThreeScene();
-  }, [items, backgroundImg, bgSettings, canvasSize, gridSize, showGrid, viewMode, sceneBackgroundImg, backgroundMode, terrainHeights, buildingLabelDefaults, elevationOverlay]);
-
-  useEffect(() => {
-    if (viewMode !== "iso3d") return;
-    const id = window.requestAnimationFrame(() => {
-      updateThreeScenePositions();
-      const state = threeStateRef.current;
-      if (state) {
-        state.renderer.render(state.scene, state.camera);
-      }
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [items, viewMode]);
-
-  useEffect(() => {
-    if (viewMode !== "iso3d") return;
-    const id = window.requestAnimationFrame(() => {
-      updateThreeScenePositions();
-      const state = threeStateRef.current;
-      if (state) {
-        state.renderer.render(state.scene, state.camera);
-      }
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [frustumSettings, selectedId, viewMode, showDoriZones]);
-
-  useEffect(() => {
-    if (viewMode !== "iso3d") return;
-    const id = window.requestAnimationFrame(() => {
-      if (!threeStateRef.current) return;
-      if (threeObjectCacheRef.current.size === 0) {
-        rebuildThreeScene();
-      } else {
-        updateThreeScenePositions();
-        const state = threeStateRef.current;
-        if (state) {
-          state.renderer.render(state.scene, state.camera);
-        }
-      }
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [viewMode, terrainHeights]);
-
-  useEffect(() => {
-    if (viewMode !== "plan") {
+    if (viewMode === "nvr") {
       setVertexInsertMode(false);
     }
   }, [viewMode]);
@@ -5588,33 +3273,34 @@ export default function SecurityPlanner() {
     const selectedItem = items.find(i => i.id === selectedId);
     const cam = selectedItem?.type === "camera" ? (selectedItem as CameraItem) : null;
     if (!cam) return;
-    const frame = window.requestAnimationFrame(() => {
-      const canvas = cameraPreviewRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      try {
-        const view = renderCameraViewToCanvas(cam, Math.max(320, canvas.width));
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(view, 0, 0, canvas.width, canvas.height);
-      } catch (err) {
-        console.error("Camera preview failed", err);
-      }
-    });
-    return () => window.cancelAnimationFrame(frame);
+    // While dragging, redraw at most every 150 ms (the scene is rebuilt for each render).
+    const wait = interactingRef.current ? Math.max(0, 150 - (performance.now() - lastPreviewRef.current)) : 0;
+    let frame = 0;
+    const timer = window.setTimeout(() => {
+      frame = window.requestAnimationFrame(() => {
+        lastPreviewRef.current = performance.now();
+        const canvas = cameraPreviewRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        try {
+          const view = renderCameraViewToCanvas(cam, Math.max(320, canvas.width));
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(view, 0, 0, canvas.width, canvas.height);
+        } catch (err) {
+          console.error("Camera preview failed", err);
+        }
+      });
+    }, wait);
+    return () => {
+      window.clearTimeout(timer);
+      window.cancelAnimationFrame(frame);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg, terrainHeights, gridSize, backgroundImg]);
+  }, [selectedId, items, showCameraPreview, bgSettings, canvasSize, sceneBackgroundImg, terrainHeights, gridSize, backgroundImg, interacting, roofPhoto, previewWidth]);
+  const lastPreviewRef = useRef(0);
 
 
-  // React attaches wheel listeners as passive, so preventDefault there can't stop the page scrolling
-  // while zooming the plan; block it with a native non-passive listener.
-  useEffect(() => {
-    const el = svgRef.current;
-    if (!el) return;
-    const block = (event: WheelEvent) => event.preventDefault();
-    el.addEventListener("wheel", block, { passive: false });
-    return () => el.removeEventListener("wheel", block);
-  }, [viewMode]);
 
   // --- Event Handlers ---
 
@@ -5635,74 +3321,9 @@ export default function SecurityPlanner() {
     };
   };
 
-  const getSvgMousePos = (e: React.MouseEvent) =>
-    getSvgMousePosFor(svgRef.current, e, panOffset, zoom);
-
   const getMiniSvgMousePos = (e: React.MouseEvent) =>
     getSvgMousePosFor(demMiniRef.current, e);
 
-  const handleMouseDown = (e: React.MouseEvent, id: string, type: InteractionType = "move", variant?: string) => {
-    if (mode !== "select") {
-      // Placing something on top of an existing item (e.g. a camera onto a house) still places it.
-      if (mode.startsWith("add-") && viewMode === "plan") {
-        e.stopPropagation();
-        handleAddItem(e, mode);
-        consumedClickRef.current = true;
-      }
-      return;
-    }
-    if (viewMode === "iso3d") return;
-    if (e.altKey) return;
-    e.stopPropagation();
-
-    const item = items.find(i => i.id === id);
-    if (!item) return;
-
-    setSelectedId(id);
-    const pos = getSvgMousePos(e);
-
-    // Shift+click on an edge of the selected building inserts a corner (a plain press always moves it).
-    if (type === "move" && e.shiftKey && selectedId === id && item.type === "building") {
-      const building = item as BuildingItem;
-      const worldPoints = getBuildingEdgePointsWorld(building);
-      for (let i = 0; i < worldPoints.length; i++) {
-        const a = worldPoints[i];
-        const b = worldPoints[(i + 1) % worldPoints.length];
-        const ab = { x: b.x - a.x, y: b.y - a.y };
-        const ap = { x: pos.x - a.x, y: pos.y - a.y };
-        const abLenSq = ab.x * ab.x + ab.y * ab.y || 1;
-        const t = Math.max(0, Math.min(1, (ap.x * ab.x + ap.y * ab.y) / abLenSq));
-        const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
-        const dist = Math.sqrt((pos.x - proj.x) ** 2 + (pos.y - proj.y) ** 2);
-
-        if (dist < 10 * planUi) {
-          handleInsertBuildingVertexAtPoint(id, proj);
-          setTimeout(() => saveHistory(), 50);
-          return;
-        }
-      }
-    }
-    const basePos = item.type === "camera" ? getCameraPlanPosition(item as CameraItem) : { x: item.x, y: item.y };
-
-    let startVal = { ...item } as any;
-    if (type === "fov" && item.type === "camera") {
-      const deltaX = pos.x - basePos.x;
-      const deltaY = pos.y - basePos.y;
-      const mouseAngle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-      const fovValue = item.hFov ?? item.fov;
-      const handleAngle = item.rotation + (variant === "left" ? -fovValue / 2 : fovValue / 2);
-      startVal = { ...item, fovHandleOffset: normalizeAngle(mouseAngle - handleAngle) };
-    }
-
-    setInteractionState({
-      type,
-      itemId: id,
-      startMouse: pos,
-      startVal,
-      variant,
-      snap: snapToGrid && !e.altKey
-    });
-  };
   const updateDemTransformDrag = (pos: { x: number; y: number }, snapRotation?: boolean) => {
     if (!demTransformDrag || !demPreview) return false;
     const start = demTransformDrag.startTransform;
@@ -5727,159 +3348,6 @@ export default function SecurityPlanner() {
     return true;
   };
 
-  const handleSvgMouseMove = (e: React.MouseEvent) => {
-    {
-      const hoverPos = getSvgMousePos(e);
-      updateElevationReadout(hoverPos.x, hoverPos.y);
-      updateCameraReadout(hoverPos.x, hoverPos.y);
-      const brushCursor = planBrushCursorRef.current;
-      if (brushCursor) {
-        brushCursor.setAttribute("cx", `${hoverPos.x}`);
-        brushCursor.setAttribute("cy", `${hoverPos.y}`);
-      }
-    }
-    if (updateDemTransformDrag(getSvgMousePos(e), e.shiftKey)) return;
-    // Handle camera placement preview
-    if (mode === "add-camera" && viewMode === "plan") {
-      const pos = getSvgMousePos(e);
-      const edge = findNearestBuildingEdge(pos);
-      if (edge && edge.distance < CAMERA_WALL_SNAP_FT) {
-        setCameraPlacementPreview({
-          buildingId: edge.buildingId,
-          edgeIndex: edge.edgeIndex,
-          edgeT: edge.edgeT,
-          point: edge.point,
-          rotation: edge.rotation
-        });
-      } else {
-        setCameraPlacementPreview(null);
-      }
-    } else if (cameraPlacementPreview) {
-      setCameraPlacementPreview(null);
-    }
-
-    if (isBackgroundDragging) {
-      const pos = getSvgMousePos(e);
-      setBgSettings({
-        ...bgSettings,
-        x: bgDragStart.bgX + (pos.x - bgDragStart.x),
-        y: bgDragStart.bgY + (pos.y - bgDragStart.y)
-      });
-      return;
-    }
-    if (isPanning) {
-      // panOffset is in SVG viewBox units; convert the screen-pixel drag so the plan follows the cursor.
-      const k = svgRef.current?.getScreenCTM()?.a || 1;
-      const dx = (e.clientX - panStart.x) / k;
-      const dy = (e.clientY - panStart.y) / k;
-      setPanOffset({ x: panStart.panX + dx, y: panStart.panY + dy });
-      return;
-    }
-    if (!interactionState.itemId || !svgRef.current) return;
-
-    const pos = getSvgMousePos(e);
-    const item = items.find(i => i.id === interactionState.itemId);
-    if (!item) return;
-    const basePos = item.type === "camera" ? getCameraPlanPosition(item as CameraItem) : { x: item.x, y: item.y };
-
-    if (interactionState.type === "move") {
-      const dx = pos.x - interactionState.startMouse.x;
-      const dy = pos.y - interactionState.startMouse.y;
-      const nextX = interactionState.startVal.x + dx;
-      const nextY = interactionState.startVal.y + dy;
-      if (item.type === "camera" && item.mount?.type === "building" && item.mount.buildingId) {
-        const building = getBuildingById(item.mount.buildingId);
-        if (building) {
-          const worldPoints = getBuildingEdgePointsWorld(building);
-          if (worldPoints.length >= 2) {
-            const edgeIndex = clamp(item.mount.edgeIndex ?? 0, 0, worldPoints.length - 1);
-            const nextIndex = (edgeIndex + 1) % worldPoints.length;
-            const a = worldPoints[edgeIndex];
-            const b = worldPoints[nextIndex];
-            const ab = { x: b.x - a.x, y: b.y - a.y };
-            const ap = { x: nextX - a.x, y: nextY - a.y };
-            const abLenSq = ab.x * ab.x + ab.y * ab.y || 1;
-            let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
-            t = clamp(t, 0, 1);
-            const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
-            updateItem(interactionState.itemId, {
-              x: proj.x,
-              y: proj.y,
-              mount: { ...item.mount, edgeT: t }
-            });
-            return;
-          }
-        }
-      }
-      updateItem(interactionState.itemId, {
-        x: snapValue(nextX, interactionState.snap),
-        y: snapValue(nextY, interactionState.snap)
-      });
-    } else if (interactionState.type === "move-label" && item.type === "camera") {
-      const dx = pos.x - interactionState.startMouse.x;
-      const dy = pos.y - interactionState.startMouse.y;
-
-      const defaultOffset = defaultCameraLabelOffset(interactionState.startVal.rotation ?? 0);
-      const startOffset = interactionState.startVal.labelOffset || { x: defaultOffset.x * planUi, y: defaultOffset.y * planUi };
-
-      updateItem(interactionState.itemId, {
-        labelOffset: {
-          x: startOffset.x + dx,
-          y: startOffset.y + dy
-        }
-      });
-    } else if (interactionState.type === "move-label" && item.type === "building") {
-      const dx = pos.x - interactionState.startMouse.x;
-      const dy = pos.y - interactionState.startMouse.y;
-      const localDelta = rotatePoint({ x: dx, y: dy }, -item.rotation);
-      const startOffset = interactionState.startVal.labelOffset || { x: 0, y: 0 };
-      updateItem(interactionState.itemId, {
-        labelOffset: {
-          x: startOffset.x + localDelta.x,
-          y: startOffset.y + localDelta.y
-        }
-      });
-    } else if (interactionState.type === "rotate") {
-      const deltaX = pos.x - basePos.x;
-      const deltaY = pos.y - basePos.y;
-      const angle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-      // A camera's aim handle sits in the direction it faces; other items' handles sit above them (-90°).
-      let rotation = item.type === "camera" ? angle : angle + 90;
-      if (e.shiftKey) rotation = Math.round(rotation / 15) * 15;
-      rotation = ((rotation % 360) + 360) % 360;
-      updateItem(interactionState.itemId, { rotation });
-    } else if (interactionState.type === "fov" && item.type === "camera") {
-      const deltaX = pos.x - basePos.x;
-      const deltaY = pos.y - basePos.y;
-      const mouseAngle = (Math.atan2(deltaY, deltaX) * 180) / Math.PI;
-
-      const offset = interactionState.startVal?.fovHandleOffset ?? 0;
-      const targetAngle = normalizeAngle(mouseAngle - offset);
-      const diff = normalizeAngle(targetAngle - item.rotation);
-      const effective = interactionState.variant === "left" ? -diff : diff;
-      if (effective <= 0) return;
-
-      const newFov = clamp(effective * 2, 10, 180);
-      updateItem(interactionState.itemId, { fov: newFov, hFov: newFov });
-    } else if (interactionState.type === "range" && item.type === "camera") {
-      const deltaX = pos.x - basePos.x;
-      const deltaY = pos.y - basePos.y;
-      const dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-      updateItem(interactionState.itemId, { range: Math.max(dist, 5) });
-    } else if (interactionState.type === "vertex" && item.type === "building") {
-      const local = toLocalPoint(pos, item);
-      const points = getBuildingPoints(item);
-      const index = typeof interactionState.variant === "string" ? parseInt(interactionState.variant, 10) : Number(interactionState.variant);
-      if (!Number.isNaN(index) && points[index]) {
-        const snapped = {
-          x: snapValue(local.x, interactionState.snap),
-          y: snapValue(local.y, interactionState.snap)
-        };
-        const next = points.map((point, i) => (i === index ? snapped : point));
-        updateItem(interactionState.itemId, { points: next });
-      }
-    }
-  };
 
   const endDemTransformDrag = () => {
     if (demTransformDrag) {
@@ -5898,15 +3366,6 @@ export default function SecurityPlanner() {
     endDemTransformDrag();
   };
 
-  const handleSvgMouseUp = () => {
-    if (interactionState.type) {
-      saveHistory();
-    }
-    endDemTransformDrag();
-    setIsPanning(false);
-    setIsBackgroundDragging(false);
-    setInteractionState({ type: null, itemId: null, startMouse: { x: 0, y: 0 }, startVal: null, snap: false });
-  };
 
   // Initial history save & setup
   useEffect(() => {
@@ -5917,164 +3376,6 @@ export default function SecurityPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A press that turned into a drag (pan, move, resize) must not also count as a click on the background.
-  const planPressRef = useRef<{ x: number; y: number } | null>(null);
-  const wasPlanDrag = (e: React.MouseEvent) => {
-    const start = planPressRef.current;
-    return !!start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4;
-  };
-
-  const handleSvgClick = (e: React.MouseEvent) => {
-    if (viewMode === "iso3d") return;
-    if (consumedClickRef.current) {
-      consumedClickRef.current = false;
-      return;
-    }
-    if (wasPlanDrag(e)) return;
-    if (isTerrainMode) return;
-    if (mode === "trace-building") {
-      traceRoofAt(getSvgMousePos(e));
-      return;
-    }
-    if (isPanning) return;
-    if (vertexInsertMode && selectedId) {
-      const selectedItem = items.find(item => item.id === selectedId);
-      if (selectedItem && selectedItem.type === "building") {
-        const pos = getSvgMousePos(e);
-        handleInsertBuildingVertexAtPoint(selectedId, pos);
-        setVertexInsertMode(false);
-        return;
-      }
-    }
-    if (e.target === svgRef.current || (e.target as Element).tagName === "image" || (e.target as Element).id === "grid-bg") {
-      if (mode !== "select") {
-        handleAddItem(e, mode);
-      } else {
-        setSelectedId(null);
-      }
-    }
-  };
-
-  // Terrain brush in the 2D plan view. Keeps applying while the button is held, even without moving.
-  const handlePlanTerrainMouseDown = (e: React.MouseEvent) => {
-    if (!isTerrainMode || viewMode !== "plan" || e.button !== 0 || e.altKey || isSpacePressed) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const pan = panOffset;
-    const scale = zoom;
-    const toWorld = (ev: { clientX: number; clientY: number }) =>
-      getSvgMousePosFor(svgRef.current, ev as React.MouseEvent, pan, scale);
-    const tool = terrainTool;
-    const direction: 1 | -1 = tool === "sculpt" && e.shiftKey ? -1 : 1;
-    let point = toWorld(e);
-    if (tool === "flatten" && terrainFlattenSampleRef.current) {
-      const target = getGridHeight(point.x, point.y);
-      setTerrainFlattenTarget(target);
-      terrainFlattenTargetRef.current = target;
-    }
-    let last = performance.now();
-    let frame = 0;
-    const tick = () => {
-      const now = performance.now();
-      const dt = Math.min((now - last) / 1000, 0.05);
-      last = now;
-      applyBrushStroke(point.x, point.y, tool, direction, dt || 0.016);
-      frame = window.requestAnimationFrame(tick);
-    };
-    applyBrushStroke(point.x, point.y, tool, direction, 0.016);
-    frame = window.requestAnimationFrame(tick);
-    const move = (ev: MouseEvent) => {
-      point = toWorld(ev);
-      const brushCursor = planBrushCursorRef.current;
-      if (brushCursor) {
-        brushCursor.setAttribute("cx", `${point.x}`);
-        brushCursor.setAttribute("cy", `${point.y}`);
-      }
-      updateElevationReadout(point.x, point.y);
-    };
-    const up = () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      saveHistory(undefined, terrainHeightsRef.current);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
-  const handleSvgMouseDown = (e: React.MouseEvent) => {
-    if (backgroundImg && mapMoveMode) {
-      e.preventDefault();
-      const pos = getSvgMousePos(e);
-      setIsBackgroundDragging(true);
-      setBgDragStart({ x: pos.x, y: pos.y, bgX: bgSettings.x, bgY: bgSettings.y });
-      return;
-    }
-    if (e.altKey) {
-      e.preventDefault();
-      setIsPanning(true);
-      setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
-      return;
-    }
-    if (e.button === 1 || e.button === 2 || isSpacePressed || (e.button === 0 && mode === "select")) {
-      e.preventDefault();
-      setIsPanning(true);
-      setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
-    }
-  };
-
-  // Wheel on the plan: pinch or mouse wheel zooms around the cursor; two-finger trackpad scroll pans.
-  // Registered natively (non-passive) so a pinch never zooms the whole page.
-  const planWheelRef = useRef<(e: WheelEvent) => void>(() => {});
-  planWheelRef.current = (e: WheelEvent) => {
-    e.preventDefault();
-    if (!svgRef.current) return;
-    const CTM = svgRef.current.getScreenCTM();
-    if (!CTM) return;
-    const lineMode = e.deltaMode !== 0;
-    const mouseWheel = lineMode || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
-    if (!e.ctrlKey && !mouseWheel) {
-      // Trackpad scroll: move the map with the fingers
-      setPanOffset(prev => ({ x: prev.x - e.deltaX / CTM.a, y: prev.y - e.deltaY / CTM.d }));
-      return;
-    }
-    const rawX = (e.clientX - CTM.e) / CTM.a;
-    const rawY = (e.clientY - CTM.f) / CTM.d;
-    const worldX = (rawX - panOffset.x) / zoom;
-    const worldY = (rawY - panOffset.y) / zoom;
-    const delta = (lineMode ? e.deltaY * 33 : e.deltaY) * (e.ctrlKey ? 0.01 : 0.0015);
-    const nextZoom = clamp(zoom * Math.exp(-delta), 0.3, MAX_ZOOM);
-    setZoom(nextZoom);
-    setPanOffset({ x: rawX - worldX * nextZoom, y: rawY - worldY * nextZoom });
-  };
-  useEffect(() => {
-    const el = svgRef.current;
-    if (!el || viewMode !== "plan") return;
-    const handler = (e: WheelEvent) => planWheelRef.current(e);
-    el.addEventListener("wheel", handler, { passive: false });
-    return () => el.removeEventListener("wheel", handler);
-  }, [viewMode]);
-
-  useEffect(() => {
-    const el = svgRef.current;
-    if (!el || viewMode !== "plan") return;
-    const update = () => {
-      const r = el.getBoundingClientRect();
-      setPlanRect(prev => (prev.width === r.width && prev.height === r.height ? prev : { width: r.width, height: r.height }));
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [viewMode]);
-
-  // Plan point -> pixel position inside the plan container.
-  const planToScreen = (p: { x: number; y: number }) => {
-    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
-    const offX = (planRect.width - canvasSize.width * scale) / 2;
-    const offY = (planRect.height - canvasSize.height * scale) / 2;
-    return { x: offX + (panOffset.x + p.x * zoom) * scale, y: offY + (panOffset.y + p.y * zoom) * scale, scale };
-  };
 
   // Bottom-center tool dock over the map (2D and 3D): the placing tools, terrain, undo/redo.
   const renderToolDock = () => {
@@ -6126,95 +3427,8 @@ export default function SecurityPlanner() {
     );
   };
 
-  // 3D view: on-screen orbit controls (rotate, tilt, zoom, top-down, reset).
-  const nav3d = (action: "left" | "right" | "up" | "down" | "in" | "out" | "top") => {
-    const state = threeStateRef.current;
-    if (!state || !state.orbit) return;
-    const o = state.orbit;
-    if (action === "left") o.azimuth -= Math.PI / 8;
-    if (action === "right") o.azimuth += Math.PI / 8;
-    if (action === "up") o.polar = clamp(o.polar + 0.15, 0.1, Math.PI / 2.05);
-    if (action === "down") o.polar = clamp(o.polar - 0.15, 0.1, Math.PI / 2.05);
-    if (action === "top") o.polar = Math.PI / 2.05;
-    if (action === "in" || action === "out") {
-      state.zoom = clamp(state.zoom * (action === "in" ? 1.25 : 0.8), 0.1, 20);
-      state.camera.zoom = state.zoom;
-      state.camera.updateProjectionMatrix();
-    }
-    const { azimuth, polar, distance } = o;
-    state.camera.position.set(
-      state.target.x + Math.cos(azimuth) * Math.cos(polar) * distance,
-      state.target.y + Math.sin(polar) * distance,
-      state.target.z + Math.sin(azimuth) * Math.cos(polar) * distance
-    );
-    state.camera.lookAt(state.target);
-    state.renderer.render(state.scene, state.camera);
-  };
-
-  const renderPlanOverlays = () => {
-    const scale = Math.min(planRect.width / canvasSize.width, planRect.height / canvasSize.height) || 0;
-    const pxPerFoot = (scale * zoom) / (planGeoRef?.unitsPerFoot ?? 1);
-    const bar = niceScaleBar(pxPerFoot, 110);
-    const sel = selectedId ? items.find(i => i.id === selectedId) : null;
-    const selBounds = sel ? itemPlanBounds(sel) : null;
-    let actionBar: React.ReactNode = null;
-    if (sel && selBounds && mode === "select" && !interactionState.type && !isTerrainMode && planRect.width > 0) {
-      const top = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.minY });
-      const bottom = planToScreen({ x: (selBounds.minX + selBounds.maxX) / 2, y: selBounds.maxY });
-      const above = top.y - (sel.type === "camera" ? 70 : 66);
-      const y = above > 56 ? above : bottom.y + (sel.type === "camera" ? 40 : 14);
-      const x = clamp(top.x, 110, Math.max(110, planRect.width - 110));
-      const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10";
-      actionBar = (
-        <div
-          role="toolbar"
-          aria-label="Selection actions"
-          className="absolute z-30 flex items-center gap-0.5 rounded-xl border border-white/10 bg-zinc-900/95 p-1 shadow-xl backdrop-blur"
-          style={{ left: x, top: y, transform: "translateX(-50%)" }}
-          onMouseDown={e => e.stopPropagation()}
-        >
-          <button className={btn} title="Duplicate (Ctrl/⌘+D)" aria-label="Duplicate" onClick={duplicateSelected}><Copy className="w-4 h-4" /></button>
-          <button className={btn} title={sel.type === "camera" ? "Turn 15° clockwise" : "Rotate 15° clockwise"} aria-label="Rotate" onClick={() => rotateSelected(15)}><RotateCw className="w-4 h-4" /></button>
-          <button className={btn} title="Zoom to it (F)" aria-label="Zoom to selection" onClick={zoomToSelection}><Crosshair className="w-4 h-4" /></button>
-          <span className="w-px h-5 bg-white/10 mx-0.5" />
-          <button className={`${btn} hover:!text-red-300`} title="Delete (Del)" aria-label="Delete" onClick={() => { deleteItem(sel.id); setTimeout(() => saveHistory(), 50); }}><Trash2 className="w-4 h-4" /></button>
-        </div>
-      );
-    }
-    const ctl = "w-8 h-8 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10";
-    return (
-      <>
-        {actionBar}
-        <div className="absolute top-3 right-3 z-20 flex items-start gap-2">
-          {bar && (
-            <div className="rounded-lg bg-zinc-900/85 border border-white/10 px-2.5 py-1.5 text-[11px] text-slate-200 shadow" title="Scale">
-              <div className="font-semibold mb-1" data-testid="scale-bar-label">{bar.label}</div>
-              <div data-testid="scale-bar" style={{ width: bar.px }} className="h-1.5 border-x-2 border-b-2 border-slate-200" />
-            </div>
-          )}
-          {planGeoRef && (
-            <div className="w-10 h-12 rounded-lg bg-zinc-900/85 border border-white/10 flex flex-col items-center justify-center text-slate-200 shadow" title="North is up" aria-label="North arrow">
-              <Navigation2 className="w-4 h-4 fill-current" />
-              <span className="text-[10px] font-bold leading-none mt-0.5">N</span>
-            </div>
-          )}
-          <div className="flex flex-col rounded-lg bg-zinc-900/85 border border-white/10 overflow-hidden shadow">
-            <button className={ctl} title="Zoom in" aria-label="Zoom in" onClick={() => zoomBy(1.25)}><ZoomIn className="w-4 h-4" /></button>
-            <button className={ctl} title="Zoom out" aria-label="Zoom out" onClick={() => zoomBy(0.8)}><ZoomOut className="w-4 h-4" /></button>
-            <button className={ctl} title="Zoom to fit the site (0)" aria-label="Zoom to fit" onClick={zoomToFit}><Maximize2 className="w-4 h-4" /></button>
-          </div>
-        </div>
-      </>
-    );
-  };
 
   // --- Render Helpers ---
-
-  // Scale for plan "chrome" (camera icons, labels, drag handles) so it stays a constant size on screen
-  // regardless of how many feet the site spans or how far you zoom.
-  // Bigger handles on touch screens (fingers need ~44 px targets).
-  const coarsePointer = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
-  const planUi = (Math.max(canvasSize.width, canvasSize.height) / 1000 / zoom) * (coarsePointer ? 1.5 : 1);
 
   // Building inspector order: the everyday settings first, the rest folded under "More options".
   // (Other item types keep their natural order.)
@@ -6315,7 +3529,7 @@ export default function SecurityPlanner() {
     [coverageModel, items]
   );
   const blindSpots = useMemo(() => {
-    if (!showBlindSpots || viewMode !== "plan") return null;
+    if (!showBlindSpots || viewMode === "nvr") return null;
     // Your property, not the whole imported area: around the cameras, the marked spots and the
     // buildings the cameras are on (falls back to the whole plan with nothing placed).
     const pts: { x: number; y: number }[] = [...coverageModel.cameras, ...targetItems];
@@ -6352,6 +3566,126 @@ export default function SecurityPlanner() {
     setTimeout(() => saveHistory(), 50);
   };
 
+  // --- What the map view shows, and what it reports back ---
+  const viewDoc = useMemo<ViewDoc>(() => ({
+    items,
+    canvas: canvasSize,
+    unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
+    gridSize,
+    showGrid,
+    snapToGrid,
+    heights: terrainHeights,
+    terrain: terrainStats,
+    background: { url: backgroundImg, rect: { x: bgSettings.x, y: bgSettings.y, width: bgSettings.width, height: bgSettings.height }, opacity: bgSettings.opacity },
+    overlay: hasTerrain ? elevationOverlay : "off",
+    contours: { segments: contourSegments, interval: contourInterval },
+    shadeUrl: hasTerrain && elevationOverlay === "shaded" ? elevationShadeUrl : null,
+    cones: {
+      visible: frustumSettings.visible,
+      showAll: frustumSettings.showAll !== false,
+      dori: showDoriZones,
+      opacity: frustumSettings.opacity,
+      color: frustumSettings.useCameraColor ? null : frustumSettings.color
+    },
+    targetStatus: Object.fromEntries(targetItems.map(t => [t.id, targetStatus(targetResults.get(t.id))])),
+    blindSpots: blindSpots ? { runs: blindSpots.runs, area: blindSpots.area } : null,
+    roofPhoto,
+    geo: !!planGeoRef
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [items, canvasSize, planGeoRef, gridSize, showGrid, snapToGrid, terrainHeights, terrainStats, backgroundImg, bgSettings, hasTerrain, elevationOverlay, contourSegments, contourInterval, elevationShadeUrl, frustumSettings, showDoriZones, targetResults, blindSpots, roofPhoto]);
+
+  // A sample of what a click would place, for the preview under the cursor.
+  const placePreview = useMemo(() => {
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target" } as Partial<Record<ToolMode, NewItemKind>>)[mode];
+    if (!kind) return null;
+    return createItem(kind, 0, 0, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, ...toolDefaults });
+  }, [mode, toolDefaults, planGeoRef]);
+
+  const viewTool = useMemo<ViewTool>(() => ({
+    mode,
+    terrain: isTerrainMode,
+    terrainTool,
+    brushRadius: Math.max(gridSize, clamp(terrainBrushSize, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * gridSize),
+    aimingCameraId,
+    vertexInsert: vertexInsertMode,
+    mapMove: mapMoveMode && !!backgroundImg,
+    preview: placePreview
+  }), [mode, isTerrainMode, terrainTool, gridSize, terrainBrushSize, aimingCameraId, vertexInsertMode, mapMoveMode, backgroundImg, placePreview]);
+
+  // 2D / 3D tabs are poses of the same view. A tilt done in the view switches the tab to match.
+  const [poseSignal, setPoseSignal] = useState(0);
+  const poseFromViewRef = useRef(false);
+  useEffect(() => {
+    if (viewMode === "nvr") return;
+    if (poseFromViewRef.current) {
+      poseFromViewRef.current = false;
+      return;
+    }
+    setPoseSignal(s => s + 1);
+  }, [viewMode]);
+
+  const viewCallbacks: ViewCallbacks = {
+    onSelect: id => {
+      setSelectedId(id);
+      if (id) setMode("select");
+    },
+    onPlace: (tool, p) => {
+      if (placeNewItemAt(tool, p.x, p.y)) setTimeout(() => saveHistory(), 50);
+    },
+    onTrace: p => traceRoofAt(p),
+    onAim: p => {
+      if (!aimingCameraId) return;
+      aimCameraAt(aimingCameraId, p);
+      setAimingCameraId(null);
+    },
+    onChange: (id, patch) => updateItem(id, patch),
+    onCommit: () => setTimeout(() => saveHistory(), 30),
+    onInsertVertex: (id, p) => {
+      handleInsertBuildingVertexAtPoint(id, p);
+      setVertexInsertMode(false);
+      setTimeout(() => saveHistory(), 50);
+    },
+    onTerrainBrush: (p, dt, lower, phase) => {
+      const tool = terrainToolRef.current;
+      if (phase === "end") {
+        saveHistory(undefined, terrainHeightsRef.current);
+        return;
+      }
+      if (phase === "start" && tool === "flatten" && terrainFlattenSampleRef.current) {
+        const target = getGridHeight(p.x, p.y, terrainHeightsRef.current);
+        setTerrainFlattenTarget(target);
+        terrainFlattenTargetRef.current = target;
+      }
+      applyBrushStroke(p.x, p.y, tool, tool === "sculpt" && lower ? -1 : 1, dt);
+      terrainHoverRef.current = { pointX: p.x, pointZ: p.y };
+      updateElevationReadout(p.x, p.y);
+    },
+    onBackgroundDrag: (dx, dy, phase) => {
+      if (phase === "move") setBgSettings(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      else setTimeout(() => saveHistory(), 30);
+    },
+    onHover: p => {
+      if (p) {
+        updateElevationReadout(p.x, p.y);
+        updateCameraReadout(p.x, p.y);
+        terrainHoverRef.current = { pointX: p.x, pointZ: p.y };
+      } else {
+        updateElevationReadout(-1, -1);
+        if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0";
+      }
+    },
+    onPose: pose => {
+      const next: ViewMode = pose === "top" ? "plan" : "iso3d";
+      if (viewMode === "nvr" || viewMode === next) return;
+      poseFromViewRef.current = true;
+      setViewMode(next);
+    },
+    onInteraction: active => {
+      interactingRef.current = active;
+      setInteracting(active);
+    }
+  };
+
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
@@ -6366,9 +3700,10 @@ export default function SecurityPlanner() {
       case "add-target": return "Click a door, gate or driveway you want covered · Esc to cancel";
       default:
         if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
-        if (selectedCamera) return "Drag the blue dot to aim · drag the side dots to widen · drag the tip to change range · Shift snaps";
-        if (selectedItem?.type === "building") return "Drag to move · drag corners to reshape · Shift+click an edge to add a corner · drag the label to move it";
-        return null;
+        if (selectedCamera) return "Drag the camera to move it · blue dot aims it · side dots widen · tip sets range · bar above sets height";
+        if (selectedItem?.type === "building") return "Drag to move · corners reshape · pull an edge's middle dot to add a corner · bar on top sets height · ↻ rotates";
+        if (selectedItem) return "Drag to move it · Delete removes it";
+        return "Drag to pan · scroll or pinch to zoom · right-drag or Shift+drag to rotate and tilt";
     }
   })();
 
@@ -6415,7 +3750,7 @@ export default function SecurityPlanner() {
 
   const selectedBuildingFont = selectedItem?.type === "building" ? getBuildingLabelFont(selectedItem as BuildingItem) : null;
   const cameraAspect = getCameraAspectValue(selectedCamera);
-  const cameraPreviewWidth = 320;
+  const cameraPreviewWidth = previewWidth;
   const cameraPreviewHeight = Math.round(cameraPreviewWidth / cameraAspect);
   const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
   const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
@@ -6846,6 +4181,13 @@ export default function SecurityPlanner() {
                     </p>
                   </div>
 
+                  <label className="flex items-center justify-between gap-2 cursor-pointer" title="Trees and parked cars are found on the satellite photo and placed for you. Check them after importing.">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Trees and parked cars</span>
+                    <span className="flex items-center gap-2 text-xs text-slate-300">
+                      Place from the photo
+                      <input type="checkbox" checked={importTreesCars} onChange={e => setImportTreesCars(e.target.checked)} className="accent-emerald-500" aria-label="Place trees and parked cars from the photo" />
+                    </span>
+                  </label>
                   <div className="space-y-2">
                     <label className="flex items-center justify-between gap-2 cursor-pointer">
                       <span className="text-[10px] uppercase font-bold text-slate-400">3D buildings</span>
@@ -7079,7 +4421,7 @@ export default function SecurityPlanner() {
           </div>
         </div>
       )}
-      {vertexInsertMode && viewMode === "plan" && selectedId && (
+      {vertexInsertMode && viewMode !== "nvr" && selectedId && (
         <div className="absolute left-1/2 bottom-10 -translate-x-1/2 rounded-full bg-emerald-600/90 px-4 py-2 text-xs font-semibold text-white shadow-xl z-50 backdrop-blur-md">
           Click an edge to insert a vertex.
         </div>
@@ -7174,21 +4516,9 @@ export default function SecurityPlanner() {
       />
       {showShortcuts && <ShortcutsDialog onClose={() => setShowShortcuts(false)} />}
 
-      {demAlignMode && viewMode !== "plan" && demPreview && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 text-slate-200 shadow-lg backdrop-blur">
-          <span className="text-xs font-semibold">DEM Align is active. Editing uses the mini-map.</span>
-          <button
-            onClick={() => setViewMode("plan")}
-            className="px-2 py-1 rounded-full text-[11px] font-semibold border border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
-          >
-            Go to Plan View
-          </button>
-        </div>
-      )}
-
       {demAlignMode && demPreview && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-2 rounded-full border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
-          <span className="text-xs font-semibold text-slate-300 tracking-wide">DEM Align ({viewMode === "plan" ? "Plan" : "3D"})</span>
+          <span className="text-xs font-semibold text-slate-300 tracking-wide">DEM Align: drag on the mini-map</span>
           <div className="h-4 w-px bg-white/10" />
           {([
             { id: "move", label: "Move" },
@@ -7680,823 +5010,23 @@ export default function SecurityPlanner() {
         {/* --- Main Workspace --- */}
         <div className={`w-full h-full relative overflow-auto bg-zinc-950 flex ${workspaceLayoutClass} ${workspaceRightPadding} custom-scrollbar`}>
           <div className="bg-zinc-900 relative overflow-hidden w-full h-full">
-            {viewMode === "plan" ? (
-              <>
-              <svg
-                ref={svgRef}
-                data-testid="plan"
-                width="100%"
-                height="100%"
-                viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
-                preserveAspectRatio="xMidYMid meet"
-                className={`bg-white block ${mode === "select" && !isTerrainMode ? "cursor-default" : "cursor-crosshair"}`}
-                onMouseMove={handleSvgMouseMove}
-                onMouseUp={handleSvgMouseUp}
-                onMouseDown={handleSvgMouseDown}
-                onMouseDownCapture={e => {
-                  planPressRef.current = { x: e.clientX, y: e.clientY };
-                  if (aimingCameraId) {
-                    // Aim mode: the next click on the plan (anything on it) is where the camera should look.
-                    e.stopPropagation();
-                    e.preventDefault();
-                    aimCameraAt(aimingCameraId, getSvgMousePos(e));
-                    setAimingCameraId(null);
-                    consumedClickRef.current = true;
-                    return;
-                  }
-                  handlePlanTerrainMouseDown(e);
-                }}
-                onMouseLeave={() => { updateElevationReadout(-1, -1); if (cameraReadoutRef.current) cameraReadoutRef.current.style.opacity = "0"; }}
-                onClick={handleSvgClick}
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <defs>
-                  <pattern id="blind-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                    <rect width="6" height="6" fill="rgba(239,68,68,0.08)" />
-                    <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(239,68,68,0.45)" strokeWidth="2" />
-                  </pattern>
-                  <pattern id="smallGrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
-                    <path
-                      d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`}
-                      fill="none"
-                      stroke="#333333"
-                      strokeWidth="1"
-                    />
-                  </pattern>
-                </defs>
-
-                <g data-pan-zoom="true" transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
-                  {showGrid && viewMode === "plan" && <rect id="grid-bg" width="100%" height="100%" fill="url(#smallGrid)" />}
-
-                  {backgroundImg && viewMode === "plan" && (
-                    <image
-                      href={backgroundImg}
-                      x={bgSettings.x}
-                      y={bgSettings.y}
-                      width={bgSettings.width}
-                      height={bgSettings.height}
-                      preserveAspectRatio="none"
-                      opacity={bgSettings.opacity}
-                      className="pointer-events-none"
-                    />
-                  )}
-
-                  {hasTerrain && elevationOverlay === "shaded" && elevationShadeUrl && (
-                    <image
-                      href={elevationShadeUrl}
-                      x={0}
-                      y={0}
-                      width={canvasSize.width}
-                      height={canvasSize.height}
-                      preserveAspectRatio="none"
-                      opacity={backgroundImg ? 0.55 : 0.95}
-                      style={backgroundImg ? { mixBlendMode: "multiply" } : undefined}
-                      className="pointer-events-none"
-                    />
-                  )}
-
-                  {hasTerrain && elevationOverlay !== "off" && contourPaths && (
-                    <g className="pointer-events-none">
-                      <path d={contourPaths.minor} fill="none" stroke={backgroundImg ? "rgba(255,247,230,0.55)" : "rgba(68,52,30,0.45)"} strokeWidth={0.8 / zoom} />
-                      <path d={contourPaths.major} fill="none" stroke={backgroundImg ? "rgba(255,247,230,0.95)" : "rgba(68,52,30,0.85)"} strokeWidth={1.8 / zoom} />
-                      {contourPaths.labels.map((label, i) => (
-                        <text
-                          key={i}
-                          x={label.x}
-                          y={label.y}
-                          fontSize={10 / zoom}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
-                          fill={backgroundImg ? "#fff7e6" : "#44341e"}
-                          stroke={backgroundImg ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.85)"}
-                          strokeWidth={2.5 / zoom}
-                          paintOrder="stroke"
-                          fontWeight={700}
-                          className="select-none"
-                        >
-                          {label.text}
-                        </text>
-                      ))}
-                    </g>
-                  )}
-
-                  {demPreview && viewMode === "plan" && demAlignMode && demOverlayTransform && (
-                    <g
-                      transform={`translate(${demOverlayTransform.x} ${demOverlayTransform.y}) rotate(${demOverlayTransform.rotation}) scale(${demOverlayTransform.scale}) translate(${-demPreview.width / 2} ${-demPreview.height / 2})`}
-                    >
-                      <image
-                        href={demPreview.url}
-                        x={0}
-                        y={0}
-                        width={demPreview.width}
-                        height={demPreview.height}
-                        opacity={demOverlayOpacity}
-                        preserveAspectRatio="none"
-                        className="pointer-events-none"
-                      />
-                      <rect
-                        x={0}
-                        y={0}
-                        width={demPreview.width}
-                        height={demPreview.height}
-                        fill="rgba(15, 23, 42, 0.08)"
-                        stroke={demAlignStroke}
-                        strokeWidth="2"
-                        strokeDasharray={demAlignTool === "rotate" ? "8 6" : demAlignTool === "scale" ? "4 4" : "0"}
-                        style={{ cursor: demAlignCursor }}
-                        onMouseDown={(e) => {
-                          if (e.altKey) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setIsPanning(true);
-                            setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
-                            return;
-                          }
-                          if (demAlignTool === "pan") {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setIsPanning(true);
-                            setPanStart({ x: e.clientX, y: e.clientY, panX: panOffset.x, panY: panOffset.y });
-                            return;
-                          }
-                          e.stopPropagation();
-                          const pos = getSvgMousePos(e);
-                          setDemTransformDrag({
-                            mode: demAlignTool,
-                            startMouse: pos,
-                            startTransform: demTransform
-                          });
-                        }}
-                      />
-                      <text
-                        x={demPreview.width / 2}
-                        y={-10}
-                        textAnchor="middle"
-                        fontSize="11"
-                        fill={demAlignStroke}
-                        className="font-semibold select-none"
-                      >
-                        DEM ALIGN • {demAlignTool.toUpperCase()}
-                      </text>
-                    </g>
-                  )}
-
-                  {blindSpots && (
-                    <rect x={blindSpots.area.x} y={blindSpots.area.y} width={blindSpots.area.width} height={blindSpots.area.height} fill="none" stroke="rgba(239,68,68,0.7)" strokeWidth={1.5 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
-                  )}
-                  {blindSpots && blindSpots.runs.length > 0 && (
-                    <path
-                      data-testid="blind-spots"
-                      d={blindSpots.runs.map(r => `M${r.x} ${r.y}h${r.width}v${r.height}h${-r.width}z`).join("")}
-                      fill="rgba(239, 68, 68, 0.22)"
-                      stroke="none"
-                      pointerEvents="none"
-                    />
-                  )}
-                  {items.map(item => {
-                    const isSelected = selectedId === item.id;
-                    if (item.type === "building" || item.type === "parking") {
-                      const b = item as BuildingItem | ParkingItem;
-                      const isParking = item.type === "parking";
-                      if (!isParking) {
-                        const building = item as BuildingItem;
-                        const points = getBuildingPoints(building);
-                        const labelLayout = getBuildingLabelLayout(building);
-                        const lineHeight = labelLayout.fontSize * 1.15;
-                        const labelStartY = -((labelLayout.lines.length - 1) * lineHeight) / 2;
-                        const labelOffset = building.labelOffset ?? { x: 0, y: 0 };
-                        const labelBoxHeight = Math.max(lineHeight * labelLayout.lines.length, lineHeight);
-                        return (
-                          <g
-                            key={building.id}
-                            transform={`translate(${building.x}, ${building.y}) rotate(${building.rotation})`}
-                            onMouseDown={e => handleMouseDown(e, building.id, "move")}
-                            onClick={e => e.stopPropagation()}
-                            className="cursor-move"
-                            opacity={interactionState.itemId === building.id && interactionState.type === "move" ? 0.8 : 1}
-                          >
-                            <polygon
-                              points={points.map(point => `${point.x},${point.y}`).join(" ")}
-                              fill={building.color}
-                              fillOpacity={backgroundImg ? 0.55 : 1}
-                              stroke={isSelected ? "#059669" : building.importSource ? "#f8fafc" : "#334155"}
-                              strokeWidth={isSelected ? 3 : building.importSource ? 1.5 : 1}
-                            />
-                            {!(building.importSource && !building.label?.trim()) && <g
-                              transform={`translate(${labelOffset.x}, ${labelOffset.y})`}
-                              style={{ pointerEvents: "none" }}
-                            >
-                              {isSelected && (
-                                // Small grip to move the label; the text itself never blocks dragging the building.
-                                <g
-                                  transform={`translate(${-Math.min(labelLayout.maxWidth / 2, Math.max(...labelLayout.lines.map(line => line.length * labelLayout.fontSize * 0.31)) + labelLayout.fontSize * 0.3) - 9 * planUi}, ${labelStartY + ((labelLayout.lines.length - 1) * lineHeight) / 2})`}
-                                  style={{ pointerEvents: "auto" }}
-                                  className="cursor-move"
-                                  onMouseDown={e => {
-                                    e.stopPropagation();
-                                    handleMouseDown(e, building.id, "move-label");
-                                  }}
-                                >
-                                  <title>Drag to move the label</title>
-                                  <circle r={6 * planUi} fill="#0f172a" fillOpacity={0.75} stroke="white" strokeWidth={1.2 * planUi} />
-                                  <path d={`M ${-3 * planUi} 0 H ${3 * planUi} M 0 ${-3 * planUi} V ${3 * planUi}`} stroke="white" strokeWidth={1.2 * planUi} />
-                                </g>
-                              )}
-                              {labelLayout.lines.map((line, idx) => {
-                                const estimated = line.length * labelLayout.fontSize * 0.62;
-                                const clampWidth = estimated > labelLayout.maxWidth ? labelLayout.maxWidth : undefined;
-                                return (
-                                  <text
-                                    key={`${building.id}-label-${idx}`}
-                                    x="0"
-                                    y={labelStartY + idx * lineHeight}
-                                    textAnchor="middle"
-                                    dominantBaseline="middle"
-                                    fill="white"
-                                    fontSize={labelLayout.fontSize}
-                                    fontFamily={labelLayout.fontFamily}
-                                    fontWeight={labelLayout.fontWeight}
-                                    pointerEvents="none"
-                                    className="select-none"
-                                    textLength={clampWidth}
-                                    lengthAdjust={clampWidth ? "spacingAndGlyphs" : undefined}
-                                  >
-                                    {line}
-                                  </text>
-                                );
-                              })}
-                            </g>}
-                            {isSelected &&
-                              points.map((point, index) => (
-                                <circle
-                                  key={`${building.id}-vertex-${index}`}
-                                  cx={point.x}
-                                  cy={point.y}
-                                  r="5"
-                                  fill="#ffffff"
-                                  stroke="#059669"
-                                  strokeWidth="2"
-                                  className="cursor-pointer"
-                                  onMouseDown={e => handleMouseDown(e, building.id, "vertex", String(index))}
-                                />
-                              ))}
-                          </g>
-                        );
-                      }
-                      return (
-                        <g
-                          key={b.id}
-                          transform={`translate(${b.x}, ${b.y}) rotate(${b.rotation})`}
-                          onMouseDown={e => handleMouseDown(e, b.id, "move")}
-                          onClick={e => {
-                            if (!vertexInsertMode) {
-                              e.stopPropagation();
-                            }
-                          }}
-                          className="cursor-move"
-                          opacity={interactionState.itemId === b.id && interactionState.type === "move" ? 0.8 : 1}
-                          style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
-                        >
-                          <rect
-                            x={-b.width / 2}
-                            y={-b.height / 2}
-                            width={b.width}
-                            height={b.height}
-                            rx={isParking ? Math.min(b.width, b.height) * 0.3 : 0}
-                            fill={b.color}
-                            stroke={isSelected ? "#3b82f6" : isParking ? "#475569" : "#334155"}
-                            strokeWidth={(isSelected ? 2.5 : 1) * planUi}
-                          />
-                          {isParking && (
-                            <>
-                              {/* windshield and rear window, so the car reads as a car */}
-                              <rect x={-b.width * 0.36} y={-b.height * 0.3} width={b.width * 0.72} height={b.height * 0.17} rx={b.width * 0.1} fill="rgba(15,23,42,0.6)" pointerEvents="none" />
-                              <rect x={-b.width * 0.34} y={b.height * 0.2} width={b.width * 0.68} height={b.height * 0.11} rx={b.width * 0.08} fill="rgba(15,23,42,0.45)" pointerEvents="none" />
-                            </>
-                          )}
-                          {!isParking && (
-                            <text
-                              x="0"
-                              y="0"
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill="white"
-                              fontSize="12"
-                              pointerEvents="none"
-                              className="font-bold select-none"
-                            >
-                              {(b as BuildingItem).label}
-                            </text>
-                          )}
-                          {isSelected && (
-                            <g className="cursor-alias">
-                              <line x1="0" y1={-b.height / 2} x2="0" y2={-b.height / 2 - 18 * planUi} stroke="#3b82f6" strokeWidth={1.5 * planUi} />
-                              <circle
-                                cx="0"
-                                cy={-b.height / 2 - 18 * planUi}
-                                r={6 * planUi}
-                                fill="#fff"
-                                stroke="#3b82f6"
-                                strokeWidth={2 * planUi}
-                                onMouseDown={e => {
-                                  e.stopPropagation();
-                                  handleMouseDown(e, b.id, "rotate");
-                                }}
-                              />
-                            </g>
-                          )}
-                        </g>
-                      );
-                    }
-
-                    if (item.type === "tree") {
-                      const t = item as TreeItem;
-                      return (
-                        <g
-                          key={t.id}
-                          transform={`translate(${t.x}, ${t.y}) rotate(${t.rotation})`}
-                          onMouseDown={e => handleMouseDown(e, t.id, "move")}
-                          onClick={e => e.stopPropagation()}
-                          className="cursor-move"
-                          style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
-                        >
-                          <circle
-                            r={t.radius * (t.width ?? 1)}
-                            fill={t.color}
-                            fillOpacity="0.7"
-                            stroke={isSelected ? "#3b82f6" : "rgba(0,0,0,0.25)"}
-                            strokeWidth={(isSelected ? 2.5 : 1) * planUi}
-                          />
-                          <circle r={t.radius * (t.width ?? 1) * 0.45} fill="black" fillOpacity="0.12" pointerEvents="none" />
-                        </g>
-                      );
-                    }
-
-                    if (item.type === "label") {
-                      const l = item as LabelItem;
-                      return (
-                        <text
-                          key={l.id}
-                          x={l.x}
-                          y={l.y}
-                          fontSize={l.fontSize}
-                          fill={isSelected ? "#3b82f6" : l.color}
-                          fontWeight="bold"
-                          textAnchor="middle"
-                          className="cursor-move select-none"
-                          onMouseDown={e => handleMouseDown(e, l.id, "move")}
-                          onClick={e => e.stopPropagation()}
-                          style={{
-                            textShadow: isSelected ? "0 0 8px rgba(59, 130, 246, 0.8)" : "0px 1px 2px rgba(255,255,255,0.8)",
-                            stroke: isSelected ? "#3b82f6" : "none",
-                            strokeWidth: isSelected ? 1 : 0
-                          }}
-                        >
-                          {l.text}
-                        </text>
-                      );
-                    }
-
-                    if (item.type === "image") {
-                      const img = item as ImageItem;
-                      return (
-                        <g
-                          key={img.id}
-                          transform={`translate(${img.x}, ${img.y}) rotate(${img.rotation})`}
-                          onMouseDown={e => handleMouseDown(e, img.id, "move")}
-                          onClick={e => e.stopPropagation()}
-                          className="cursor-move"
-                        >
-                          <image
-                            href={img.src}
-                            x={-img.width / 2}
-                            y={-img.height / 2}
-                            width={img.width}
-                            height={img.height}
-                            style={{
-                              outline: isSelected ? "3px solid #3b82f6" : "none",
-                              filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none"
-                            }}
-                          />
-                          {isSelected && (
-                            <g className="cursor-alias">
-                              <line x1="0" y1={-img.height / 2} x2="0" y2={-img.height / 2 - 25} stroke="#3b82f6" strokeWidth="2" />
-                              <circle
-                                cx="0"
-                                cy={-img.height / 2 - 25}
-                                r="6"
-                                fill="#fff"
-                                stroke="#3b82f6"
-                                strokeWidth="2"
-                                onMouseDown={e => {
-                                  e.stopPropagation();
-                                  handleMouseDown(e, img.id, "rotate");
-                                }}
-                              />
-                            </g>
-                          )}
-                        </g>
-                      );
-                    }
-
-
-
-                    if (item.type === "camera") {
-                      const c = item as CameraItem;
-                      const cameraPos = getCameraPlanPosition(c);
-                      const r = c.range;
-                      const hFov = c.hFov ?? c.fov;
-                      const startAngle = (c.rotation - hFov / 2) * (Math.PI / 180);
-                      const endAngle = (c.rotation + hFov / 2) * (Math.PI / 180);
-
-                      const x1 = r * Math.cos(startAngle);
-                      const y1 = r * Math.sin(startAngle);
-                      const x2 = r * Math.cos(endAngle);
-                      const y2 = r * Math.sin(endAngle);
-
-                      const handleDist = 40 * planUi;
-                      const rotRad = c.rotation * (Math.PI / 180);
-                      const hx = handleDist * Math.cos(rotRad);
-                      const hy = handleDist * Math.sin(rotRad);
-
-                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
-                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
-                      const dash = c.connectorDashSize || 3;
-
-
-                      // Visibility / Occlusion Calculation
-                      // Layer 1: Buildings Only (blocked view)
-                      const buildings = items.filter(i => i.type === "building") as BuildingItem[];
-                      const polyFull = getVisibilityPolygon(cameraPos, r, hFov, c.rotation, buildings);
-
-                      // Layer 2: Buildings + Trees (clear view)
-                      const obstacles = items.filter(i => i.type === "building" || i.type === "tree") as (BuildingItem | TreeItem)[];
-                      const polyClear = getVisibilityPolygon(cameraPos, r, hFov, c.rotation, obstacles);
-
-                      const pointsToPath = (pts: { x: number, y: number }[]) => {
-                        let d = "M 0 0 ";
-                        pts.forEach(p => { d += `L ${p.x} ${p.y} `; });
-                        return d + "Z";
-                      };
-
-                      const dFull = pointsToPath(polyFull);
-                      const dClear = pointsToPath(polyClear);
-
-                      return (
-                        <g key={c.id} transform={`translate(${cameraPos.x}, ${cameraPos.y})`} onClick={e => e.stopPropagation()}>
-                          <g
-                            onMouseDown={e => handleMouseDown(e, c.id, "move")}
-                            className="cursor-move"
-                            style={{ filter: isSelected ? "drop-shadow(0 0 8px rgba(59, 130, 246, 0.8))" : "none" }}
-                          >
-                            <defs>
-                              <mask id={`mask-${c.id}`}>
-                                <rect x={-r} y={-r} width={r * 2} height={r * 2} fill="white" />
-                                <path d={dClear} fill="black" />
-                              </mask>
-
-                              {/* Blue Gradients (Clear View) */}
-                              <radialGradient id={`grad-blue-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="20%" stopColor={c.color} stopOpacity="0.25" />
-                                <stop offset="70%" stopColor={c.color} stopOpacity="0.08" />
-                                <stop offset="100%" stopColor={c.color} stopOpacity="0" />
-                              </radialGradient>
-                              <radialGradient id={`grad-blue-stroke-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="0%" stopColor={c.color} stopOpacity="0.7" />
-                                <stop offset="60%" stopColor={c.color} stopOpacity="0.3" />
-                                <stop offset="85%" stopColor={c.color} stopOpacity="0.08" />
-                                <stop offset="100%" stopColor={c.color} stopOpacity="0" />
-                              </radialGradient>
-
-                              {/* Yellow Gradients (Obstructed View) */}
-                              <radialGradient id={`grad-yellow-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="20%" stopColor="#fde047" stopOpacity="0.3" />
-                                <stop offset="70%" stopColor="#fde047" stopOpacity="0.12" />
-                                <stop offset="100%" stopColor="#fde047" stopOpacity="0" />
-                              </radialGradient>
-                              <radialGradient id={`grad-yellow-stroke-${c.id}`} cx="0" cy="0" r={r} gradientUnits="userSpaceOnUse">
-                                <stop offset="0%" stopColor="#eab308" stopOpacity="0.7" />
-                                <stop offset="60%" stopColor="#eab308" stopOpacity="0.35" />
-                                <stop offset="85%" stopColor="#eab308" stopOpacity="0.1" />
-                                <stop offset="100%" stopColor="#eab308" stopOpacity="0" />
-                              </radialGradient>
-                            </defs>
-
-                            {/* Obstructed Area (Behind Trees) */}
-                            <path
-                              d={dFull}
-                              fill={`url(#grad-yellow-${c.id})`}
-                              stroke={`url(#grad-yellow-stroke-${c.id})`}
-                              strokeWidth="1" strokeDasharray="4,4" pointerEvents="none"
-                              mask={`url(#mask-${c.id})`}
-                            />
-                            {/* Clear Area (Visible) */}
-                            <path
-                              d={dClear}
-                              fill={`url(#grad-blue-${c.id})`}
-                              stroke={`url(#grad-blue-stroke-${c.id})`}
-                              strokeWidth="1" pointerEvents="none"
-                            />
-                            {showDoriZones && (() => {
-                              // What the camera can make out at each distance (DORI), clipped to what it can actually see.
-                              const a0 = ((c.rotation - hFov / 2) * Math.PI) / 180;
-                              const a1 = ((c.rotation + hFov / 2) * Math.PI) / 180;
-                              const large = hFov > 180 ? 1 : 0;
-                              const pt = (radius: number, a: number) => `${radius * Math.cos(a)} ${radius * Math.sin(a)}`;
-                              const ring = (rIn: number, rOut: number) =>
-                                rIn <= 0.01
-                                  ? `M 0 0 L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} Z`
-                                  : `M ${pt(rIn, a0)} L ${pt(rOut, a0)} A ${rOut} ${rOut} 0 ${large} 1 ${pt(rOut, a1)} L ${pt(rIn, a1)} A ${rIn} ${rIn} 0 ${large} 0 ${pt(rIn, a0)} Z`;
-                              const zones = getDoriDistances(c);
-                              const camMount = c.mount?.height ?? c.height ?? DEFAULT_CAMERA_HEIGHT_FT;
-                              const vf = c.vFov ?? vFovFromH(hFov, getCameraAspectValue(c));
-                              const blind = getGroundCoverage(camMount, c.pitch ?? DEFAULT_CAMERA_PITCH, vf).near;
-                              let inner = 0;
-                              return (
-                                <g clipPath={`url(#clip-${c.id})`} pointerEvents="none">
-                                  <clipPath id={`clip-${c.id}`}><path d={dClear} /></clipPath>
-                                  {zones.map(zone => {
-                                    const outer = Math.min(zone.distance, r);
-                                    if (outer <= inner) return null;
-                                    const d = ring(inner, outer);
-                                    inner = outer;
-                                    return <path key={zone.id} d={d} fill={zone.color} fillOpacity={0.16} stroke={zone.color} strokeOpacity={0.5} strokeWidth={0.75 / zoom} />;
-                                  })}
-                                  {Number.isFinite(blind) && blind > 0.5 && (
-                                    <path d={ring(0, Math.min(blind, r))} fill="url(#blind-hatch)" stroke="#ef4444" strokeOpacity={0.6} strokeWidth={0.75 / zoom} strokeDasharray={`${3 / zoom} ${3 / zoom}`} />
-                                  )}
-                                </g>
-                              );
-                            })()}
-                            <g transform={`rotate(${c.rotation}) scale(${planUi})`}>
-                              <rect x="-10" y="-8" width="20" height="16" rx="4" fill={isSelected ? "#3b82f6" : "#1e293b"} />
-                              <circle cx="0" cy="0" r="4" fill={c.color} />
-                              <rect x="10" y="-4" width="6" height="8" fill="#475569" />
-                            </g>
-                          </g>
-
-                          {isSelected && (
-                            <>
-                              <line x1="0" y1="0" x2={hx} y2={hy} stroke="white" strokeWidth={2 * planUi} strokeDasharray={`${3 * planUi},${3 * planUi}`} />
-                              <circle
-                                cx={hx}
-                                cy={hy}
-                                r={7 * planUi}
-                                fill="#3b82f6"
-                                stroke="white"
-                                strokeWidth={2 * planUi}
-                                className="cursor-crosshair"
-                                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
-                                onMouseDown={e => handleMouseDown(e, c.id, "rotate")}
-                              />
-
-                              <circle
-                                cx={x1}
-                                cy={y1}
-                                r={6 * planUi}
-                                fill={c.color}
-                                stroke="white"
-                                strokeWidth={2 * planUi}
-                                className="cursor-ew-resize"
-                                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
-                                onMouseDown={e => handleMouseDown(e, c.id, "fov", "left")}
-                              />
-                              <circle
-                                cx={x2}
-                                cy={y2}
-                                r={6 * planUi}
-                                fill={c.color}
-                                stroke="white"
-                                strokeWidth={2 * planUi}
-                                className="cursor-ew-resize"
-                                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
-                                onMouseDown={e => handleMouseDown(e, c.id, "fov", "right")}
-                              />
-
-                              <circle
-                                cx={r * Math.cos(rotRad)}
-                                cy={r * Math.sin(rotRad)}
-                                r={6 * planUi}
-                                fill={c.color}
-                                stroke="white"
-                                strokeWidth={2 * planUi}
-                                className="cursor-ns-resize"
-                                style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))' }}
-                                onMouseDown={e => handleMouseDown(e, c.id, "range")}
-                              />
-                            </>
-                          )}
-
-                          <g
-                            transform={`translate(${labelX}, ${labelY})`}
-                            onMouseDown={e => handleMouseDown(e, c.id, "move-label")}
-                            className="cursor-move hover:opacity-80 transition-opacity"
-                          >
-                            {Math.hypot(labelX, labelY) > 14 * planUi && (
-                              <line
-                                x1={-labelX} y1={-labelY} x2="0" y2="0"
-                                stroke="white"
-                                strokeWidth={1.5 * planUi}
-                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
-                                style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
-                              />
-                            )}
-
-                            <g transform={`scale(${planUi})`}>
-                              <rect
-                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
-                                y="-10"
-                                width={Math.max(36, c.label.length * 6.2 + 16)}
-                                height="20"
-                                rx="6"
-                                fill="rgba(255,255,255,0.92)"
-                                stroke={isSelected ? "#3b82f6" : c.color}
-                                strokeWidth={isSelected ? 1.5 : 1}
-                              />
-                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                                {c.label}
-                              </text>
-                            </g>
-                          </g>
-                        </g>
-                      );
-                    }
-                    return null;
-                  })}
-
-                  {/* Camera placement preview - ghost camera showing where it will be placed */}
-                  {cameraPlacementPreview && mode === "add-camera" && (
-                    <g
-                      transform={`translate(${cameraPlacementPreview.point.x}, ${cameraPlacementPreview.point.y})`}
-                      className="pointer-events-none"
-                      opacity={0.6}
-                    >
-                      {/* Preview FOV cone */}
-                      <path
-                        d={(() => {
-                          const r = 100; // Preview range
-                          const fov = 70; // Preview FOV
-                          const startAngle = (cameraPlacementPreview.rotation - fov / 2) * (Math.PI / 180);
-                          const endAngle = (cameraPlacementPreview.rotation + fov / 2) * (Math.PI / 180);
-                          const x1 = r * Math.cos(startAngle);
-                          const y1 = r * Math.sin(startAngle);
-                          const x2 = r * Math.cos(endAngle);
-                          const y2 = r * Math.sin(endAngle);
-                          return `M 0 0 L ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2} Z`;
-                        })()}
-                        fill="#3b82f6"
-                        fillOpacity="0.2"
-                        stroke="#3b82f6"
-                        strokeWidth="2"
-                        strokeDasharray="4,4"
-                      />
-                      {/* Preview camera body */}
-                      <g transform={`rotate(${cameraPlacementPreview.rotation})`}>
-                        <rect x="-10" y="-8" width="20" height="16" rx="4" fill="#3b82f6" />
-                        <circle cx="0" cy="0" r="4" fill="white" />
-                        <rect x="10" y="-4" width="6" height="8" fill="#1e40af" />
-                      </g>
-                      {/* "Click to place" indicator */}
-                      <text
-                        y="-20"
-                        textAnchor="middle"
-                        fill="#3b82f6"
-                        fontSize="11"
-                        fontWeight="bold"
-                        className="select-none"
-                      >
-                        Click to place
-                      </text>
-                    </g>
-                  )}
-
-                  {/* Building edge highlights when in camera placement mode */}
-                  {mode === "add-camera" && items.filter(i => i.type === "building").map(item => {
-                    const building = item as BuildingItem;
-                    const worldPoints = getBuildingEdgePointsWorld(building);
-                    return worldPoints.map((point, index) => {
-                      const nextPoint = worldPoints[(index + 1) % worldPoints.length];
-                      const isHoveredEdge = cameraPlacementPreview?.buildingId === building.id &&
-                        cameraPlacementPreview?.edgeIndex === index;
-                      return (
-                        <line
-                          key={`edge-highlight-${building.id}-${index}`}
-                          x1={point.x}
-                          y1={point.y}
-                          x2={nextPoint.x}
-                          y2={nextPoint.y}
-                          stroke={isHoveredEdge ? "#3b82f6" : "#94a3b8"}
-                          strokeWidth={isHoveredEdge ? 4 : 2}
-                          strokeDasharray={isHoveredEdge ? "0" : "6,4"}
-                          className="pointer-events-none transition-all"
-                          opacity={isHoveredEdge ? 1 : 0.5}
-                        />
-                      );
-                    });
-                  })}
-                  {/* --- LABELS OVERLAY (Rendered last to appear on top) --- */}
-                  {items.map(item => {
-                    if (item.type === "target") {
-                      const t = item as TargetItem;
-                      const result = targetResults.get(t.id);
-                      const status = targetStatus(result);
-                      const color = STATUS_COLOR[status];
-                      const r = 9 * planUi;
-                      const isSelected = selectedId === t.id;
-                      const coveringCam = result?.best ? coverageModel.cameras.find(c => c.id === result.best!.cameraId) : null;
-                      return (
-                        <g key={t.id} data-testid="target-pin" data-status={status}>
-                          {isSelected && coveringCam && (
-                            <line x1={coveringCam.x} y1={coveringCam.y} x2={t.x} y2={t.y} stroke={color} strokeWidth={2 * planUi} strokeDasharray={`${6 * planUi} ${4 * planUi}`} pointerEvents="none" />
-                          )}
-                          <g
-                            transform={`translate(${t.x}, ${t.y})`}
-                            onMouseDown={e => handleMouseDown(e, t.id, "move")}
-                            onClick={e => e.stopPropagation()}
-                            className="cursor-move"
-                          >
-                            <circle r={r * 1.6} fill={color} fillOpacity={0.18} stroke={isSelected ? "#fff" : "none"} strokeWidth={2 * planUi} />
-                            <circle r={r} fill={color} stroke="#fff" strokeWidth={2 * planUi} />
-                            <text y={r * 0.38} textAnchor="middle" fontSize={r * 1.15} fontWeight="bold" fill="#fff" pointerEvents="none">
-                              {status === "met" ? "✓" : status === "partial" ? "!" : "✕"}
-                            </text>
-                            <text y={r * 2.9} textAnchor="middle" fontSize={11 * planUi} fontWeight={700} fill="#fff" stroke="rgba(0,0,0,0.75)" strokeWidth={3 * planUi} paintOrder="stroke" pointerEvents="none">
-                              {t.label}
-                            </text>
-                          </g>
-                        </g>
-                      );
-                    }
-                    if (item.type === "camera") {
-                      const c = item as CameraItem;
-                      const cameraPos = getCameraPlanPosition(c);
-                      const labelX = c.labelOffset?.x ?? defaultCameraLabelOffset(c.rotation).x * planUi;
-                      const labelY = c.labelOffset?.y ?? defaultCameraLabelOffset(c.rotation).y * planUi;
-                      const isSelected = selectedId === c.id;
-
-                      return (
-                        <g key={`label-overlay-${c.id}`} transform={`translate(${cameraPos.x}, ${cameraPos.y})`} style={{ pointerEvents: 'none' }}>
-                          <g
-                            transform={`translate(${labelX}, ${labelY})`}
-                            onMouseDown={e => {
-                              // Enable pointer events for interaction
-                              e.stopPropagation();
-                              handleMouseDown(e, c.id, "move-label");
-                            }}
-                            className="cursor-move hover:opacity-80 transition-opacity"
-                            style={{ pointerEvents: 'auto' }}
-                          >
-                            {Math.hypot(labelX, labelY) > 14 * planUi && (
-                              <line
-                                x1={-labelX} y1={-labelY} x2="0" y2="0"
-                                stroke="white"
-                                strokeWidth={1.5 * planUi}
-                                strokeDasharray={`${4 * planUi},${3 * planUi}`}
-                                style={{ filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.8))' }}
-                              />
-                            )}
-
-                            <g transform={`scale(${planUi})`}>
-                              <rect
-                                x={-(Math.max(36, c.label.length * 6.2 + 16)) / 2}
-                                y="-10"
-                                width={Math.max(36, c.label.length * 6.2 + 16)}
-                                height="20"
-                                rx="6"
-                                fill="rgba(255,255,255,0.92)"
-                                stroke={isSelected ? "#3b82f6" : c.color}
-                                strokeWidth={isSelected ? 1.5 : 1}
-                              />
-                              <text textAnchor="middle" dy="4" fontSize="10" fill="#334155" fontWeight="bold" pointerEvents="none" className="select-none">
-                                {c.label}
-                              </text>
-                            </g>
-                          </g>
-                        </g>
-                      );
-                    }
-                    return null;
-                  })}
-                  {isTerrainMode && (
-                    <circle
-                      ref={planBrushCursorRef}
-                      cx={-9999}
-                      cy={-9999}
-                      r={Math.max(gridSize, clamp(terrainBrushSize, TERRAIN_BRUSH_MIN, TERRAIN_BRUSH_MAX) * gridSize)}
-                      fill={terrainTool === "sculpt" ? "rgba(245,158,11,0.12)" : terrainTool === "smooth" ? "rgba(56,189,248,0.12)" : "rgba(129,140,248,0.12)"}
-                      stroke={terrainTool === "sculpt" ? "#f59e0b" : terrainTool === "smooth" ? "#38bdf8" : "#818cf8"}
-                      strokeWidth={2 / zoom}
-                      strokeDasharray={`${6 / zoom} ${4 / zoom}`}
-                      className="pointer-events-none"
-                    />
-                  )}
-                </g>
-              </svg>
-              {renderPlanOverlays()}
-              </>
-            ) : viewMode === "iso3d" ? (
-              <div className="relative w-full h-full">
-                <div ref={threeContainerRef} className="absolute inset-0" />
+            <SiteViewport
+              doc={viewDoc}
+              selectedId={selectedId}
+              tool={viewTool}
+              callbacks={viewCallbacks}
+              pose={viewMode === "iso3d" ? "tilt" : "top"}
+              poseSignal={poseSignal}
+              hidden={viewMode === "nvr"}
+              actions={selectedItem && mode === "select" && !isTerrainMode && !interacting ? {
+                duplicate: duplicateSelected,
+                rotate: () => rotateSelected(15),
+                remove: () => { deleteItem(selectedItem.id); setTimeout(() => saveHistory(), 50); },
+                zoomTo: zoomToSelection
+              } : null}
+              snapshot={{ download: handleExportCurrent3d, addToReport: add3dToExportList, keep: handleCaptureSnapshot, background: () => bg3dInputRef.current?.click() }}
+              onReady={v => { viewRef.current = v; }}
+            />
                 {demAlignMode && demPreview && (
                   <div className="absolute top-4 left-4 z-40 w-80 rounded-xl border border-white/10 bg-zinc-900/90 shadow-xl backdrop-blur">
                     <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
@@ -8575,69 +5105,8 @@ export default function SecurityPlanner() {
                     </svg>
                   </div>
                 )}
-                <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
-                  <div className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-medium text-slate-300 shadow border border-white/10">
-                    Drag to move · Shift-drag or right-drag to rotate · Scroll or pinch to zoom
-                  </div>
-                </div>
-                <div className="absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleReset3dView}
-                      className="px-3 py-1.5 rounded-lg border border-white/10 bg-zinc-900/90 text-xs font-semibold text-slate-200 hover:bg-zinc-800 shadow"
-                    >
-                      Reset view
-                    </button>
-                    <div className="relative">
-                      <button
-                        onClick={() => setShow3dMenu(v => !v)}
-                        aria-expanded={show3dMenu}
-                        className="px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/20 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/30 shadow-sm transition-colors flex items-center gap-1"
-                      >
-                        <Camera className="w-3.5 h-3.5" /> Snapshot <ChevronDown className="w-3 h-3" />
-                      </button>
-                      {show3dMenu && (
-                        <div className="absolute top-full mt-2 right-0 w-56 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5" onMouseLeave={() => setShow3dMenu(false)}>
-                          {[
-                            { label: "Download as image", action: handleExportCurrent3d },
-                            { label: "Add to the report", action: add3dToExportList },
-                            { label: "Keep in snapshots", action: handleCaptureSnapshot },
-                            { label: "Set 3D background image…", action: () => bg3dInputRef.current?.click() }
-                          ].map(m => (
-                            <button key={m.label} onClick={() => { setShow3dMenu(false); m.action(); }} className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-white/10 rounded-lg">
-                              {m.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-0.5 rounded-xl border border-white/10 bg-zinc-900/90 p-1 shadow" role="group" aria-label="3D view controls">
-                    {([
-                      ["", null, ""],
-                      ["Tilt up", "up", <ChevronUp key="u" className="w-4 h-4" />],
-                      ["", null, ""],
-                      ["Rotate left", "left", <RotateCcw key="l" className="w-4 h-4" />],
-                      ["Look straight down", "top", <Compass key="t" className="w-4 h-4" />],
-                      ["Rotate right", "right", <RotateCw key="r" className="w-4 h-4" />],
-                      ["Zoom out", "out", <ZoomOut key="o" className="w-4 h-4" />],
-                      ["Tilt down", "down", <ChevronDown key="d" className="w-4 h-4" />],
-                      ["Zoom in", "in", <ZoomIn key="i" className="w-4 h-4" />]
-                    ] as [string, Parameters<typeof nav3d>[0] | null, React.ReactNode][]).map(([label, act, icon], i) =>
-                      act ? (
-                        <button key={i} onClick={() => nav3d(act)} title={label} aria-label={label} className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-white/10">
-                          {icon}
-                        </button>
-                      ) : (
-                        <span key={i} />
-                      )
-                    )}
-                  </div>
-                </div>
-
-              </div>
-            ) : (
-              <div ref={nvrContainerRef} className="relative bg-zinc-950 flex flex-col overflow-hidden w-full h-full">
+            {viewMode === "nvr" && (
+              <div ref={nvrContainerRef} className="absolute inset-0 z-10 bg-zinc-950 flex flex-col overflow-hidden">
                 <div className="w-full h-full p-4 overflow-auto custom-scrollbar">
                   {items.filter(i => i.type === 'camera').length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-500">
@@ -8691,7 +5160,7 @@ export default function SecurityPlanner() {
               </div>
             )}
 
-            {viewMode === "plan" && toolHint && (
+            {viewMode !== "nvr" && toolHint && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
                 <div className="rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-4 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap">
                   {toolHint}
@@ -8736,7 +5205,13 @@ export default function SecurityPlanner() {
                   className="rounded-full bg-zinc-900/90 px-3 py-1 text-xs font-semibold text-slate-200 shadow border border-white/10 transition-opacity"
                   style={{ opacity: 0 }}
                 />
-                {viewMode === "plan" && items.some(i => i.type === "camera") && (
+                {backgroundImg && items.some(i => i.type === "building") && (
+                  <label className="flex items-center gap-2 rounded-full bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-1.5 text-[11px] font-semibold text-slate-200 pointer-events-auto cursor-pointer" title="Show the satellite photo on building roofs">
+                    <input type="checkbox" checked={roofPhoto} onChange={e => setRoofPhoto(e.target.checked)} className="accent-emerald-500" aria-label="Photo on roofs" />
+                    Photo on roofs
+                  </label>
+                )}
+                {items.some(i => i.type === "camera") && (
                   <div className="rounded-xl bg-zinc-900/90 border border-white/10 shadow-lg px-3 py-2 text-[10px] text-slate-300 pointer-events-auto space-y-1.5">
                     <label className="flex items-center justify-between gap-3 cursor-pointer font-semibold text-slate-200">
                       Coverage zones
@@ -8751,8 +5226,8 @@ export default function SecurityPlanner() {
                           </span>
                         ))}
                         <span className="flex items-center gap-1.5 col-span-2" title="Too close/steep for the camera to see">
-                          <span className="w-2.5 h-2.5 rounded-sm border border-red-400" style={{ background: "repeating-linear-gradient(45deg, rgba(239,68,68,.5) 0 2px, transparent 2px 4px)" }} />
-                          Blind spot under camera
+                          <span className="w-2.5 h-2.5 rounded-sm border border-dashed border-slate-400" />
+                          Gap at the camera = blind spot under it
                         </span>
                       </div>
                     )}
@@ -8807,19 +5282,28 @@ export default function SecurityPlanner() {
           </div>
         </div>
 
-        {/* Camera Preview Panel - Picture-in-Picture style */}
-        {selectedCamera && showCameraPreview && (
-          <div className={`absolute bottom-24 ${floatingPanelRight} w-80 bg-zinc-900/90 backdrop-blur-xl rounded-xl shadow-2xl overflow-hidden border border-white/10 z-40 ring-1 ring-black/50`}>
-            <div className="flex items-center justify-between px-3 py-2 border-b border-white/5 bg-white/5">
-              <div className="flex items-center gap-2">
-                <Camera className="w-4 h-4 text-emerald-400" />
-                <span className="text-sm font-medium text-slate-200 truncate">{selectedCamera.label} View</span>
-              </div>
-              <div className="flex items-center gap-1">
+        {/* What the selected camera sees: a window you can drag anywhere and resize */}
+        {selectedCamera && showCameraPreview && viewMode !== "nvr" && (
+          <FloatingWindow
+            label="Camera view"
+            storageKey="scp.cameraViewPos"
+            width={previewWidth}
+            onWidth={setPreviewWidth}
+            minWidth={260}
+            maxWidth={960}
+            title={
+              <>
+                <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="text-sm font-medium text-slate-200 truncate">{selectedCamera.label} view</span>
+              </>
+            }
+            actions={
+              <>
                 <button
                   onClick={() => setMaximizedCamId(selectedCamera.id)}
                   className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
-                  title="Full Screen"
+                  title="Full screen"
+                  aria-label="Full screen"
                 >
                   <Maximize className="w-4 h-4" />
                 </button>
@@ -8827,33 +5311,43 @@ export default function SecurityPlanner() {
                   onClick={() => setShowCameraPreview(false)}
                   className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors"
                   title="Close"
+                  aria-label="Close camera view"
                 >
                   <X className="w-4 h-4" />
                 </button>
-              </div>
-            </div>
+              </>
+            }
+          >
             <canvas
               ref={cameraPreviewRef}
               width={cameraPreviewWidth}
               height={cameraPreviewHeight}
-              className="w-full"
+              className="w-full block"
             />
-            <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between border-t border-white/5">
-              <div className="flex gap-3">
+            <div className="px-3 py-2 bg-white/5 text-xs text-slate-400 flex items-center justify-between gap-2 border-t border-white/5">
+              <div className="flex gap-3 min-w-0 truncate">
                 <span>H-FOV: {(selectedCamera.hFov ?? selectedCamera.fov).toFixed(0)}°</span>
                 <span>V-FOV: {(selectedCamera.vFov ?? vFovFromH(selectedCamera.hFov ?? selectedCamera.fov, getCameraAspectValue(selectedCamera))).toFixed(0)}°</span>
                 <span>Range: {selectedCamera.range}</span>
               </div>
               <button
                 onClick={() => addCameraViewToExportList(selectedCamera)}
-                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1"
+                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs rounded flex items-center gap-1 shrink-0 mr-2"
                 title="Add this view to the report"
               >
                 <Plus className="w-3 h-3" />
                 Add to Report
               </button>
             </div>
-          </div>
+          </FloatingWindow>
+        )}
+        {selectedCamera && !showCameraPreview && viewMode !== "nvr" && (
+          <button
+            onClick={() => setShowCameraPreview(true)}
+            className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 rounded-full bg-zinc-900/95 border border-white/10 px-3 py-1.5 text-xs font-semibold text-slate-200 shadow-xl hover:bg-zinc-800"
+          >
+            <Camera className="w-3.5 h-3.5 text-emerald-400" /> Show {selectedCamera.label}'s view
+          </button>
         )}
 
         {maximizedCamId && (
@@ -8890,17 +5384,6 @@ export default function SecurityPlanner() {
               })()}
             </div>
           </div>
-        )}
-
-        {/* Show Camera Preview toggle button when camera is selected but preview is hidden */}
-        {selectedCamera && !showCameraPreview && (
-          <button
-            onClick={() => setShowCameraPreview(true)}
-            className={`absolute bottom-24 ${floatingPanelRight} px-4 py-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors z-40 flex items-center gap-2`}
-          >
-            <Camera className="w-4 h-4" />
-            <span className="text-sm font-medium">Show Camera View</span>
-          </button>
         )}
 
         {/* --- Properties Sidebar (Docked) --- */}

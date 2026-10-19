@@ -1,4 +1,4 @@
-import { test, expect, itemsOfType } from "./fixtures";
+import { test, expect, itemsOfType, screenOf } from "./fixtures";
 import { encode } from "fast-png";
 
 /** Synthetic aerial photo: lawn with a gable roof (two shades) rotated 20°, plus a driveway. */
@@ -28,12 +28,14 @@ test("click a roof on the map to trace it into a building", async ({ page }) => 
     page.getByRole("button", { name: "Upload a map or floor plan" }).click()
   ]);
   await chooser.setFiles({ name: "aerial.png", mimeType: "image/png", buffer: syntheticAerial() });
-  const img = page.getByTestId("plan").locator("image").first();
-  await expect(img).toBeVisible();
-  const box = (await img.boundingBox())!;
+  // Where the photo sits on the plan, and so where its pixels are on screen
+  await expect.poll(() => page.evaluate(() => !!(window as any).__scpProject().backgroundImg)).toBe(true);
+  const bg = await page.evaluate(() => (window as any).__scpProject().bgSettings);
+  const at = (px: number, py: number) => screenOf(page, bg.x + (px / 1000) * bg.width, bg.y + (py / 700) * bg.height);
 
   await page.keyboard.press("r");
-  await page.mouse.click(box.x + (520 / 1000) * box.width, box.y + (300 / 700) * box.height);
+  const roof = await at(520, 300);
+  await page.mouse.click(roof.x, roof.y);
   await expect(page.getByRole("status")).toContainText("Traced a building");
   const [b] = await itemsOfType(page, "building");
   const rotation = (Math.atan2(b.points[1].y - b.points[0].y, b.points[1].x - b.points[0].x) * 180) / Math.PI;
@@ -41,7 +43,8 @@ test("click a roof on the map to trace it into a building", async ({ page }) => 
   expect(off, "traced rectangle follows the roof's 20° angle").toBeLessThan(6);
 
   // Clicking lawn finds no roof (top-left of the map is under the tool's options card)
-  await page.mouse.click(box.x + 0.75 * box.width, box.y + 0.75 * box.height);
+  const lawn = await at(750, 560);
+  await page.mouse.click(lawn.x, lawn.y);
   await expect(page.getByRole("status")).toContainText("Couldn't find a roof");
   await page.keyboard.press("Escape");
 });

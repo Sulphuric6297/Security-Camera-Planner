@@ -49,12 +49,12 @@ Useful commands:
 | --- | --- |
 | `smoke.spec.ts` | App loads, onboarding, steps, 2D/3D/camera-wall views, tool and view shortcuts |
 | `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
-| `plan-editing.spec.ts` | Placing every item type (2D and 3D) at real size, vehicle types, dragging, adding corners, undo/redo, duplicate, nudge, delete + Undo toast, panning |
-| `camera.spec.ts` | Aim handle matches the stored rotation, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
+| `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types, dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning |
+| `camera.spec.ts` | Aim handle sets rotation and tilt, field-of-view and range handles, dragging a camera onto a wall mounts it, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
 | `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
 | `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
-| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), photo-textured roofs + roof picker, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
+| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
 | `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens |
 | `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid (pure logic) |
@@ -64,6 +64,7 @@ Useful commands:
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
 | `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
+| `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
 
@@ -76,9 +77,12 @@ When you add a feature in a new area, add a new spec file and a row to this tabl
 - The `test` fixture starts each test with empty storage and fails the test on any uncaught
   page error.
 - Tests read the app state through `window.__scpProject()` (zustand store), `window.__scpHistory`,
-  `window.__scpThree()` (3D scene) and `window.__scpSelect(id)`. Keep these hooks.
-- The plan SVG has `data-testid="plan"`. Prefer roles, titles and test ids over CSS classes in
-  selectors.
+  `window.__scpThree()` (3D scene), `window.__scpView` (the map view: `toClient`, `toPlan`, `screenBox`,
+  `viewInfo`) and `window.__scpSelect(id)`. Keep these hooks. Fixture helpers `screenOf`, `itemBox`,
+  `handleCenter` and `drag` find things on screen through them.
+- The map view's container has `data-testid="plan"`. Selection handles are `[data-handle=...]`
+  (corner, mid, height, rotate, aim, fov-l, fov-r, range, cam-height, radius); target pins are
+  `data-testid="target-pin"`. Prefer roles, titles and test ids over CSS classes in selectors.
 - Keep test titles ASCII. Playwright's `setFiles` silently fails when a test's output path
   contains characters like "→".
 
@@ -94,7 +98,9 @@ keep it updated as phases ship.
 - Saved-document state lives in `src/state/project.ts` (zustand). UI-only state stays in components.
 - New items come from `createItem` in `src/lib/items.ts`, with sizes in real feet times
   `unitsPerFoot`. Never hard-code sizes in placement code.
-- Pure logic goes in `src/lib/` (geo, camera, terrain, geometry). UI pieces go in
-  `src/components/`.
+- Pure logic goes in `src/lib/` (geo, camera, terrain, geometry, planGeom). UI pieces go in
+  `src/components/`. The map view (2D and 3D are one view) is `src/viewport/`: `SiteView.ts` is the
+  engine (scene, camera-controls navigation, picking, handles), `SiteViewport.tsx` its React wrapper.
+  The printed plan is drawn by `src/lib/planSvg.ts`.
 - Changes are developed on a feature branch. Do not merge or deploy to `main` without the
   owner's OK.
