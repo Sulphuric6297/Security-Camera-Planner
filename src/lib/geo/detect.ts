@@ -325,102 +325,239 @@ const maskedMean = (v: Float32Array, m: Uint8Array, w: number, h: number, r: num
   return { mean, share };
 };
 
+// Tuned on real satellite photos (tests/fixtures/aerial): a hand-labelled parking lot, and homes.
+const VEH_SCORE = 32; // how much a car's box stands out from the pavement around it
+const VEH_INNER = 45; // how different from the pavement the box is (color distance)
+const UNIFORM = 0.6; // every half of the box has at least this share of its contrast
+const VEG_BUSY = 60; // plants or buildings around a box count as this much contrast
+const GROUND_CHROMA = 40;
+const BG_NEAR = 60;
+const VEG_GB = 1.04;
+const EXT_LEVEL = 0.45; // where a thing ends: contrast below this share of its middle's
+const VEH_MAX_LEN = 9; // m: longer is a curb, a planter or a shed, not a car
+const SOIL_RB = 30; // tan: red this much over blue
+const SHADOW_K = 0.4;
+const SHADOW_STD = 10;
+
+// A car-sized box (and the pavement strips around it) at one orientation, over a contrast map:
+// the box's mean contrast, its two sides' and its two ends' (all as box means, via an integral image
+// of the map turned so the box's length runs along the rows).
+const CAR_ANGLES = 8;
+const boxScores = (
+  C: Float32Array, Cs: Float32Array, cand: Uint8Array, w: number, h: number, theta: number,
+  half: { len: number; wid: number; gap: number; strip: number }
+) => {
+  const cos = Math.cos(theta), sin = Math.sin(theta);
+  // Rotated frame: u along the car, v across it.
+  const us = [0, w, 0, w].map((x, i) => x * cos + (i < 2 ? 0 : h) * sin);
+  const vs = [0, w, 0, w].map((x, i) => -x * sin + (i < 2 ? 0 : h) * cos);
+  const u0 = Math.floor(Math.min(...us)) - 1, v0 = Math.floor(Math.min(...vs)) - 1;
+  const W = Math.ceil(Math.max(...us)) - u0 + 2, H = Math.ceil(Math.max(...vs)) - v0 + 2;
+  const integral = (M: Float32Array) => {
+    const S = new Float64Array((W + 1) * (H + 1));
+    for (let j = 0; j < H; j++) {
+      let row = 0;
+      for (let i = 0; i < W; i++) {
+        const u = i + u0, v = j + v0;
+        const xi = Math.round(u * cos - v * sin), yi = Math.round(u * sin + v * cos);
+        row += xi >= 0 && yi >= 0 && xi < w && yi < h ? M[yi * w + xi] : 0;
+        S[(j + 1) * (W + 1) + i + 1] = S[j * (W + 1) + i + 1] + row;
+      }
+    }
+    // Mean over inclusive rotated-pixel ranges [a..c] x [b..d], clamped
+    return (a: number, b: number, c: number, d: number) => {
+      a = Math.max(0, a); b = Math.max(0, b); c = Math.min(W - 1, c); d = Math.min(H - 1, d);
+      if (c < a || d < b) return 0;
+      return (S[(d + 1) * (W + 1) + c + 1] - S[b * (W + 1) + c + 1] - S[(d + 1) * (W + 1) + a] + S[b * (W + 1) + a]) / ((c - a + 1) * (d - b + 1));
+    };
+  };
+  const box = integral(C);
+  const boxS = integral(Cs);
+  const { len, wid, gap, strip } = half;
+  const inner = new Float32Array(w * h), around = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!cand[y * w + x]) continue;
+      const i = Math.round(x * cos + y * sin) - u0, j = Math.round(-x * sin + y * cos) - v0;
+      const sIn = box(i - len, j - wid, i + len, j + wid);
+      const l2 = Math.round(len * 0.8), w2 = Math.max(1, Math.round(wid * 0.8));
+      const sideA = boxS(i - l2, j - wid - gap - strip, i + l2, j - wid - gap - 1);
+      const sideB = boxS(i - l2, j + wid + gap + 1, i + l2, j + wid + gap + strip);
+      const endA = boxS(i - len - gap - strip, j - w2, i - len - gap - 1, j + w2);
+      const endB = boxS(i + len + gap + 1, j - w2, i + len + gap + strip, j + w2);
+      // A car fills its box: every half has contrast (a box half over the edge of something big doesn't).
+      const halves = Math.min(
+        box(i - len, j - wid, i + len, j - 1), box(i - len, j + 1, i + len, j + wid),
+        box(i - len, j - wid, i - 1, j + wid), box(i + 1, j - wid, i + len, j + wid)
+      );
+      inner[y * w + x] = halves < UNIFORM * sIn ? 0 : sIn;
+      // Clear pavement around it, allowing for one busy neighbour (a car alongside, its own
+      // shadow), cars on both sides (a row in a lot) or at both ends (parked nose to tail), but
+      // not a side and an end together (the corner of something big).
+      const q = [sideA, sideB, endA, endB].sort((p, r) => r - p);
+      around[y * w + x] = Math.min(q[1], Math.max(endA, endB), Math.max(sideA, sideB));
+    }
+  }
+  return { inner, around };
+};
+
 /**
- * Parked vehicles: car-sized, car-shaped things that stand out from the pavement around them, in
- * any paint (white, black, silver, grey, colors), alone on a driveway or side by side in a lot.
- * Each pixel is compared with the pavement around it (not a fixed brightness), so silver cars on
- * pale concrete and dark cars on fresh asphalt both show; rows of touching cars are split into
- * single cars. These are suggestions the user can remove.
+ * Parked cars: car-sized boxes that stand out from the pavement around them (any paint: compared
+ * with the pavement's own color nearby), with clear pavement on at least one side and one end.
+ * Each car is its own peak, so cars parked side by side or nose to tail come out one by one,
+ * while long things (curbs, painted lines), big things (sheds, shade) and big shadows don't.
  */
 export const detectVehicles = (img: DetectImage, opts: Opts & { maxVehicles?: number }): DetectedVehicle[] => {
   const { width: w, height: h, data } = img;
   const mpp = opts.metersPerPx;
   const n = w * h;
-  const R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n), L = new Float32Array(n);
+  const R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n);
   const ground = new Uint8Array(n); // pavement-like (grey, not green): the background cars sit on
   const usable = new Uint8Array(n); // not vegetation, not a building
   for (let i = 0, p = 0; i < n; i++, p += 4) {
     const r = data[p], g = data[p + 1], b = data[p + 2];
     R[i] = r; G[i] = g; B[i] = b;
-    L[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-    const green = (2 * g - r - b) / (r + g + b + 1) > 0.04 && g > r;
+    const L = 0.299 * r + 0.587 * g + 0.114 * b;
+    // Vegetation: green over both red and blue (a bluish-white car or its halo is not a plant).
+    const green = (2 * g - r - b) / (r + g + b + 1) > 0.04 && g > r && g > b * VEG_GB;
     const excluded = opts.exclude ? opts.exclude(i % w, (i / w) | 0) : false;
     if (green || excluded) continue;
     usable[i] = 1;
     const chroma = Math.max(r, g, b) - Math.min(r, g, b);
-    if (chroma < 28 && L[i] > 45 && L[i] < 225) ground[i] = 1;
+    if (chroma < GROUND_CHROMA && L > 45 && L < 225) ground[i] = 1;
   }
-  // The pavement's color around each pixel, over ~7 m (wider than a row of cars is deep).
+  // The pavement's color around each pixel, over ~7 m (wider than a row of cars is deep). Cars
+  // themselves are often grey too, so average again over just the pixels near that first guess:
+  // the pavement, not the cars on it.
   const bgR = Math.max(3, Math.round(3.5 / mpp));
-  const mr = maskedMean(R, ground, w, h, bgR);
-  const mg = maskedMean(G, ground, w, h, bgR).mean;
-  const mb = maskedMean(B, ground, w, h, bgR).mean;
-  const { std } = localStats(L, w, h, Math.max(1, Math.round(0.4 / mpp)));
-  let mask: Uint8Array = new Uint8Array(n);
+  let mr = maskedMean(R, ground, w, h, bgR);
+  let mg = maskedMean(G, ground, w, h, bgR).mean;
+  let mb = maskedMean(B, ground, w, h, bgR).mean;
+  for (let pass = 0; pass < 2; pass++) {
+    const near = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      if (!ground[i] || mr.share[i] === 0) continue;
+      const d = Math.abs(R[i] - mr.mean[i]) + Math.abs(G[i] - mg[i]) + Math.abs(B[i] - mb[i]);
+      if (d < BG_NEAR) near[i] = 1;
+    }
+    const m2 = maskedMean(R, near, w, h, bgR);
+    const g2 = maskedMean(G, near, w, h, bgR).mean, b2 = maskedMean(B, near, w, h, bgR).mean;
+    for (let i = 0; i < n; i++) {
+      if (m2.share[i] > 0.05) { mr.mean[i] = m2.mean[i]; mg[i] = g2[i]; mb[i] = b2[i]; }
+    }
+    mr = { mean: mr.mean, share: mr.share };
+  }
+  // How far each pixel is from the pavement's color (0 on vegetation, buildings, and where there is no pavement around).
+  const C = new Float32Array(n);
+  const Lum = new Float32Array(n);
+  for (let i = 0; i < n; i++) Lum[i] = 0.299 * R[i] + 0.587 * G[i] + 0.114 * B[i];
+  const { std } = localStats(Lum, w, h, Math.max(1, Math.round(0.4 / mpp)));
   for (let i = 0; i < n; i++) {
     if (!usable[i] || mr.share[i] < 0.12) continue;
     const dr = R[i] - mr.mean[i], dg = G[i] - mg[i], db = B[i] - mb[i];
-    const diff = Math.sqrt(dr * dr + dg * dg + db * db);
-    // Shadow on the pavement: the same grey, just darker and smooth (not a car).
+    let c = Math.min(160, Math.sqrt(dr * dr + dg * dg + db * db));
+    // Shadow on the pavement: the same grey, darker and smooth. Counts for little. (Black paint is
+    // darker than a shadow on pavement, so it still counts.)
     const bgL = 0.299 * mr.mean[i] + 0.587 * mg[i] + 0.114 * mb[i];
     const chroma = Math.max(R[i], G[i], B[i]) - Math.min(R[i], G[i], B[i]);
-    if (L[i] > bgL * 0.46 && L[i] < bgL * 0.75 && chroma < 18 && std[i] < 12) continue;
-    // Clearly a different color from the pavement, or busy (glass, roof, trim) and somewhat different.
-    if (diff > 30 || (std[i] > 14 && diff > 16)) mask[i] = 1;
+    if (Lum[i] > bgL * 0.42 && Lum[i] < bgL * 0.8 && chroma < 20 && std[i] < SHADOW_STD) c *= SHADOW_K;
+    C[i] = c;
   }
-  // Drop painted lines and cracks (thin), fill the small gaps inside a car (windows, roof edges).
-  mask = open(mask, w, h, Math.max(1, Math.round(0.4 / mpp)));
-  mask = close(mask, w, h, Math.max(1, Math.round(0.25 / mpp)));
-  const comps = components(mask, w, h, Math.round(3 / (mpp * mpp)));
+  // Around a car: pavement. Plants and buildings there count as busy, not as clear pavement.
+  const Cs = new Float32Array(n);
+  for (let i = 0; i < n; i++) Cs[i] = usable[i] && mr.share[i] >= 0.12 ? C[i] : VEG_BUSY;
+  const half = {
+    len: Math.max(2, Math.round(2.15 / mpp)),
+    wid: Math.max(1, Math.round(0.8 / mpp)),
+    gap: Math.max(1, Math.round(0.25 / mpp)),
+    strip: Math.max(1, Math.round(0.55 / mpp))
+  };
+  // Only where there's enough contrast nearby to be a car (most of a site is lawn, roofs or bare pavement).
+  const near = localStats(C, w, h, half.wid).mean;
+  const cand = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (near[i] > VEH_INNER * 0.5) cand[i] = 1;
+  const best = new Float32Array(n), bestIn = new Float32Array(n), bestK = new Uint8Array(n);
+  const inners: Float32Array[] = [];
+  for (let k = 0; k < CAR_ANGLES; k++) {
+    const theta = (k * Math.PI) / CAR_ANGLES;
+    const { inner, around } = boxScores(C, Cs, cand, w, h, theta, half);
+    inners.push(inner);
+    for (let i = 0; i < n; i++) {
+      const s = inner[i] - around[i];
+      if (s > best[i]) { best[i] = s; bestIn[i] = inner[i]; bestK[i] = k; }
+    }
+  }
+  // Long the right way: the box along the car holds more of it than the box turned across.
+  for (let i = 0; i < n; i++) {
+    if (best[i] > 0 && inners[(bestK[i] + CAR_ANGLES / 2) % CAR_ANGLES][i] > bestIn[i]) best[i] = 0;
+  }
+  const bestA = (i: number) => (bestK[i] * Math.PI) / CAR_ANGLES;
+  // Peaks: strong enough, and the highest within about a car's half width.
+  const r = Math.max(1, Math.round(0.9 / mpp));
+  const peaks: number[] = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (best[i] < VEH_SCORE || bestIn[i] < VEH_INNER) continue;
+      let top = true;
+      for (let dy = -r; dy <= r && top; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -r; dx <= r; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= w || (dx === 0 && dy === 0)) continue;
+          if (best[yy * w + xx] > best[i]) { top = false; break; }
+        }
+      }
+      if (top) peaks.push(i);
+    }
+  }
+  peaks.sort((a, b) => best[b] - best[a]);
   const out: DetectedVehicle[] = [];
-  const fitsCar = (len: number, wid: number) => len >= 3.2 && len <= 6.6 && wid >= 1.3 && wid <= 2.9 && len / wid >= 1.4 && len / wid <= 4;
-  for (const comp of comps) {
-    // Shape from second moments
-    let sx = 0, sy = 0;
-    for (const k of comp) { sx += k % w; sy += (k / w) | 0; }
-    const cx = sx / comp.length, cy = sy / comp.length;
-    let xx = 0, yy = 0, xy = 0;
-    for (const k of comp) {
-      const dx = (k % w) - cx, dy = ((k / w) | 0) - cy;
-      xx += dx * dx; yy += dy * dy; xy += dx * dy;
-    }
-    xx /= comp.length; yy /= comp.length; xy /= comp.length;
-    const tr = xx + yy;
-    const det = xx * yy - xy * xy;
-    const disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - det));
-    const l1 = tr / 2 + disc, l2 = Math.max(1e-6, tr / 2 - disc);
-    // A filled rectangle of length L has variance L^2/12 along it.
-    const lengthPx = Math.sqrt(12 * l1);
-    const widthPx = Math.sqrt(12 * l2);
-    const fill = comp.length / (lengthPx * widthPx);
-    const lengthM = lengthPx * mpp, widthM = widthPx * mpp;
-    if (fill < 0.55) continue;
-    const axis = Math.atan2(l1 - xx, xy || 1e-9); // long axis angle (radians)
-    const ax = Math.cos(axis), ay = Math.sin(axis);
-    const angleDeg = (axis * 180) / Math.PI;
-    if (fitsCar(lengthM, widthM)) {
-      out.push({ x: cx, y: cy, lengthPx, widthPx, angleDeg });
-      continue;
-    }
-    // Several cars touching: side by side in a lot (strip as deep as a car is long), or nose to
-    // tail along a street (strip as wide as a car).
-    if (widthM > 3.3 && widthM <= 6.6 && lengthM >= 4.2) {
-      const count = Math.round(lengthM / 2.7);
-      if (count < 2 || count > 40) continue;
-      const step = lengthPx / count;
-      for (let k = 0; k < count; k++) {
-        const t = (k - (count - 1) / 2) * step;
-        out.push({ x: cx + ax * t, y: cy + ay * t, lengthPx: widthPx, widthPx: step * 0.85, angleDeg: angleDeg + 90 });
+  const lengthPx = (2 * half.len + 1), widthPx = (2 * half.wid + 1);
+  // How far the thing at (x, y) reaches along direction (ux, uy), averaging over its breadth
+  // (perpendicular, +-b px): until its contrast falls well below its middle's.
+  const reach = (x: number, y: number, ux: number, uy: number, b: number, level: number, max: number) => {
+    let below = 0;
+    for (let t = 1; t <= max; t++) {
+      let sum = 0, cnt = 0;
+      for (let k = -b; k <= b; k++) {
+        const xx = Math.round(x + ux * t - uy * k), yy = Math.round(y + uy * t + ux * k);
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        sum += C[yy * w + xx]; cnt++;
       }
-    } else if (widthM >= 1.3 && widthM <= 3.3 && lengthM > 6.6) {
-      const count = Math.round(lengthM / 5.4);
-      if (count < 2 || count > 20) continue;
-      const step = lengthPx / count;
-      for (let k = 0; k < count; k++) {
-        const t = (k - (count - 1) / 2) * step;
-        out.push({ x: cx + ax * t, y: cy + ay * t, lengthPx: step * 0.92, widthPx, angleDeg });
-      }
+      if (!cnt || sum / cnt < level) { if (++below >= 2) return t - 1; } else below = 0;
     }
+    return max;
+  };
+  for (const i of peaks) {
+    const x = i % w, y = (i / w) | 0, a = bestA(i);
+    // Its size: a car is about 3-7 m long and under about 3 m wide (sheds, planters, curbs are bigger).
+    const ux = Math.cos(a), uy = Math.sin(a), level = bestIn[i] * EXT_LEVEL;
+    const maxL = Math.round(6 / mpp);
+    const along = (reach(x, y, ux, uy, Math.max(1, Math.round(half.wid * 0.6)), level, maxL) + reach(x, y, -ux, -uy, Math.max(1, Math.round(half.wid * 0.6)), level, maxL) + 1) * mpp;
+    if (along > VEH_MAX_LEN) continue;
+    // What the box holds, on average, isn't tan like sand, soil or mulch.
+    {
+      let r = 0, g = 0, bb = 0, cnt = 0;
+      for (let t = -half.len; t <= half.len; t++) for (let k = -half.wid; k <= half.wid; k++) {
+        const xx = Math.round(x + ux * t - uy * k), yy = Math.round(y + uy * t + ux * k);
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const q = yy * w + xx; r += R[q]; g += G[q]; bb += B[q]; cnt++;
+      }
+      r /= cnt; g /= cnt; bb /= cnt;
+      if (r > g && g > bb && r - bb > SOIL_RB && r - bb > 0.2 * r) continue;
+    }
+    // Not inside a car already found (a car's own outline is one car).
+    const clash = out.some(c => {
+      const ca = (c.angleDeg * Math.PI) / 180;
+      const dx = x - c.x, dy = y - c.y;
+      const along = Math.abs(dx * Math.cos(ca) + dy * Math.sin(ca));
+      const across = Math.abs(-dx * Math.sin(ca) + dy * Math.cos(ca));
+      return (along < c.lengthPx * 0.75 && across < c.widthPx * 0.9) || Math.hypot(dx, dy) < 1.8 / mpp;
+    });
+    if (clash) continue;
+    out.push({ x, y, lengthPx, widthPx, angleDeg: (a * 180) / Math.PI });
   }
   return out.slice(0, opts.maxVehicles ?? 80);
 };

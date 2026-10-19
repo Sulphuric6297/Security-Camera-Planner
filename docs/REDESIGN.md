@@ -189,6 +189,11 @@ preview:
 - Plan library: New never wipes the plan. It goes under Open plan → Recent plans (with Undo), and
   you can reopen, delete (with Undo) or duplicate plans. Saved files are named after the plan.
 - Plan settings only hold what people use: grid, map image, camera cones in 3D.
+- Cars on the photo are found with a car-shaped matched filter: a 4.3 x 1.7 m box at 8 angles that
+  must stand out from the pavement (compared with the pavement's own colour nearby), with clear
+  pavement on a side or an end, contrast in every half, and no more than about 9 m of the same
+  thing in line. Cars side by side or nose to tail come out one by one. Checked against a
+  hand-labelled real satellite photo of a parking lot (77% of cars found, was 46%).
 - Each spot to protect that isn't covered well enough has a Fix button: it aims the camera that
   sees it best at it and zooms the lens in until it gets the wanted detail (or suggests a camera
   when none sees it).

@@ -14,7 +14,8 @@ Goal: plotting a camera system for one or more buildings is easy, feature-rich a
 - [x] Trees: canopy vs lawn by darkness + leaf texture, shadow edges ignored, touching crowns split (tuned on labelled NEON photos: ~1% -> ~50% of crowns in dense forest).
 - [x] Cars: compared with the pavement around them (any paint), rows of parked cars split.
 - [x] Traced roofs: edges snapped to the photo's edges; angled outlines kept.
-- [ ] Real suburban test imagery for cars (none reachable from the sandbox).
+- [x] Real test imagery for cars: a hand-labelled satellite photo of a parking lot (SpaceNet, Las Vegas) in the test suite. Cars found: 46% -> 77%.
+- [ ] Cars on home streets: yards, gravel and landscaping still give false cars (about as many as before); needs a pavement/driveway model.
 
 ## Wrong results / lost work
 - [x] Adding one view to the report drops the site plan and camera views from the PDF (code.tsx buildReport, src/lib/report.ts).

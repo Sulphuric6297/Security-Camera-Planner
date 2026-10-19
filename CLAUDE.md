@@ -72,7 +72,7 @@ Useful commands:
 | `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view; camera pictures rendered from the 3D scene |
 | `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |
-| `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows (pure logic) |
+| `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows; a hand-labelled real satellite photo of a parking lot (`tests/fixtures/aerial`) (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.
 
