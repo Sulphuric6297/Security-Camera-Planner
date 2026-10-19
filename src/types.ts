@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
@@ -159,4 +159,10 @@ export interface TargetItem extends BaseItem {
   label: string;
 }
 
-export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | TargetItem;
+/** The video recorder (NVR) every camera's cable runs back to. One per plan. */
+export interface RecorderItem extends BaseItem {
+  type: "recorder";
+  label: string;
+}
+
+export type CanvasItem = CameraItem | BuildingItem | TreeItem | ParkingItem | LabelItem | ImageItem | TargetItem | RecorderItem;

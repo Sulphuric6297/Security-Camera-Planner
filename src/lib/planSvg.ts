@@ -110,6 +110,17 @@ export const planSvg = (input: PlanSvgInput) => {
     }
   });
 
+  // Cable runs (right angles, like the estimate) from the recorder to each camera.
+  const rec = items.find(i => i.type === "recorder");
+  if (rec) {
+    items.forEach(item => {
+      if (item.type !== "camera") return;
+      const p = cameraPlanPosition(item as CameraItem, items);
+      out.push(`<polyline points="${f(rec.x)},${f(rec.y)} ${f(p.x)},${f(rec.y)} ${f(p.x)},${f(p.y)}" fill="none" stroke="#d97706" stroke-width="${f(1.5 * ui)}" stroke-dasharray="${f(5 * ui)} ${f(3 * ui)}" opacity="0.85"/>`);
+    });
+    out.push(`<g transform="translate(${f(rec.x)} ${f(rec.y)}) scale(${f(ui)})"><rect x="-15" y="-9" width="30" height="18" rx="4" fill="#f59e0b" stroke="#fff" stroke-width="2"/><text text-anchor="middle" dy="4" font-size="9" font-weight="800" font-family="system-ui, sans-serif" fill="#1c1917">REC</text></g>`);
+  }
+
   // Cameras and protected spots on top, at a readable size.
   items.forEach(item => {
     if (item.type === "camera") {

@@ -9,6 +9,7 @@ import {
   Camera,
   Square,
   Eye,
+  Ruler,
   Move,
   Trash2,
   Download,
@@ -48,6 +49,7 @@ import { ToolPanel, type ToolDefaults } from "./src/components/ToolPanel";
 import { ShortcutsDialog } from "./src/components/ShortcutsDialog";
 import { FloatingWindow } from "./src/components/FloatingWindow";
 import { CameraLook } from "./src/components/CameraLook";
+import { applyCameraSettings, pickCameraSettings, slideAlongWall, touchesCameraSettings, type CameraSettings } from "./src/lib/cameraProfile";
 import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targetStatus } from "./src/components/CoveragePanel";
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
 import { suggestCameras } from "./src/lib/suggest";
@@ -56,7 +58,7 @@ import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } f
 import { boundsOfPoints, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_PITCH, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, generateId, mountHeightForBuilding } from "./src/constants";
-import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, diagonalFromHv, doriLevelAt, fovFromDiagonal, getCameraAspectValue, getCameraHFov, getDoriDistances, getGroundCoverage, hFovFromV, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
+import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, doriLevelAt, getCameraAspectValue, getCameraHFov, getCameraResolution, getDoriDistances, getGroundCoverage, hFovForDensity, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
 import { TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
@@ -68,7 +70,7 @@ import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./s
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
 import { getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
-import { AUTOSAVE_KEY, idbGet, idbSet } from "./src/lib/storage";
+import { AUTOSAVE_KEY, type PlanMeta, idbGet, idbSet, listPlans, loadPlan, removePlan, storePlan } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
 import { getItemTypeLabel, resolveVehicleType } from "./src/three/models";
 import { SiteViewport } from "./src/viewport/SiteViewport";
@@ -76,6 +78,7 @@ import type { SiteView } from "./src/viewport/SiteView";
 import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
 import { cameraPlanPosition, heightAt, nearestWall } from "./src/lib/planGeom";
+import { cableRuns, cableSummary } from "./src/lib/cabling";
 import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
@@ -376,6 +379,11 @@ export default function SecurityPlanner() {
   // NVR Layout State
   const [nvrLayout, setNvrLayout] = useProjectField("nvrLayout");
   const [povCamId, setPovCamId] = useState<string | null>(null);
+  // Which plan this is, so starting or opening another keeps it in "Recent plans".
+  const [planId, setPlanId] = useState(() => generateId());
+  const [recentPlans, setRecentPlans] = useState<PlanMeta[]>([]);
+  // Night (infrared) while looking through a camera; back to day on leaving.
+  const [povNight, setPovNight] = useState(false);
   const nvrContainerRef = useRef<HTMLDivElement>(null);
   const [nvrSize, setNvrSize] = useState({ width: 0, height: 0 });
   const nvrAspect = useMemo(() => {
@@ -1271,16 +1279,8 @@ export default function SecurityPlanner() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const elementImageInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
-  const bg3dInputRef = useRef<HTMLInputElement>(null);
   const demInputRef = useRef<HTMLInputElement>(null);
 
-  const cameraSnapshotRendererRef = useRef<{
-    renderer: THREE.WebGLRenderer | null;
-    pmremGenerator: THREE.PMREMGenerator | null;
-    envTexture: THREE.Texture | null;
-    canvas: HTMLCanvasElement | null;
-  }>({ renderer: null, pmremGenerator: null, envTexture: null, canvas: null });
-  const [snapshots, setSnapshots] = useState<{ id: string; dataUrl: string; createdAt: string }[]>([]);
   const [vertexInsertMode, setVertexInsertMode] = useState(false);
   const [showCameraPreview, setShowCameraPreview] = useState(true);
   // Width of the floating camera view window (remembered per browser).
@@ -1440,7 +1440,7 @@ export default function SecurityPlanner() {
 
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, snapToGrid, siteLocation, siteBounds, planGeoRef, elevationOverlay, buildingLabelDefaults, demData, demScale, demOffset, demTransform]);
+  }, [items, planId, backgroundImg, bgSettings, canvasSize, exportList, projectName, frustumSettings, sceneBackgroundImg, backgroundMode, nvrLayout, terrainHeights, gridSize, showGrid, snapToGrid, siteLocation, siteBounds, planGeoRef, elevationOverlay, buildingLabelDefaults, demData, demScale, demOffset, demTransform]);
 
   // Ref for camera preview canvas
   const cameraPreviewRef = useRef<HTMLCanvasElement>(null);
@@ -1483,31 +1483,6 @@ export default function SecurityPlanner() {
   // On its wall (just outside it) when mounted on a building.
   const getCameraPlanPosition = (camera: CameraItem) => cameraPlanPosition(camera, items);
 
-  const snapCameraToNearestBuilding = (camera: CameraItem) => {
-    let best: { buildingId: string; edgeIndex: number; edgeT: number; distance: number; point: { x: number; y: number } } | null = null;
-    items.forEach(item => {
-      if (item.type !== "building") return;
-      const building = item as BuildingItem;
-      const worldPoints = getBuildingEdgePointsWorld(building);
-      for (let i = 0; i < worldPoints.length; i += 1) {
-        const nextIndex = (i + 1) % worldPoints.length;
-        const a = worldPoints[i];
-        const b = worldPoints[nextIndex];
-        const ab = { x: b.x - a.x, y: b.y - a.y };
-        const ap = { x: camera.x - a.x, y: camera.y - a.y };
-        const abLenSq = ab.x * ab.x + ab.y * ab.y || 1;
-        let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
-        t = clamp(t, 0, 1);
-        const proj = { x: a.x + ab.x * t, y: a.y + ab.y * t };
-        const dist = Math.hypot(camera.x - proj.x, camera.y - proj.y);
-        if (!best || dist < best.distance) {
-          best = { buildingId: building.id, edgeIndex: i, edgeT: t, distance: dist, point: proj };
-        }
-      }
-    });
-    return best;
-  };
-
   // Type for building edge info
   type BuildingEdgeInfo = {
     buildingId: string;
@@ -1525,8 +1500,16 @@ export default function SecurityPlanner() {
   // Places a new item for the active tool at a plan position (shared by the 2D plan and 3D view).
   // Sizes come from src/lib/items.ts in real feet, so objects are in proportion on any map.
   const placeNewItemAt = (type: ToolMode, x: number, y: number) => {
-    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target" } as Partial<Record<ToolMode, NewItemKind>>)[type];
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder" } as Partial<Record<ToolMode, NewItemKind>>)[type];
     if (!kind) return null;
+    // One recorder per plan: placing it again moves it.
+    const existingRecorder = kind === "recorder" ? itemsRef.current.find(i => i.type === "recorder") : undefined;
+    if (existingRecorder) {
+      setItems(prev => prev.map(i => (i.id === existingRecorder.id ? { ...i, x, y } : i)));
+      setSelectedId(existingRecorder.id);
+      setMode("select");
+      return { ...existingRecorder, x, y };
+    }
     const newItem = createItem(kind, x, y, {
       unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1,
       cameraIndex: nextCameraIndex(itemsRef.current),
@@ -1537,6 +1520,9 @@ export default function SecurityPlanner() {
       targetKind: toolDefaults.targetKind
     });
 
+    if (newItem.type === "camera" && lastCameraSettingsRef.current) {
+      Object.assign(newItem, applyCameraSettings(newItem as CameraItem, lastCameraSettingsRef.current, { height: false }));
+    }
     if (newItem.type === "camera") {
       // Clicked on a building: mount on its nearest wall. Otherwise snap onto a wall only when placed
       // right next to it, so cameras land where the user clicked.
@@ -1548,8 +1534,9 @@ export default function SecurityPlanner() {
         cam.y = edge.point.y;
         // Auto-rotate to face outward from building
         cam.rotation = edge.rotation;
-        // Mount just under the eave of the building it's attached to
-        const buildingHeight = mountHeightForBuilding(getBuildingById(edge.buildingId));
+        // At a face-friendly height on the wall, or the height of the mount the user last chose.
+        const last = lastCameraSettingsRef.current;
+        const buildingHeight = last?.mountPreset && last.mountHeight ? last.mountHeight : mountHeightForBuilding(getBuildingById(edge.buildingId));
         cam.mount = {
           type: "building",
           buildingId: edge.buildingId,
@@ -1585,10 +1572,21 @@ export default function SecurityPlanner() {
     setSelectedId(newItem.id);
   };
 
+  // The last camera setup the user made (lens, resolution, mount height...): new cameras start
+  // like it, so placing a row of identical cameras doesn't mean setting each one up again.
+  const lastCameraSettingsRef = useRef<CameraSettings | null>((() => {
+    try { return JSON.parse(localStorage.getItem("scp.lastCamera") || "null"); } catch { return null; }
+  })());
+  const rememberCameraSettings = (cam: CameraItem) => {
+    lastCameraSettingsRef.current = pickCameraSettings(cam);
+    try { localStorage.setItem("scp.lastCamera", JSON.stringify(lastCameraSettingsRef.current)); } catch { /* ignore */ }
+  };
   // Edits from the panels (chips, fields, sliders) become one undo step each, once they settle;
   // edits during a drag on the map are saved when the drag ends.
   const settleTimerRef = useRef(0);
   const updateItem = (id: string, updates: Partial<CanvasItem>) => {
+    const current = itemsRef.current.find(i => i.id === id);
+    if (current?.type === "camera" && touchesCameraSettings(updates)) rememberCameraSettings({ ...(current as CameraItem), ...(updates as Partial<CameraItem>) });
     if (!interactingRef.current) {
       window.clearTimeout(settleTimerRef.current);
       settleTimerRef.current = window.setTimeout(() => {
@@ -1621,30 +1619,6 @@ export default function SecurityPlanner() {
   // Mount height is stored on the mount (building or free); keep `height` in sync for older readers.
   const setCameraMountHeight = (camera: CameraItem, height: number) => {
     updateItem(camera.id, { height, mount: { ...(camera.mount ?? { type: "free" as const }), height } });
-  };
-
-  const updateCameraMount = (cameraId: string, updates: Partial<NonNullable<CameraItem["mount"]>>) => {
-    const camera = items.find(item => item.id === cameraId) as CameraItem | undefined;
-    if (!camera || camera.type !== "camera") return;
-    updateItem(cameraId, { mount: { ...(camera.mount ?? { type: "free" }), ...updates } });
-  };
-
-  const attachCameraToNearestBuilding = (cameraId: string) => {
-    const camera = items.find(item => item.id === cameraId) as CameraItem | undefined;
-    if (!camera || camera.type !== "camera") return;
-    const snap = snapCameraToNearestBuilding(camera) as { buildingId: string; edgeIndex: number; edgeT: number; distance: number; point: { x: number; y: number } } | null;
-    if (!snap) return;
-    updateItem(cameraId, {
-      x: snap.point.x,
-      y: snap.point.y,
-      mount: {
-        type: "building",
-        buildingId: snap.buildingId,
-        edgeIndex: snap.edgeIndex,
-        edgeT: snap.edgeT,
-        height: camera.mount?.height ?? camera.height ?? 10
-      }
-    });
   };
 
   const updateCameraFov = (cameraId: string, hFov: number, vFov: number, aspect: number) => {
@@ -1720,17 +1694,96 @@ export default function SecurityPlanner() {
     }
   };
 
-  const handleClearCanvas = () => {
-    if (!items.length) return;
-    if (window.confirm("Clear all items from the canvas?")) {
-      setItems([]);
-      setSelectedId(null);
+  // --- Plan library: starting or opening another plan keeps this one under "Recent plans" ---
+  const refreshRecentPlans = () => {
+    listPlans().then(setRecentPlans).catch(() => setRecentPlans([]));
+  };
+  // Keeps the open plan in the library; null when there is nothing in it worth keeping.
+  const archiveCurrentPlan = async (): Promise<PlanMeta | null> => {
+    if (items.length === 0 && !backgroundImg) return null;
+    const meta: PlanMeta = {
+      id: planId,
+      name: projectName,
+      updatedAt: Date.now(),
+      cameras: items.filter(i => i.type === "camera").length,
+      buildings: items.filter(i => i.type === "building").length
+    };
+    await storePlan(meta, { ...buildProjectData(true), exportList, demData });
+    return meta;
+  };
+  const openRecentPlan = async (id: string) => {
+    try {
+      const data = await loadPlan(id);
+      if (!data) {
+        showExportNotice("That plan is no longer saved in this browser.", "error");
+        refreshRecentPlans();
+        return;
+      }
+      const kept = await archiveCurrentPlan();
+      resetProject();
+      applyProjectData(data);
+      setPlanId(id);
+      if (data.demData && data.demData.values) {
+        setDemData(data.demData);
+        setDemPreview(buildDemPreview(data.demData));
+      }
+      resetHistory();
+      await removePlan(id);
+      showExportNotice(`Opened "${data.projectName || "plan"}".${kept ? ` "${kept.name}" is under Open plan → Recent plans.` : ""}`, "success");
+    } catch (err) {
+      console.error("Couldn't open the plan", err);
+      showExportNotice("Couldn't open that plan.", "error");
     }
+    refreshRecentPlans();
+  };
+  // Toasts run their action later, after more renders: always use the latest version.
+  const openRecentPlanRef = useRef(openRecentPlan);
+  openRecentPlanRef.current = openRecentPlan;
+  const deleteRecentPlan = async (id: string) => {
+    const meta = recentPlans.find(p => p.id === id);
+    try {
+      const data = await loadPlan(id);
+      await removePlan(id);
+      if (meta && data) showExportNotice(`Deleted "${meta.name}".`, "info", { label: "Undo", run: () => { storePlan(meta, data).then(refreshRecentPlans).catch(() => undefined); } });
+    } catch (err) {
+      console.error("Couldn't delete the plan", err);
+    }
+    refreshRecentPlans();
+  };
+  const duplicatePlan = async () => {
+    try {
+      await archiveCurrentPlan();
+    } catch (err) {
+      console.error("Couldn't keep the original plan", err);
+      showExportNotice("Couldn't keep a copy of the original, so nothing changed. Save it to a file first.", "error");
+      return;
+    }
+    const name = `${projectName} copy`;
+    setPlanId(generateId());
+    setProjectName(name);
+    showExportNotice(`Now editing "${name}". The original is under Open plan → Recent plans.`, "success");
+    refreshRecentPlans();
   };
 
-  const handleNewProject = () => {
-    if (!window.confirm("Start a new project? This will clear the current project.")) return;
+  const handleNewProject = async () => {
+    let kept: PlanMeta | null;
+    try {
+      kept = await archiveCurrentPlan();
+    } catch (err) {
+      console.error("Couldn't keep the current plan", err);
+      showExportNotice("Couldn't keep a copy of this plan, so it wasn't cleared. Save it to a file first.", "error");
+      return;
+    }
+    resetProject();
+    setPlanId(generateId());
+    if (kept) {
+      const keptId = kept.id;
+      showExportNotice(`New plan started. "${kept.name}" is under Open plan → Recent plans.`, "success", { label: "Undo", run: () => openRecentPlanRef.current(keptId) }, 8000);
+    }
+    refreshRecentPlans();
+  };
 
+  const resetProject = () => {
     setItems([]);
     setSelectedId(null);
     setBackgroundImg(null);
@@ -1747,7 +1800,6 @@ export default function SecurityPlanner() {
     setSnapToGrid(true);
     setProjectName("Security Camera Plan");
     setExportList([]);
-    setSnapshots([]);
     setFrustumSettings({
       visible: true,
       opacity: 0.15,
@@ -1795,18 +1847,9 @@ export default function SecurityPlanner() {
     setElevationQuery("");
     setElevationStatus({ state: "idle", message: "" });
     resetHistory();
-    setRightPanelMode("project");
-    setIsRightPanelOpen(true);
-  };
-
-  const handleFitBackground = () => {
-    setBgSettings({
-      ...bgSettings,
-      x: 0,
-      y: 0,
-      width: canvasSize.width,
-      height: canvasSize.height
-    });
+    // A fresh start: back to the first step, nothing open on the right.
+    setRightPanelMode("properties");
+    setActiveStepChoice(null);
   };
 
   // --- Auto-trace a roof from the satellite map ---
@@ -2094,10 +2137,10 @@ export default function SecurityPlanner() {
 
   // What a camera sees, drawn from the map's own 3D scene (same models, shadows and light), with
   // the name and time stamped on like a recorder would.
-  const renderCameraViewToCanvas = (cam: CameraItem, width = 1280): HTMLCanvasElement => {
+  const renderCameraViewToCanvas = (cam: CameraItem, width = 1280, night = false): HTMLCanvasElement => {
     const aspect = getCameraAspectValue(cam);
     const height = Math.max(Math.round(width / 3.6), Math.round(width / aspect));
-    let canvas = viewRef.current?.renderCameraView(cam.id, width, height) ?? null;
+    let canvas = viewRef.current?.renderCameraView(cam.id, width, height, night) ?? null;
     if (!canvas) {
       canvas = document.createElement("canvas");
       canvas.width = width;
@@ -2134,7 +2177,7 @@ export default function SecurityPlanner() {
     ctx.restore();
   };
 
-  const renderCameraViewToDataUrl = (cam: CameraItem): string => renderCameraViewToCanvas(cam).toDataURL('image/png');
+  const renderCameraViewToDataUrl = (cam: CameraItem, night = false): string => renderCameraViewToCanvas(cam, 1280, night).toDataURL('image/png');
 
   // Add current 2D plan to export list
   const addPlanToExportList = async () => {
@@ -2167,40 +2210,14 @@ export default function SecurityPlanner() {
   };
 
   // Add camera view to export list
-  const addCameraViewToExportList = (cam: CameraItem) => {
+  const addCameraViewToExportList = (cam: CameraItem, night = false) => {
     try {
-      const dataUrl = renderCameraViewToDataUrl(cam);
-      addToExportList('camera', `Camera: ${cam.label}`, dataUrl, cam.id);
+      const dataUrl = renderCameraViewToDataUrl(cam, night);
+      addToExportList('camera', `Camera: ${cam.label}${night ? " (night)" : ""}`, dataUrl, cam.id);
     } catch (e) {
       console.error("Camera export failed", e);
       showExportNotice("Failed to capture camera view.", "error");
     }
-  };
-
-
-
-  // Handle panorama/HDRI file upload with auto-detection
-  const handlePanoramaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target?.result as string;
-
-      // Create image to check aspect ratio
-      const img = new Image();
-      img.onload = () => {
-        // If aspect ratio is close to 2:1, it's likely equirectangular
-        const aspectRatio = img.width / img.height;
-        const isPanorama = aspectRatio >= 1.8 && aspectRatio <= 2.2;
-
-        setSceneBackgroundImg(dataUrl);
-        setBackgroundMode(isPanorama ? 'panorama' : 'flat');
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
   };
 
   // Export comprehensive report with all items in export list
@@ -2405,6 +2422,7 @@ export default function SecurityPlanner() {
         cameras: buildReportCameras(true),
         spots: buildReportSpots(),
         counts: { buildings: items.filter(i => i.type === "building").length },
+        cabling: cabling ? { channels: cabling.summary.channels, totalFt: cabling.summary.totalFt, boxes: cabling.summary.boxes, runs: cabling.runs } : undefined,
         storage: (() => {
           const widths = (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH);
           if (!widths.length) return undefined;
@@ -2437,6 +2455,7 @@ export default function SecurityPlanner() {
     if (typeof projectData.showGrid === "boolean") setShowGrid(projectData.showGrid);
     if (typeof projectData.snapToGrid === "boolean") setSnapToGrid(projectData.snapToGrid);
     if (projectData.projectName) setProjectName(projectData.projectName);
+    setPlanId(typeof projectData.planId === "string" && projectData.planId ? projectData.planId : generateId());
     setExportList(Array.isArray(projectData.exportList) ? projectData.exportList : []);
     if (projectData.frustumSettings) setFrustumSettings(projectData.frustumSettings);
     setSceneBackgroundImg(projectData.sceneBackgroundImg || null);
@@ -2465,6 +2484,7 @@ export default function SecurityPlanner() {
 
   const buildProjectData = (includeTerrain = true, hasTerrain = false) => ({
     version: 2,
+    planId,
     items,
     ...(includeTerrain
       ? { terrainHeights }
@@ -2531,7 +2551,7 @@ export default function SecurityPlanner() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "security_project.zip";
+      link.download = `${(projectName || "security_plan").replace(/[^\w-]+/g, "_")}.zip`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -2811,12 +2831,36 @@ export default function SecurityPlanner() {
 
   // A copy offset from the original. Building-mounted cameras become free-standing so the copy
   // doesn't sit exactly on top of the original; names get a "copy" suffix.
+  // Camera settings clipboard: make one camera's setup match another's in two keystrokes.
+  const cameraSettingsClipRef = useRef<{ from: string; settings: CameraSettings } | null>(null);
+  const copyCameraSettings = (cam: CameraItem) => {
+    cameraSettingsClipRef.current = { from: cam.label, settings: pickCameraSettings(cam) };
+    showExportNotice(`Copied ${cam.label}'s settings. Select another camera and paste them (Ctrl+Shift+V).`, "info");
+  };
+  const pasteCameraSettings = (cam: CameraItem) => {
+    const clip = cameraSettingsClipRef.current;
+    if (!clip) {
+      showExportNotice("Copy a camera's settings first (Ctrl+Shift+C).", "info");
+      return;
+    }
+    // An edit still settling gets its own undo step first.
+    window.clearTimeout(settleTimerRef.current);
+    saveHistory();
+    const next = applyCameraSettings(cam, clip.settings);
+    const nextItems = itemsRef.current.map(i => (i.id === cam.id ? next : i));
+    setItems(nextItems);
+    saveHistory(nextItems);
+    showExportNotice(`${cam.label} now has ${clip.from}'s settings.`, "success", { label: "Undo", run: handleUndo });
+  };
+
   const pastedCopy = (item: CanvasItem): CanvasItem => {
     const base = item.type === "camera" ? getCameraPlanPosition(item as CameraItem) : { x: item.x, y: item.y };
     const copy: any = { ...structuredClone(item), id: generateId(), x: base.x + 15, y: base.y + 15 };
     if (copy.type === "camera") {
-      copy.mount = { ...(copy.mount ?? {}), type: "free", buildingId: undefined };
-      copy.label = `${copy.label} copy`;
+      // On a wall: the copy goes further along the same wall. Otherwise it stands free nearby.
+      const along = slideAlongWall(item as CameraItem, itemsRef.current, 10, planGeoRef?.unitsPerFoot ?? 1);
+      copy.mount = along ?? { ...(copy.mount ?? {}), type: "free", buildingId: undefined };
+      copy.label = /^Camera \d+$/.test(copy.label) ? `Camera ${nextCameraIndex(itemsRef.current) + 1}` : `${copy.label} copy`;
     }
     if (copy.type === "building") copy.importSource = undefined;
     return copy as CanvasItem;
@@ -2838,7 +2882,7 @@ export default function SecurityPlanner() {
       const p = getCameraPlanPosition(item as CameraItem);
       return { minX: p.x, minY: p.y, maxX: p.x, maxY: p.y };
     }
-    if (item.type === "target") return { minX: item.x, minY: item.y, maxX: item.x, maxY: item.y };
+    if (item.type === "target" || item.type === "recorder") return { minX: item.x, minY: item.y, maxX: item.x, maxY: item.y };
     const r = item.type === "tree" ? (item as TreeItem).radius : Math.max((item as any).width ?? 0, (item as any).height ?? 0) / 2;
     return { minX: item.x - r, minY: item.y - r, maxX: item.x + r, maxY: item.y + r };
   };
@@ -2868,11 +2912,18 @@ export default function SecurityPlanner() {
     else zoomToFit();
   };
   const zoomBy = (factor: number) => viewRef.current?.zoomBy(factor);
+  // Picking something in a side list selects it and brings it into view (clear of the inspector).
+  const selectFromList = (id: string) => {
+    setSelectedId(id);
+    setMode("select");
+    if (viewMode === "nvr") return;
+    window.requestAnimationFrame(() => viewRef.current?.reveal(id, 320));
+  };
 
   // --- Actions on the selection (shared by the floating action bar and shortcuts) ---
   const duplicateSelected = () => {
     const item = selectedId ? items.find(i => i.id === selectedId) : null;
-    if (!item) return;
+    if (!item || item.type === "recorder") return; // one recorder per plan
     const copy = pastedCopy(item);
     const nextItems = [...items, copy];
     setItems(nextItems);
@@ -2894,7 +2945,7 @@ export default function SecurityPlanner() {
 
       // Single-key tools (shown in the toolbar tooltips)
       if (!mod && !event.altKey) {
-        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label", m: "add-target" };
+        const toolKeys: Record<string, ToolMode> = { v: "select", c: "add-camera", b: "add-building", r: "trace-building", t: "add-tree", p: "add-parking", l: "add-label", m: "add-target", d: "measure" };
         const tool = toolKeys[event.key.toLowerCase()];
         if (tool) {
           event.preventDefault();
@@ -2964,6 +3015,17 @@ export default function SecurityPlanner() {
           duplicateSelected();
         }
 
+        // Copy / paste a camera's settings onto another camera (Ctrl+Shift+C / Ctrl+Shift+V)
+        if (event.shiftKey && (key === "c" || key === "v")) {
+          const cam = items.find(i => i.id === selectedId && i.type === "camera") as CameraItem | undefined;
+          if (cam) {
+            event.preventDefault();
+            if (key === "c") copyCameraSettings(cam);
+            else pasteCameraSettings(cam);
+          }
+          return;
+        }
+
         // Copy (Ctrl+C)
         if (key === "c") {
           if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
@@ -3021,22 +3083,6 @@ export default function SecurityPlanner() {
       setVertexInsertMode(false);
     }
   }, [viewMode]);
-
-  useEffect(() => {
-    return () => {
-      const snapshot = cameraSnapshotRendererRef.current;
-      if (snapshot?.renderer) {
-        snapshot.renderer.dispose();
-      }
-      if (snapshot?.pmremGenerator) {
-        snapshot.pmremGenerator.dispose();
-      }
-      if (snapshot?.envTexture) {
-        snapshot.envTexture.dispose();
-      }
-      cameraSnapshotRendererRef.current = { renderer: null, pmremGenerator: null, envTexture: null, canvas: null };
-    };
-  }, []);
 
   // Preload background image for camera preview
   useEffect(() => {
@@ -3172,7 +3218,8 @@ export default function SecurityPlanner() {
       { mode: "add-building", icon: Square, label: "Add building", key: "B" },
       { mode: "add-tree", icon: Trees, label: "Add tree", key: "T" },
       { mode: "add-parking", icon: Car, label: "Add vehicle", key: "P" },
-      { mode: "add-label", icon: Type, label: "Add text", key: "L" }
+      { mode: "add-label", icon: Type, label: "Add text", key: "L" },
+      { mode: "measure", icon: Ruler, label: "Measure a distance", key: "D" }
     ];
     const btn = (on: boolean) =>
       `relative w-10 h-10 rounded-xl flex items-center justify-center transition-colors ${on ? "bg-indigo-600 text-white shadow-lg shadow-indigo-500/30" : "text-slate-300 hover:text-white hover:bg-white/10"}`;
@@ -3313,6 +3360,18 @@ export default function SecurityPlanner() {
     showExportNotice(`Added ${added.length} camera${added.length === 1 ? "" : "s"}. Adjust them as you like.`, "success", { label: "Undo", run: handleUndo });
   };
   const targetItems = items.filter(i => i.type === "target") as TargetItem[];
+  // Each camera's cable run back to the recorder (once it is placed).
+  const cabling = useMemo(() => {
+    const rec = items.find(i => i.type === "recorder");
+    const cams = items.filter(i => i.type === "camera") as CameraItem[];
+    if (!rec || !cams.length) return null;
+    const runs = cableRuns(
+      cams.map((c, i) => ({ ...cameraPlanPosition(c, items), id: c.id, number: i + 1, label: c.label, heightFt: c.mount?.height ?? c.height ?? DEFAULT_CAMERA_HEIGHT_FT })),
+      rec,
+      planGeoRef?.unitsPerFoot ?? 1
+    );
+    return { runs, summary: cableSummary(runs) };
+  }, [items, planGeoRef]);
   const targetResults = useMemo(
     () => new Map(evaluateTargets(coverageModel.cameras, targetItems, coverageModel.obstacles, coverageModel.upf).map(r => [r.targetId, r])),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3361,6 +3420,7 @@ export default function SecurityPlanner() {
       if (e.ctrlKey || e.metaKey) return; // undo/redo/save still work
       const i = cameraItems.findIndex(c => c.id === povCamId);
       if (e.key === "Escape" || e.key === "Enter") setPovCamId(null);
+      else if (e.key === "n" || e.key === "N") setPovNight(v => !v);
       else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && cameraItems.length > 1) {
         const next = cameraItems[(i + (e.key === "ArrowRight" ? 1 : -1) + cameraItems.length) % cameraItems.length];
         lookThrough(next.id);
@@ -3372,6 +3432,12 @@ export default function SecurityPlanner() {
     return () => window.removeEventListener("keydown", onKey, true);
   });
   const povCamera = povCamId ? cameraItems.find(c => c.id === povCamId) ?? null : null;
+  useEffect(() => {
+    if (!povCamId) setPovNight(false);
+  }, [povCamId]);
+  useEffect(() => {
+    viewRef.current?.setPovNight(povNight);
+  }, [povNight]);
   // What a camera gets: its setup, and how well it sees each spot it is the best camera for.
   const cameraDetails = (cam: CameraItem | null) => {
     if (!cam) return [];
@@ -3392,7 +3458,9 @@ export default function SecurityPlanner() {
     if (!mine.length && targetItems.length) lines.push({ text: "Not the best camera for any marked spot", tone: "warn" });
     return lines;
   };
-  const povDetails = cameraDetails(povCamera);
+  const povDetails = povCamera && povNight
+    ? [{ text: `Night: infrared lights about ${Math.round(povCamera.irRangeFt ?? DEFAULT_IR_RANGE_FT)} ft (black and white)` }, ...cameraDetails(povCamera)]
+    : cameraDetails(povCamera);
 
   const blindSpots = useMemo(() => {
     if (!showBlindSpots || viewMode === "nvr") return null;
@@ -3432,6 +3500,31 @@ export default function SecurityPlanner() {
     setTimeout(() => saveHistory(), 50);
   };
 
+  // One click for a spot that isn't covered well enough: aim the camera that sees it best at it and
+  // zoom the lens in until it gets the detail wanted (a varifocal lens goes to about 25°). With no
+  // camera seeing it at all, suggest one.
+  const fixSpot = (targetId: string) => {
+    const t = targetItems.find(x => x.id === targetId);
+    if (!t) return;
+    const camId = targetResults.get(targetId)?.best?.cameraId;
+    const cam = camId ? cameraItems.find(c => c.id === camId) : undefined;
+    if (!cam) {
+      handleSuggestCameras();
+      return;
+    }
+    const pos = getCameraPlanPosition(cam);
+    const distanceFt = Math.hypot(t.x - pos.x, t.y - pos.y) / (planGeoRef?.unitsPerFoot ?? 1);
+    const rotation = ((((Math.atan2(t.y - pos.y, t.x - pos.x) * 180) / Math.PI) % 360) + 360) % 360;
+    const pitch = suggestPitchForDistance(cam.mount?.height ?? cam.height ?? DEFAULT_CAMERA_HEIGHT_FT, distanceFt);
+    const goal = DORI_LEVELS.find(l => l.id === (t.goal ?? "recognize")) ?? DORI_LEVELS[1];
+    const current = getCameraHFov(cam);
+    const hFov = Math.round(Math.max(25, Math.min(current, hFovForDensity(getCameraResolution(cam), goal.ppm, distanceFt * 1.1))));
+    const zoom = hFov < current - 0.5;
+    updateItem(cam.id, { rotation, pitch, ...(zoom ? { hFov, fov: hFov } : {}) } as Partial<CameraItem>);
+    setTimeout(() => saveHistory(), 50);
+    showExportNotice(`Aimed ${cam.label} at ${t.label}${zoom ? ` and zoomed in to ${hFov}° wide` : ""}.`, "success", { label: "Undo", run: handleUndo });
+  };
+
   // --- What the map view shows, and what it reports back ---
   const viewDoc = useMemo<ViewDoc>(() => ({
     items,
@@ -3462,7 +3555,7 @@ export default function SecurityPlanner() {
 
   // A sample of what a click would place, for the preview under the cursor.
   const placePreview = useMemo(() => {
-    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target" } as Partial<Record<ToolMode, NewItemKind>>)[mode];
+    const kind = ({ "add-camera": "camera", "add-building": "building", "add-tree": "tree", "add-parking": "parking", "add-label": "label", "add-target": "target", "add-recorder": "recorder" } as Partial<Record<ToolMode, NewItemKind>>)[mode];
     if (!kind) return null;
     return createItem(kind, 0, 0, { unitsPerFoot: planGeoRef?.unitsPerFoot ?? 1, ...toolDefaults });
   }, [mode, toolDefaults, planGeoRef]);
@@ -3564,6 +3657,8 @@ export default function SecurityPlanner() {
       case "add-parking": return "Click to place a vehicle";
       case "add-label": return "Click to add a text label";
       case "add-target": return "Click a door, gate or driveway you want covered · Esc to cancel";
+      case "add-recorder": return "Click where the recorder (NVR) goes, such as a closet or garage · Esc to cancel";
+      case "measure": return "Click two points to measure · Shift+click to keep going · Esc when done";
       default:
         if (aimingCameraId) return "Click where the camera should look · Esc to cancel";
         if (selectedCamera) return "Drag the camera to move it · blue dot aims it · side dots widen · tip sets range · bar above sets height";
@@ -3624,16 +3719,7 @@ export default function SecurityPlanner() {
   const cameraPreviewWidth = Math.round(previewWidth * Math.min(2, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1));
   const cameraPreviewHeight = Math.round(cameraPreviewWidth / cameraAspect);
   const cameraHFov = selectedCamera ? selectedCamera.hFov ?? selectedCamera.fov : 109;
-  const cameraVFov = selectedCamera ? selectedCamera.vFov ?? vFovFromH(cameraHFov, cameraAspect) : vFovFromH(109, 16 / 9);
-  const cameraDiag = selectedCamera ? diagonalFromHv(cameraHFov, cameraVFov) : 90;
-  const buildingOptions = items.filter(item => item.type === "building") as BuildingItem[];
   const mountType = selectedCamera?.mount?.type ?? "free";
-  const mountBuilding = selectedCamera?.mount?.buildingId
-    ? getBuildingById(selectedCamera.mount.buildingId)
-    : buildingOptions[0];
-  const mountEdgeCount = mountBuilding ? getBuildingPoints(mountBuilding).length : 0;
-  const mountEdgeIndex = selectedCamera?.mount?.edgeIndex ?? 0;
-  const mountEdgeT = selectedCamera?.mount?.edgeT ?? 0.5;
   const workspaceRightPadding = "";
   const workspaceLayoutClass = "items-stretch justify-stretch";
   const nvrGridWidth = Math.max(320, (nvrSize.width || canvasSize.width) - 32);
@@ -4309,7 +4395,7 @@ export default function SecurityPlanner() {
                 reportViews={exportList.length}
                 showAllCones={frustumSettings.showAll !== false}
                 onToggleCones={show => setFrustumSettings(prev => ({ ...prev, showAll: show }))}
-                onSelect={id => { setSelectedId(id); setMode("select"); }}
+                onSelect={selectFromList}
                 onMine={(id, mine) => { updateItem(id, { mine } as Partial<CanvasItem>); }}
                 onLook={lookThrough}
                 startCardShown={viewMode === "plan" && items.length === 0 && !backgroundImg && !isTerrainMode && mode === "select"}
@@ -4324,6 +4410,14 @@ export default function SecurityPlanner() {
                 onAddViewToReport={() => (viewMode === "iso3d" ? add3dToExportList() : addPlanToExportList())}
                 onMoreReportOptions={() => setShowExportPanel(true)}
                 onCamerasCsv={handleDownloadCamerasCsv}
+                cabling={cabling && {
+                  channels: cabling.summary.channels,
+                  totalFt: cabling.summary.totalFt,
+                  boxes: cabling.summary.boxes,
+                  longest: cabling.summary.longest && { label: cabling.summary.longest.label, lengthFt: cabling.summary.longest.lengthFt },
+                  tooLong: cabling.summary.tooLong.map(r => r.label)
+                }}
+                onPlaceRecorder={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-recorder"); }}
                 storage={{
                   widths: (items.filter(i => i.type === "camera") as CameraItem[]).map(c => c.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH),
                   days: recordDays,
@@ -4337,13 +4431,14 @@ export default function SecurityPlanner() {
                     results={targetResults}
                     cameras={items.filter(i => i.type === "camera") as CameraItem[]}
                     onAdd={() => { if (viewMode !== "plan") setViewMode("plan"); setMode("add-target"); }}
-                    onSelect={id => { setSelectedId(id); setMode("select"); }}
+                    onSelect={selectFromList}
                     onUpdate={(id, patch) => { updateItem(id, patch); setTimeout(() => saveHistory(), 50); }}
                     onDelete={id => { deleteItem(id); setTimeout(() => saveHistory(), 50); }}
                     showBlindSpots={showBlindSpots}
                     onToggleBlindSpots={on => { setShowBlindSpots(on); if (on && viewMode !== "plan") setViewMode("plan"); }}
                     coveredFraction={blindSpots?.coveredFraction ?? null}
                     onSuggest={handleSuggestCameras}
+                    onFix={fixSpot}
                     night={nightCoverage}
                     onToggleNight={setNightCoverage}
                   />
@@ -4356,7 +4451,7 @@ export default function SecurityPlanner() {
                 }}
                 className="text-xs text-slate-500 hover:text-slate-300 text-left"
               >
-                Plan settings (name, size, grid, labels)…
+                Plan settings (name, grid, map, cones)…
               </button>
           </div>
         </aside>
@@ -4366,7 +4461,6 @@ export default function SecurityPlanner() {
       <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleBackgroundUpload} />
       <input type="file" ref={elementImageInputRef} className="hidden" accept="image/*" onChange={handleElementImageUpload} />
       <input type="file" ref={projectInputRef} className="hidden" accept=".json,.zip" onChange={handleLoadProject} />
-      <input type="file" ref={bg3dInputRef} className="hidden" accept="image/*,.hdr" onChange={handlePanoramaUpload} />
       <input type="file" ref={demInputRef} className="hidden" accept=".tif,.tiff" onChange={handleDemUpload} />
 
       {/* --- Top Header --- */}
@@ -4376,8 +4470,13 @@ export default function SecurityPlanner() {
         onToggleSidebar={() => setSidebarOpen(v => !v)}
         projectName={projectName}
         onRename={setProjectName}
-        onNew={handleNewProject}
+        onNew={() => { void handleNewProject(); }}
         onOpen={() => projectInputRef.current?.click()}
+        recentPlans={recentPlans}
+        onRecentMenu={refreshRecentPlans}
+        onOpenRecent={id => { void openRecentPlan(id); }}
+        onDeleteRecent={id => { void deleteRecentPlan(id); }}
+        onDuplicate={() => { void duplicatePlan(); }}
         onSave={handleSaveProject}
         stepsDone={workflowStepsDone}
         activeStep={activeStep}
@@ -4449,7 +4548,7 @@ export default function SecurityPlanner() {
 
       <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen ? 352 : 0, right: 0 }}>
         {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
-        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || mode !== "select") && (
+        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure")) && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
               {isTerrainMode ? (
                 <div className="flex flex-col gap-4" data-testid="terrain-panel">
@@ -4896,7 +4995,7 @@ export default function SecurityPlanner() {
               hidden={viewMode === "nvr"}
               actions={selectedItem && mode === "select" && !isTerrainMode && !interacting ? {
                 duplicate: duplicateSelected,
-                rotate: selectedItem.type === "target" || (selectedCamera?.mount?.type === "building") ? undefined : () => rotateSelected(15),
+                rotate: selectedItem.type === "target" || selectedItem.type === "recorder" || (selectedCamera?.mount?.type === "building") ? undefined : () => rotateSelected(15),
                 look: selectedCamera ? () => lookThrough(selectedCamera.id) : undefined,
                 remove: () => { deleteItem(selectedItem.id); setTimeout(() => saveHistory(), 50); },
                 zoomTo: zoomToSelection
@@ -4912,7 +5011,9 @@ export default function SecurityPlanner() {
                   details={povDetails}
                   onSwitch={lookThrough}
                   onExit={() => setPovCamId(null)}
-                  onAddToReport={() => addCameraViewToExportList(povCamera)}
+                  onAddToReport={() => addCameraViewToExportList(povCamera, povNight)}
+                  night={povNight}
+                  onNight={setPovNight}
                   rightInset={inspectorVisible ? 320 : 0}
                 />
               )}
@@ -5250,7 +5351,16 @@ export default function SecurityPlanner() {
           {selectedItem && !showProjectSettings ? (
             <div className="p-6 flex flex-col gap-6">
               <div className="flex items-center justify-between border-b border-white/10 pb-4">
-                <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {getItemTypeLabel(selectedItem.type)}</h2>
+                {selectedCamera ? (
+                  <h2 className="font-bold text-lg text-slate-200 flex items-center gap-2 min-w-0">
+                    <span className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: selectedCamera.color }} title="Camera number (on the map and in the report)">
+                      {cameraItems.findIndex(c => c.id === selectedCamera.id) + 1}
+                    </span>
+                    <span className="truncate">{selectedCamera.label}</span>
+                  </h2>
+                ) : (
+                  <h2 className="font-bold text-lg text-slate-200 capitalize">Edit {getItemTypeLabel(selectedItem.type)}</h2>
+                )}
                 <button
                   onClick={() => setSelectedId(null)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
@@ -5260,7 +5370,7 @@ export default function SecurityPlanner() {
                 </button>
               </div>
 
-              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && selectedItem.type !== "target" && (
+              {selectedItem.type !== "label" && selectedItem.type !== "parking" && selectedItem.type !== "camera" && selectedItem.type !== "tree" && selectedItem.type !== "target" && selectedItem.type !== "recorder" && (
                 <div className={`${panelSection} ${inspectorOrder("advanced")}`}>
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
                     <span>Rotation</span>
@@ -5281,6 +5391,7 @@ export default function SecurityPlanner() {
                 selectedItem.type === "building" ||
                 selectedItem.type === "image" ||
                 selectedItem.type === "target" ||
+                selectedItem.type === "recorder" ||
                 selectedItem.type === "label") && (
                   <div className={`${panelSection} ${inspectorOrder("name")}`}>
                     <label className="text-xs font-semibold text-slate-400 uppercase">
@@ -5749,6 +5860,14 @@ export default function SecurityPlanner() {
                   <button onClick={() => lookThrough(selectedItem.id)} className="mt-1.5 w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold">
                     <Eye className="w-4 h-4" /> Look through this camera
                   </button>
+                  <div className="grid grid-cols-2 gap-1.5 pt-1">
+                    <button onClick={() => copyCameraSettings(selectedItem as CameraItem)} className="py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200" title="Copy this camera's lens, resolution, tilt and height (Ctrl+Shift+C)">
+                      Copy settings
+                    </button>
+                    <button onClick={() => pasteCameraSettings(selectedItem as CameraItem)} className="py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-[11px] font-semibold text-slate-200" title="Give this camera the copied settings (Ctrl+Shift+V)">
+                      Paste settings
+                    </button>
+                  </div>
                 </div>
                 <div className={panelSection}>
                   <CameraSetupPanel
@@ -5764,270 +5883,77 @@ export default function SecurityPlanner() {
                 </div>
                 <details className={`${panelSectionLoose} group`}>
                   <summary className="cursor-pointer list-none flex items-center justify-between gap-3 text-xs font-semibold text-slate-300">
-                    <span className="uppercase whitespace-nowrap">Fine-tune</span>
-                    <span className="text-slate-500 font-normal text-right group-open:hidden">exact angles, lens & mounting</span>
+                    <span className="uppercase whitespace-nowrap">Exact settings</span>
+                    <span className="text-slate-500 font-normal text-right group-open:hidden">view width, range, turn, tilt, height, notes</span>
                   </summary>
                   <div className="space-y-4 pt-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Horizontal FOV</span>
-                      <span>{Math.round(cameraHFov)}deg</span>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400 flex justify-between">
+                      <span>View width</span>
+                      <span>{Math.round(cameraHFov)}°</span>
                     </label>
-                    <input
-                      type="range"
-                      min="10"
-                      max="180"
-                      value={cameraHFov}
-                      onChange={e => {
-                        const h = parseInt(e.target.value);
-                        const v = vFovFromH(h, cameraAspect);
-                        updateCameraFov(selectedItem.id, h, v, cameraAspect);
-                      }}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
+                    <input type="range" min="10" max="180" value={cameraHFov} onChange={e => { const h = parseInt(e.target.value); updateCameraFov(selectedItem.id, h, vFovFromH(h, cameraAspect), cameraAspect); }} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600" />
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Vertical FOV</span>
-                      <span>{Math.round(cameraVFov)}deg</span>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400 flex justify-between">
+                      <span>Shown out to</span>
+                      <span>{Math.round((selectedItem as CameraItem).range)} ft</span>
                     </label>
-                    <input
-                      type="range"
-                      min="10"
-                      max="180"
-                      value={cameraVFov}
-                      onChange={e => {
-                        const v = parseInt(e.target.value);
-                        const h = hFovFromV(v, cameraAspect);
-                        updateCameraFov(selectedItem.id, h, v, cameraAspect);
-                      }}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
+                    <input type="range" min="5" max="800" value={(selectedItem as CameraItem).range} onChange={e => updateItem(selectedItem.id, { range: parseInt(e.target.value) })} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600" />
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Diagonal FOV</span>
-                      <span>{Math.round(cameraDiag)}deg</span>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400 flex justify-between">
+                      <span>Turn</span>
+                      <span>{Math.round(selectedItem.rotation)}°</span>
                     </label>
-                    <input
-                      type="range"
-                      min="20"
-                      max="180"
-                      value={cameraDiag}
-                      onChange={e => {
-                        const diag = parseInt(e.target.value);
-                        const { h, v } = fovFromDiagonal(diag, cameraAspect);
-                        updateCameraFov(selectedItem.id, h, v, cameraAspect);
-                      }}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
+                    <input type="range" min="0" max="360" value={selectedItem.rotation} onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600" />
                   </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Aspect Ratio</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400 flex justify-between">
+                      <span>Tilt</span>
+                      <span>{Math.round((selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH)}°</span>
+                    </label>
+                    <input type="range" min="-89" max="30" value={(selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH} onChange={e => updateItem(selectedItem.id, { pitch: parseInt(e.target.value) })} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400 flex justify-between">
+                      <span>Height</span>
+                      <span>{Math.round((selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10)} ft</span>
+                    </label>
+                    <input type="range" min="2" max="40" value={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10} onChange={e => setCameraMountHeight((selectedItem as CameraItem), parseInt(e.target.value))} className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400">Picture shape</label>
                     <select
                       value={cameraAspect}
                       onChange={e => {
                         const aspect = parseFloat(e.target.value);
-                        const v = vFovFromH(cameraHFov, aspect);
-                        updateCameraFov(selectedItem.id, cameraHFov, v, aspect);
+                        updateCameraFov(selectedItem.id, cameraHFov, vFovFromH(cameraHFov, aspect), aspect);
                       }}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      className="w-full bg-zinc-900 border border-white/20 rounded-lg p-2 text-sm text-slate-200 focus:border-emerald-500 outline-none"
                     >
-                      <option value={16 / 9}>16:9 (Widescreen)</option>
-                      <option value={4 / 3}>4:3 (Standard)</option>
-                      <option value={1}>1:1 (Square)</option>
+                      <option value={16 / 9}>16:9 (most cameras)</option>
+                      <option value={4 / 3}>4:3</option>
+                      <option value={1}>1:1</option>
                     </select>
                   </div>
-
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    {[{ label: "Wide", value: 120 }, { label: "Standard", value: 80 }, { label: "Narrow", value: 45 }].map(preset => (
-                      <button
-                        key={preset.label}
-                        onClick={() => {
-                          const v = vFovFromH(preset.value, cameraAspect);
-                          updateCameraFov(selectedItem.id, preset.value, v, cameraAspect);
-                        }}
-                        className="px-3 py-1 rounded-full border border-slate-200 text-slate-400 hover:bg-slate-50"
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Range</span>
-                      <span>{Math.round((selectedItem as CameraItem).range)} ft</span>
-                    </label>
-                    <input
-                      type="range"
-                      min="5"
-                      max="800"
-                      value={(selectedItem as CameraItem).range}
-                      onChange={e => updateItem(selectedItem.id, { range: parseInt(e.target.value) })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Rotation</span>
-                      <span>{Math.round(selectedItem.rotation)}deg</span>
-                    </label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="360"
-                      value={selectedItem.rotation}
-                      onChange={e => updateItem(selectedItem.id, { rotation: parseInt(e.target.value) })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                        <span>Pitch</span>
-                        <span>{Math.round((selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH)}deg</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="-60"
-                        max="30"
-                        value={(selectedItem as CameraItem).pitch ?? DEFAULT_CAMERA_PITCH}
-                        onChange={e => updateItem(selectedItem.id, { pitch: parseInt(e.target.value) })}
-                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                        <span>Height</span>
-                        <span>{Math.round((selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10)}ft</span>
-                      </label>
-                      <input
-                        type="range"
-                        min="4"
-                        max="40"
-                        value={(selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10}
-                        onChange={e => setCameraMountHeight(selectedItem as CameraItem, parseInt(e.target.value))}
-                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Mount</label>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => {
-                          const pos = getCameraPlanPosition(selectedItem as CameraItem);
-                          updateItem(selectedItem.id, {
-                            x: pos.x,
-                            y: pos.y,
-                            mount: { type: "free", height: (selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10 }
-                          });
-                        }}
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${mountType === "free" ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "border-slate-200 text-slate-400 hover:bg-slate-50"
-                          }`}
-                      >
-                        Free
-                      </button>
-                      <button
-                        disabled={!buildingOptions.length}
-                        onClick={() => attachCameraToNearestBuilding(selectedItem.id)}
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${mountType === "building" ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "border-slate-200 text-slate-400 hover:bg-slate-50"
-                          } ${!buildingOptions.length ? "opacity-50 cursor-not-allowed" : ""}`}
-                      >
-                        Building
-                      </button>
-                    </div>
-                  </div>
-
-                  {mountType === "building" && mountBuilding && (
-                    <div className="space-y-3">
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-slate-400 uppercase">Building</label>
-                        <select
-                          value={mountBuilding.id}
-                          onChange={e => {
-                            const buildingId = e.target.value;
-                            updateItem(selectedItem.id, {
-                              mount: {
-                                type: "building",
-                                buildingId,
-                                edgeIndex: 0,
-                                edgeT: 0.5,
-                                height: (selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10
-                              }
-                            });
-                          }}
-                          className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                        >
-                          {buildingOptions.map(building => (
-                            <option key={building.id} value={building.id}>
-                              {building.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                          <span>Edge</span>
-                          <span>#{mountEdgeIndex + 1}</span>
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max={Math.max(mountEdgeCount - 1, 0)}
-                          value={mountEdgeIndex}
-                          onChange={e => {
-                            const edgeIndex = parseInt(e.target.value);
-                            updateCameraMount(selectedItem.id, { edgeIndex, edgeT: 0.5, buildingId: mountBuilding.id, type: "building" });
-                          }}
-                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                          <span>Position Along Edge</span>
-                          <span>{Math.round(mountEdgeT * 100)}%</span>
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={mountEdgeT}
-                          onChange={e => updateCameraMount(selectedItem.id, { edgeT: parseFloat(e.target.value), buildingId: mountBuilding.id, type: "building" })}
-                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                        />
-                      </div>
-                    </div>
+                  {mountType === "building" && (
+                    <button
+                      onClick={() => {
+                        const pos = getCameraPlanPosition(selectedItem as CameraItem);
+                        updateItem(selectedItem.id, { x: pos.x, y: pos.y, mount: { type: "free", height: (selectedItem as CameraItem).mount?.height ?? (selectedItem as CameraItem).height ?? 10 } });
+                      }}
+                      className="w-full py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-slate-200"
+                    >
+                      Take it off the wall (free-standing)
+                    </button>
                   )}
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Description</label>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-400">Notes (in the report)</label>
                     <textarea
                       value={(selectedItem as CameraItem).description}
                       onChange={e => updateItem(selectedItem.id, { description: e.target.value })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none h-20"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Connector Dash Size</label>
-                    <input
-                      type="range"
-                      min="1"
-                      max="20"
-                      value={(selectedItem as CameraItem).connectorDashSize || 3}
-                      onChange={e => updateItem(selectedItem.id, { connectorDashSize: parseInt(e.target.value) })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 focus:border-emerald-500 outline-none h-16"
                     />
                   </div>
                   </div>
@@ -6149,98 +6075,10 @@ export default function SecurityPlanner() {
               </div>
 
               <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">Stats</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  {[
-                    { label: "Cameras", value: items.filter(item => item.type === "camera").length },
-                    { label: "Buildings", value: items.filter(item => item.type === "building").length },
-                    { label: "Trees", value: items.filter(item => item.type === "tree").length },
-                    { label: "Vehicles", value: items.filter(item => item.type === "parking").length }
-                  ].map(stat => (
-                    <div key={stat.label} className="rounded-lg border border-white/10 bg-white/5 p-3">
-                      <p className="text-xs uppercase tracking-wide text-slate-400">{stat.label}</p>
-                      <p className="text-lg font-semibold text-slate-200">{stat.value}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">Building Label Defaults</h3>
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Font Family</label>
-                  <input
-                    list="building-font-families"
-                    value={buildingLabelDefaults.fontFamily}
-                    onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontFamily: e.target.value })}
-                    className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                  />
-                  <datalist id="building-font-families">
-                    {FONT_FAMILIES.map(font => (
-                      <option key={font} value={font} />
-                    ))}
-                  </datalist>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                      <span>Font Size</span>
-                      <span>{buildingLabelDefaults.fontSize}px</span>
-                    </label>
-                    <input
-                      type="range"
-                      min="8"
-                      max="32"
-                      value={buildingLabelDefaults.fontSize}
-                      onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontSize: parseInt(e.target.value) })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Font Weight</label>
-                    <select
-                      value={buildingLabelDefaults.fontWeight}
-                      onChange={e => setBuildingLabelDefaults({ ...buildingLabelDefaults, fontWeight: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    >
-                      {FONT_WEIGHTS.map(weight => (
-                        <option key={weight} value={weight}>{weight}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">Canvas</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Width</label>
-                    <input
-                      type="number"
-                      min="400"
-                      max="3000"
-                      value={canvasSize.width}
-                      onChange={e => setCanvasSize({ ...canvasSize, width: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Height</label>
-                    <input
-                      type="number"
-                      min="300"
-                      max="3000"
-                      value={canvasSize.height}
-                      onChange={e => setCanvasSize({ ...canvasSize, height: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-                </div>
-
+                <h3 className="text-sm font-semibold text-slate-300">Grid</h3>
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                    <span>Grid Size</span>
+                    <span>Grid size</span>
                     <span>{gridSize} ft</span>
                   </label>
                   <input
@@ -6249,207 +6087,62 @@ export default function SecurityPlanner() {
                     max="80"
                     value={gridSize}
                     onChange={e => changeGridSize(parseInt(e.target.value))}
-                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                   />
                 </div>
-
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
-                  <span className="text-slate-300">Show Grid</span>
-                  <button
-                    onClick={() => setShowGrid(prev => !prev)}
-                    className={`px-3 py-1 rounded-full text-xs font-semibold ${showGrid ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}
-                  >
-                    {showGrid ? "On" : "Off"}
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
-                  <span className="text-slate-300">Snap to Grid</span>
-                  <button
-                    onClick={() => setSnapToGrid(prev => !prev)}
-                    className={`px-3 py-1 rounded-full text-xs font-semibold ${snapToGrid ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}
-                  >
-                    {snapToGrid ? "On" : "Off"}
-                  </button>
-                </div>
-
-                <button
-                  onClick={handleClearCanvas}
-                  className="w-full py-2 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50"
-                >
-                  Clear Canvas
-                </button>
+                <label className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 cursor-pointer">
+                  Show grid (blank plans)
+                  <input type="checkbox" className="accent-emerald-500" checked={showGrid} onChange={() => setShowGrid(prev => !prev)} />
+                </label>
+                <label className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 cursor-pointer">
+                  Snap to grid
+                  <input type="checkbox" className="accent-emerald-500" checked={snapToGrid} onChange={() => setSnapToGrid(prev => !prev)} />
+                </label>
               </div>
 
-              <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">Background Map</h3>
-                <p className="text-xs text-slate-400">Adjust the uploaded map to align with the grid.</p>
-                <p className="text-[10px] text-slate-500">Tip: Hold Alt and drag in plan view to pan. Use Move Map to reposition the map image.</p>
-                <div className="flex items-center gap-2">
+              {backgroundImg && (
+                <div className={panelSectionLoose}>
+                  <h3 className="text-sm font-semibold text-slate-300">Map image</h3>
                   <button
                     onClick={() => setMapMoveMode(v => !v)}
-                    className={`px-2 py-1 rounded text-[10px] font-semibold border ${mapMoveMode
-                      ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
-                      : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
-                      }`}
+                    className={`w-full py-2 rounded-lg text-xs font-semibold border ${mapMoveMode ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200" : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"}`}
                   >
-                    {mapMoveMode ? "Move Map: On" : "Move Map"}
+                    {mapMoveMode ? "Moving the map: drag it, then click here when done" : "Move the map to line it up"}
                   </button>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase">Map Opacity</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.1"
-                    value={bgSettings.opacity}
-                    onChange={e => setBgSettings({ ...bgSettings, opacity: parseFloat(e.target.value) })}
-                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Map Width</label>
+                    <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                      <span>Map opacity</span>
+                      <span>{Math.round(bgSettings.opacity * 100)}%</span>
+                    </label>
                     <input
-                      type="number"
-                      value={bgSettings.width}
-                      onChange={e => setBgSettings({ ...bgSettings, width: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Map Height</label>
-                    <input
-                      type="number"
-                      value={bgSettings.height}
-                      onChange={e => setBgSettings({ ...bgSettings, height: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.1"
+                      value={bgSettings.opacity}
+                      onChange={e => setBgSettings({ ...bgSettings, opacity: parseFloat(e.target.value) })}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                     />
                   </div>
                 </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Offset X</label>
-                    <input
-                      type="number"
-                      value={bgSettings.x}
-                      onChange={e => setBgSettings({ ...bgSettings, x: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase">Offset Y</label>
-                    <input
-                      type="number"
-                      value={bgSettings.y}
-                      onChange={e => setBgSettings({ ...bgSettings, y: parseInt(e.target.value) })}
-                      className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleFitBackground}
-                  className="w-full py-2 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50"
-                >
-                  Fit Background to Canvas
-                </button>
-              </div>
+              )}
 
               <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">3D Visualization</h3>
-
-
-
-                {/* Environment & Background Control */}
-                <div className="space-y-3 mb-4 p-3 bg-white/5 rounded-lg border border-white/10">
-                  <label className="text-xs font-semibold text-slate-400 block">Environment Background</label>
-
-                  {/* Background Mode Toggle */}
-                  <div className="flex gap-1 bg-white/5 p-0.5 rounded-lg border border-white/10">
-                    <button
-                      onClick={() => setBackgroundMode('flat')}
-                      className={`flex-1 px-2 py-1 text-[10px] font-medium rounded transition-colors ${backgroundMode === 'flat' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
-                    >
-                      Flat Image
-                    </button>
-                    <button
-                      onClick={() => setBackgroundMode('panorama')}
-                      className={`flex-1 px-2 py-1 text-[10px] font-medium rounded transition-colors ${backgroundMode === 'panorama' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}
-                    >
-                      360° Panorama
-                    </button>
-                  </div>
-
-                  {/* Upload Button */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => bg3dInputRef.current?.click()}
-                      className="flex-1 py-1.5 px-3 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
-                    >
-                      {backgroundMode === 'panorama' ? 'Upload HDRI/Panorama' : 'Upload Background'}
-                    </button>
-                    {sceneBackgroundImg && (
-                      <button
-                        onClick={() => setSceneBackgroundImg(null)}
-                        className="py-1.5 px-3 rounded-md bg-white/5 hover:bg-red-500/20 text-slate-400 hover:text-red-400 border border-white/10 text-xs transition-colors"
-                        title="Clear Background"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-
-                  {backgroundMode === 'panorama' && (
-                    <p className="text-[10px] text-slate-500">
-                      Upload a 360° equirectangular image (2:1 aspect ratio) for immersive backgrounds.
-                      Get free HDRIs from <a href="https://polyhaven.com/hdris" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">Poly Haven</a>
-                    </p>
-                  )}
-                </div>
-
-
-
-
-
-                {/* Frustum Settings & Declutter */}
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-slate-400">Show Vision Cones</label>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="sr-only peer"
-                      checked={frustumSettings.visible}
-                      onChange={e => setFrustumSettings({ ...frustumSettings, visible: e.target.checked })}
-                    />
-                    <div className="w-9 h-5 bg-slate-700/50 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
-                  </label>
-                </div>
-
+                <h3 className="text-sm font-semibold text-slate-300">Camera cones in 3D</h3>
+                <label className="flex items-center justify-between text-sm text-slate-300 cursor-pointer">
+                  Show cones
+                  <input type="checkbox" className="accent-emerald-500" checked={frustumSettings.visible} onChange={e => setFrustumSettings({ ...frustumSettings, visible: e.target.checked })} />
+                </label>
                 {frustumSettings.visible && (
-                  <div className="space-y-3 mt-2 pl-2 border-l border-white/5">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs text-slate-500">Active Cam Only</label>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          className="sr-only peer"
-                          checked={frustumSettings.showAll === false}
-                          onChange={e => setFrustumSettings({ ...frustumSettings, showAll: !e.target.checked })}
-                        />
-                        <div className="w-7 h-4 bg-slate-700/50 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600"></div>
-                      </label>
-                    </div>
-
-                    {/* Opacity Sliders */}
+                  <>
+                    <label className="flex items-center justify-between text-sm text-slate-300 cursor-pointer">
+                      Selected camera only
+                      <input type="checkbox" className="accent-emerald-500" checked={frustumSettings.showAll === false} onChange={e => setFrustumSettings({ ...frustumSettings, showAll: !e.target.checked })} />
+                    </label>
                     <div className="space-y-1">
-                      <div className="flex justify-between">
-                        <label className="text-[10px] text-slate-500">Opacity</label>
-                        <span className="text-[10px] text-slate-400">{Math.round(frustumSettings.opacity * 100)}%</span>
+                      <div className="flex justify-between text-xs text-slate-400">
+                        <span>Opacity</span>
+                        <span>{Math.round(frustumSettings.opacity * 100)}%</span>
                       </div>
                       <input
                         type="range"
@@ -6458,51 +6151,10 @@ export default function SecurityPlanner() {
                         step="0.05"
                         value={frustumSettings.opacity}
                         onChange={e => setFrustumSettings({ ...frustumSettings, opacity: parseFloat(e.target.value) })}
-                        className="w-full accent-indigo-500 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                        className="w-full accent-emerald-500 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
                       />
                     </div>
-                    <div className="space-y-1">
-                      <div className="flex justify-between">
-                        <label className="text-[10px] text-slate-500">Edges</label>
-                        <span className="text-[10px] text-slate-400">{Math.round(frustumSettings.edgeOpacity * 100)}%</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.05"
-                        value={frustumSettings.edgeOpacity}
-                        onChange={e => setFrustumSettings({ ...frustumSettings, edgeOpacity: parseFloat(e.target.value) })}
-                        className="w-full accent-indigo-500 h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className={panelSectionLoose}>
-                <h3 className="text-sm font-semibold text-slate-300">3D Snapshots</h3>
-                {viewMode !== "iso3d" ? (
-                  <p className="text-xs text-slate-400">Switch to Isometric view to capture snapshots.</p>
-                ) : snapshots.length === 0 ? (
-                  <p className="text-xs text-slate-400">No snapshots yet. Click “Snapshot” in the 3D view.</p>
-                ) : (
-                  <div className="grid grid-cols-2 gap-3">
-                    {snapshots.map(snapshot => (
-                      <div key={snapshot.id} className="rounded-lg border border-slate-200 overflow-hidden bg-white">
-                        <img src={snapshot.dataUrl} alt="Snapshot" className="w-full h-24 object-cover" />
-                        <div className="p-2">
-                          <p className="text-[10px] text-slate-400">{snapshot.createdAt}</p>
-                          <button
-                            onClick={() => handleExportSnapshot(snapshot.dataUrl, `security_snapshot_${snapshot.id}.png`)}
-                            className="mt-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700"
-                          >
-                            Download
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  </>
                 )}
               </div>
             </div>

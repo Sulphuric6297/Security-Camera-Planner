@@ -16,6 +16,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ["P", "Add a vehicle"],
       ["L", "Add text"],
       ["M", "Mark a spot to protect"],
+      ["D", "Measure a distance (Shift+click: keep going)"],
       ["Esc", "Cancel / deselect"]
     ]
   },
@@ -29,6 +30,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       ["Q / E", "Turn the view"],
       ["N", "North up"],
       ["0 / F", "Fit the site / the selection"],
+      ["Enter", "Look through the selected camera (Esc: back, ← →: other cameras, N: night)"],
       ["?", "This list"]
     ]
   },
@@ -40,6 +42,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
       [`${mod}+D`, "Duplicate"],
       [`${mod}+C / ${mod}+V`, "Copy / paste"],
       ["Delete", "Delete the selection"],
+      ["Ctrl+Shift+C / V", "Copy / paste a camera's settings"],
       ["Arrows", "Nudge 1 ft (Shift: 10 ft)"],
       ["Drag edge dot", "Add a corner to a building"],
       ["Double-click corner", "Remove a corner"],

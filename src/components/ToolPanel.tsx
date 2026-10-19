@@ -1,5 +1,5 @@
 import React from "react";
-import { Camera, Car, MousePointerClick, Square, Target, Trees, Type, Wand2, X } from "lucide-react";
+import { Camera, Car, HardDrive, MousePointerClick, Square, Target, Trees, Type, Wand2, X } from "lucide-react";
 import type { ToolMode, TargetKind } from "../types";
 import { TARGET_KINDS, TREE_SIZES, VEHICLE_SIZES, type TreeSize, type VehicleType } from "../lib/items";
 
@@ -25,7 +25,8 @@ const INFO: Partial<Record<ToolMode, { title: string; icon: React.ComponentType<
   "add-tree": { title: "Add trees", icon: Trees, how: "Pick a type and size, then click on the map. Trees block cameras' views." },
   "add-parking": { title: "Add a vehicle", icon: Car, how: "Pick a type, then click on the map. Vehicles are placed at their real size." },
   "add-label": { title: "Add text", icon: Type, how: "Click on the map where the text should go." },
-  "add-target": { title: "Mark a spot to protect", icon: Target, how: "Pick what it is, then click it on the map. Your cameras' coverage of it shows as green, amber or red." }
+  "add-target": { title: "Mark a spot to protect", icon: Target, how: "Pick what it is, then click it on the map. Your cameras' coverage of it shows as green, amber or red." },
+  "add-recorder": { title: "Place the recorder", icon: HardDrive, how: "Click where the recorder (NVR) goes, such as a closet, office or garage. Every camera's cable runs back to it." }
 };
 
 const chip = (on: boolean) =>

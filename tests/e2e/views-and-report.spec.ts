@@ -1,4 +1,4 @@
-import { test, expect, drag, importSite, placeWithKey } from "./fixtures";
+import { test, expect, drag, importSite, itemsOfType, placeWithKey } from "./fixtures";
 
 test.describe("3D, camera views and report", () => {
   test("3D view and the camera preview render", async ({ page }) => {
@@ -75,6 +75,37 @@ test.describe("3D, camera views and report", () => {
     await page.evaluate(id => (window as any).__scpSelect?.(id), target.id);
     await page.getByRole("group", { name: "Roof shape" }).getByRole("button", { name: "flat" }).click();
     await expect.poll(async () => (await roofs()).find(r => r.id === target.id)?.kind).toBe("flat");
+  });
+
+  test("walls have siding and windows; a door marked next to a wall is drawn on it", async ({ page }) => {
+    // A 50 x 36 ft house in the middle of the 1000 x 700 ft plan: its south wall is 18 ft below the center
+    await placeWithKey(page, "b", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    const [house] = await itemsOfType(page, "building");
+    const scene = () => page.evaluate(id => {
+      let walls = false, doors = 0;
+      (window as any).__scpThree().scene.traverse((o: any) => {
+        if (o.name === "building-walls" && o.userData.itemId === id) walls = !!o.material.map;
+        if (o.name === "building-door" && o.parent?.userData.itemId === id) doors++;
+      });
+      return { walls, doors };
+    }, house.id);
+    await expect.poll(scene).toEqual({ walls: true, doors: 0 });
+    // Mark the front door 3 ft out from the south wall
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+    const at = await page.evaluate(([x, y]) => (window as any).__scpView.toClient(x, y), [house.x, house.y + 21] as const);
+    await page.mouse.click(at.x, at.y);
+    await page.keyboard.press("Escape");
+    await expect.poll(scene).toEqual({ walls: true, doors: 1 });
+    // Moved far from the house, it is no longer a door on its wall
+    const [door] = await itemsOfType(page, "target");
+    await page.evaluate(id => {
+      const s = (window as any).__scpProject();
+      s.setField("items", s.items.map((i: any) => (i.id === id ? { ...i, y: i.y + 100 } : i)));
+    }, door.id);
+    await expect.poll(scene).toEqual({ walls: true, doors: 0 });
   });
 
   test("the camera view is a window you can move and resize; it starts centered", async ({ page }) => {

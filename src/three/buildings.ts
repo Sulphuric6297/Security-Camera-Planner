@@ -346,9 +346,80 @@ export const applyPhotoUVs = (geometry: THREE.BufferGeometry, pose: BuildingPose
 };
 
 /** Walls: straight extrusion of the footprint (no bevel, so the height is exact). */
-export const buildWalls = (pts: P[], height: number) => {
-  const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, -p.y)));
-  const g = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
-  g.rotateX(-Math.PI / 2);
+
+/** One facade bay: this wide (ft), one storey this tall (ft), a window in the middle. */
+export const FACADE_BAY_FT = 12;
+export const FACADE_STOREY_FT = 10;
+
+/**
+ * Walls as one quad per outline edge, with texture coordinates in facade bays: each wall holds a
+ * whole number of bays (so windows never get cut at corners) and each storey is one texture
+ * repeat. Walls too short for a window show plain siding. Normals face out.
+ */
+export const buildFacadeWalls = (pts: P[], height: number, unitsPerFoot = 1) => {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const storeys = Math.max(1, Math.round(height / unitsPerFoot / FACADE_STOREY_FT));
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const uv: number[] = [];
+  const index: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    const ex = b.x - a.x, ez = b.y - a.y;
+    const len = Math.hypot(ex, ez);
+    if (len < 1e-6) continue;
+    // Outward: for a positive-area outline (plan y down) the outside is to the left of a -> b.
+    const sign = area > 0 ? 1 : -1;
+    const nx = (sign * ez) / len, nz = (-sign * ex) / len;
+    const bays = Math.round(len / unitsPerFoot / FACADE_BAY_FT);
+    const u1 = bays > 0 ? bays : 0.25;
+    const base = pos.length / 3;
+    pos.push(a.x, 0, a.y, b.x, 0, b.y, b.x, height, b.y, a.x, height, a.y);
+    for (let k = 0; k < 4; k++) nor.push(nx, 0, nz);
+    uv.push(0, 0, u1, 0, u1, storeys, 0, storeys);
+    // Front faces wind counter-clockwise seen from outside.
+    if (area > 0) index.push(base, base + 2, base + 1, base, base + 3, base + 2);
+    else index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(index);
   return g;
+};
+
+/**
+ * Doors where the user marked a door next to a wall: the point on the nearest wall (within
+ * `maxFt`), and the wall's outward direction there. Local building coordinates.
+ */
+export const doorsOnWalls = (pts: P[], doors: P[], unitsPerFoot = 1, maxFt = 6) => {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) area += pts[i].x * pts[(i + 1) % n].y - pts[(i + 1) % n].x * pts[i].y;
+  const sign = area > 0 ? 1 : -1;
+  const out: { x: number; y: number; nx: number; ny: number }[] = [];
+  for (const d of doors) {
+    let best: { x: number; y: number; nx: number; ny: number; dist: number } | null = null;
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const ex = b.x - a.x, ey = b.y - a.y;
+      const len2 = ex * ex + ey * ey;
+      const len = Math.sqrt(len2);
+      // A door needs a wall at least 3.5 ft long; keep it clear of the corners.
+      if (len < 3.5 * unitsPerFoot) continue;
+      const margin = (1.75 * unitsPerFoot) / len;
+      const t = Math.min(1 - margin, Math.max(margin, ((d.x - a.x) * ex + (d.y - a.y) * ey) / len2));
+      const x = a.x + ex * t, y = a.y + ey * t;
+      const dist = Math.hypot(d.x - x, d.y - y);
+      if (!best || dist < best.dist) best = { x, y, nx: (sign * ey) / len, ny: (-sign * ex) / len, dist };
+    }
+    if (best && best.dist <= maxFt * unitsPerFoot) out.push({ x: best.x, y: best.y, nx: best.nx, ny: best.ny });
+  }
+  return out;
 };

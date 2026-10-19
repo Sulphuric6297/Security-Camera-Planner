@@ -45,6 +45,8 @@ export type ReportInput = {
   spots: ReportSpot[];
   counts: { buildings: number };
   storage?: { days: number; mode: "continuous" | "motion"; tb: number; driveTb: number };
+  /** With a recorder placed: each camera's cable run back to it. */
+  cabling?: { channels: number; totalFt: number; boxes: number; runs: { number: number; label: string; lengthFt: number; tooLong: boolean }[] };
 };
 
 const esc = (text: string) =>
@@ -144,13 +146,25 @@ export const buildReportHtml = (r: ReportInput, opts: { autoPrint?: boolean } = 
     : "";
 
   const parts = buildPartsList(r.cameras);
+  const cab = r.cabling;
+  const storageText = r.storage ? `about ${r.storage.tb < 1 ? r.storage.tb.toFixed(1) : Math.round(r.storage.tb * 10) / 10} TB of storage (a ${r.storage.driveTb} TB drive) for ${r.storage.days} days of ${r.storage.mode === "motion" ? "motion-only" : "continuous"} recording` : "";
   const partsHtml = parts.length
     ? `<h2>Parts list</h2>
       <table id="parts-list">
         <thead><tr><th>Qty</th><th>Item</th><th>Cameras</th></tr></thead>
-        <tbody>${parts.map(p => `<tr><td>${p.qty}</td><td>${esc(p.description)}</td><td>${p.numbers.map(n => `#${n}`).join(", ")}</td></tr>`).join("")}</tbody>
+        <tbody>${parts.map(p => `<tr><td>${p.qty}</td><td>${esc(p.description)}</td><td>${p.numbers.map(n => `#${n}`).join(", ")}</td></tr>`).join("")}${cab
+          ? `<tr><td>1</td><td>PoE recorder (NVR), ${cab.channels} channels${storageText ? `, ${esc(storageText)}` : ""}</td><td>all</td></tr>
+             <tr><td>${cab.boxes}</td><td>Cat6 network cable, 1000 ft box (about ${cab.totalFt.toLocaleString("en-US")} ft in ${cab.runs.length} run${cab.runs.length === 1 ? "" : "s"})</td><td>all</td></tr>`
+          : ""}</tbody>
       </table>
-      <p class="note">Plus a recorder (NVR) with ${r.cameras.length} or more channels${r.storage ? ` and about ${r.storage.tb < 1 ? r.storage.tb.toFixed(1) : Math.round(r.storage.tb * 10) / 10} TB of storage (a ${r.storage.driveTb} TB drive) for ${r.storage.days} days of ${r.storage.mode === "motion" ? "motion-only" : "continuous"} recording` : ""}, and network cable or power for each camera.</p>`
+      ${cab
+        ? `<h3>Cable runs</h3>
+      <table id="cable-runs">
+        <thead><tr><th>Camera</th><th>Run to the recorder</th></tr></thead>
+        <tbody>${cab.runs.map(c => `<tr><td>${c.number}. ${esc(c.label)}</td><td${c.tooLong ? ' style="color:#b91c1c;font-weight:600"' : ""}>about ${c.lengthFt} ft${c.tooLong ? " (over 300 ft: needs a switch or extender part way)" : ""}</td></tr>`).join("")}</tbody>
+      </table>
+      <p class="note">Runs go along walls and ceilings at right angles, up to each camera, with 10% slack. Measure on site before buying.</p>`
+        : `<p class="note">Plus a recorder (NVR) with ${r.cameras.length} or more channels${storageText ? ` and ${storageText}` : ""}, and network cable or power for each camera. Place the recorder on the plan to get cable lengths.</p>`}`
     : "";
 
   const cameraSections = r.cameras.map(c => `

@@ -153,4 +153,24 @@ test.describe("guided workflow and plan tools", () => {
     await page.getByRole("tab", { name: "2D" }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__scpView.viewInfo().tiltDeg)).toBeLessThan(1);
   });
+
+  test("picking a camera in the side list brings it into view", async ({ page }) => {
+    await placeWithKey(page, "c", 0.15, 0.5);
+    await placeWithKey(page, "c", 0.8, 0.5);
+    await page.keyboard.press("Escape");
+    const cams = await itemsOfType(page, "camera");
+    // Zoom in close on the first camera: the second is off screen
+    await page.evaluate(c => (window as any).__scpView.fitBounds({ minX: c.x - 10, minY: c.y - 10, maxX: c.x + 10, maxY: c.y + 10 }, { animate: false }), cams[0]);
+    const inView = (id: string) => page.evaluate(id => {
+      const v = (window as any).__scpView;
+      const b = v.screenBox(id);
+      const el = document.querySelector('[data-testid="plan"]') as HTMLElement;
+      return !!b && b.x >= 0 && b.y >= 0 && b.x + b.width <= el.clientWidth - 320 && b.y + b.height <= el.clientHeight;
+    }, id);
+    await expect.poll(() => inView(cams[1].id)).toBe(false);
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("list", { name: "Cameras" }).getByRole("button", { name: /^2\s*Camera 2/ }).click();
+    await expect.poll(() => inView(cams[1].id)).toBe(true);
+    await expect(page.getByLabel("Inspector").getByRole("heading").first()).toHaveText("2Camera 2");
+  });
 });

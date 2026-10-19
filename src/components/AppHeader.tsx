@@ -18,9 +18,12 @@ import {
   FileText,
   Keyboard,
   PanelLeft,
-  CircleHelp
+  CircleHelp,
+  Copy,
+  Trash2
 } from "lucide-react";
 import type { ViewMode } from "../types";
+import type { PlanMeta } from "../lib/storage";
 
 export type WorkflowStepId = "site" | "buildings" | "cameras" | "review" | "report";
 
@@ -28,8 +31,15 @@ type Props = {
   projectName: string;
   onRename: (name: string) => void;
   onNew: () => void;
+  /** Open a saved plan file. */
   onOpen: () => void;
   onSave: () => void;
+  /** Earlier plans kept in this browser (the open one is not listed). */
+  recentPlans: PlanMeta[];
+  onRecentMenu: () => void;
+  onOpenRecent: (id: string) => void;
+  onDeleteRecent: (id: string) => void;
+  onDuplicate: () => void;
   stepsDone: Record<WorkflowStepId, boolean>;
   /** The step whose panel is showing. */
   activeStep: WorkflowStepId;
@@ -61,6 +71,8 @@ export function AppHeader(props: Props) {
   const [nameDraft, setNameDraft] = useState(projectName);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [openMenu, setOpenMenu] = useState(false);
+  const openRef = useRef<HTMLDivElement>(null);
   const currentStep = props.activeStep;
 
   useEffect(() => setNameDraft(projectName), [projectName]);
@@ -72,6 +84,16 @@ export function AppHeader(props: Props) {
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [menuOpen]);
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = (e: MouseEvent) => {
+      if (openRef.current && !openRef.current.contains(e.target as Node)) setOpenMenu(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpenMenu(false); };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("mousedown", close); window.removeEventListener("keydown", esc); };
+  }, [openMenu]);
 
   const commitName = () => {
     setEditingName(false);
@@ -122,7 +144,58 @@ export function AppHeader(props: Props) {
         )}
         <div className="flex items-center shrink-0">
           <button onClick={props.onNew} className={iconBtn} title="New plan"><Plus className="w-4 h-4" /></button>
-          <button onClick={props.onOpen} className={iconBtn} title="Open plan"><FolderOpen className="w-4 h-4" /></button>
+          <div className="relative" ref={openRef}>
+            <button
+              onClick={() => { if (!openMenu) props.onRecentMenu(); setOpenMenu(o => !o); }}
+              className={`${iconBtn} ${openMenu ? "text-white bg-white/10" : ""}`}
+              title="Open plan"
+              aria-expanded={openMenu}
+            >
+              <FolderOpen className="w-4 h-4" />
+            </button>
+            {openMenu && (
+              <div className="absolute left-0 top-full mt-2 w-80 rounded-xl border border-white/10 bg-zinc-900 shadow-2xl p-1.5 z-50" role="menu" aria-label="Open plan">
+                <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Recent plans</div>
+                {props.recentPlans.length === 0 ? (
+                  <div className="px-3 pb-2 text-xs text-slate-400">None yet. When you start a new plan, this one is kept here.</div>
+                ) : (
+                  <ul className="max-h-72 overflow-y-auto" aria-label="Recent plans">
+                    {props.recentPlans.map(p => (
+                      <li key={p.id} className="group flex items-center rounded-lg hover:bg-white/10">
+                        <button
+                          role="menuitem"
+                          className="flex-1 min-w-0 px-3 py-2 text-left"
+                          onClick={() => { setOpenMenu(false); props.onOpenRecent(p.id); }}
+                          aria-label={`Open ${p.name}`}
+                        >
+                          <div className="text-sm text-slate-100 truncate">{p.name}</div>
+                          <div className="text-[11px] text-slate-400">
+                            {p.cameras} camera{p.cameras === 1 ? "" : "s"} · {p.buildings} building{p.buildings === 1 ? "" : "s"} · {new Date(p.updatedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                          </div>
+                        </button>
+                        <button
+                          className="p-2 mr-1 rounded-md text-slate-500 hover:text-red-300 hover:bg-white/10"
+                          onClick={() => props.onDeleteRecent(p.id)}
+                          aria-label={`Delete ${p.name}`}
+                          title="Delete this plan (you can undo)"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="border-t border-white/10 mt-1 pt-1">
+                  <button className={menuItem} role="menuitem" onClick={() => { setOpenMenu(false); props.onOpen(); }}>
+                    <Upload className="w-4 h-4 text-slate-400" /> Open a saved file…
+                  </button>
+                  <button className={menuItem} role="menuitem" onClick={() => { setOpenMenu(false); props.onDuplicate(); }}>
+                    <Copy className="w-4 h-4 text-slate-400" /> Duplicate this plan
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
           <button onClick={props.onSave} className={iconBtn} title="Save plan (Ctrl/⌘+S)"><Save className="w-4 h-4" /></button>
         </div>
       </div>

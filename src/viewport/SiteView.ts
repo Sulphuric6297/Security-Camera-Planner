@@ -8,7 +8,7 @@
 import * as THREE from "three";
 import CameraControls from "camera-controls";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { DEFAULT_BUILDING, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_PITCH, OBJECT_ELEVATION_OFFSET, clamp, mountHeightForBuilding } from "../constants";
+import { DEFAULT_BUILDING, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_CAMERA_PITCH, DEFAULT_IR_RANGE_FT, OBJECT_ELEVATION_OFFSET, clamp, mountHeightForBuilding } from "../constants";
 import { getCameraAspectValue, getCameraHFov, suggestPitchForDistance } from "../lib/camera";
 import { boundsOfPoints, type Bounds } from "../lib/view";
 import {
@@ -26,9 +26,10 @@ import {
 import { pointInPolygonXY } from "../lib/geometry";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
 import { createBuildingModel } from "../three/buildingMesh";
+import { doorsOnWalls } from "../three/buildings";
 import { createCameraModel } from "../three/cameraModel";
 import { disposeObjectDeep } from "../three/dispose";
-import type { BuildingItem, CameraItem, CanvasItem, ImageItem, LabelItem, ParkingItem, TargetItem, TreeItem } from "../types";
+import type { BuildingItem, CameraItem, CanvasItem, ImageItem, LabelItem, ParkingItem, RecorderItem, TargetItem, TreeItem } from "../types";
 import { Ground } from "./ground";
 import { buildCoverageFan, buildFrustumLines } from "./coverage";
 import type { P, ViewCallbacks, ViewDoc, ViewInfo, ViewTool } from "./types";
@@ -62,10 +63,13 @@ const STYLE = `
 .scp-cam{pointer-events:auto;cursor:move;display:flex;align-items:center;gap:4px;padding:2px 7px 2px 5px;border-radius:999px;background:rgba(255,255,255,.94);color:#1e293b;font:700 11px system-ui,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.35);border:1.5px solid var(--c)}
 .scp-cam i{min-width:15px;height:15px;padding:0 3px;border-radius:999px;background:var(--c);color:#fff;font:800 10px/15px system-ui,sans-serif;font-style:normal;text-align:center;display:block}
 .scp-cam.sel{outline:2px solid #10b981;outline-offset:1px}
+.scp-measure{pointer-events:none;padding:1px 6px;border-radius:6px;background:#facc15;color:#1c1917;font:700 11px system-ui,sans-serif;box-shadow:0 1px 3px rgba(0,0,0,.4);white-space:nowrap}
+.scp-measure.total{background:#1c1917;color:#facc15}
 .scp-pin{pointer-events:auto;cursor:move;display:flex;flex-direction:column;align-items:center}
 .scp-pin b{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font:800 12px system-ui,sans-serif;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45)}
 .scp-pin span{margin-top:2px;font:700 11px system-ui,sans-serif;color:#fff;text-shadow:0 0 3px #000,0 0 2px #000}
 .scp-pin.sel b{outline:3px solid rgba(16,185,129,.9)}
+.scp-rec b{width:auto;padding:0 6px;border-radius:6px;background:#f59e0b;color:#1c1917;font-size:10px;letter-spacing:.04em}
 .scp-bld{font:700 12px system-ui,sans-serif;color:#fff;text-shadow:0 0 4px rgba(0,0,0,.9),0 0 2px #000}
 .scp-text{pointer-events:auto;cursor:move;font-weight:700;font-family:system-ui,sans-serif;text-shadow:0 0 3px #fff,0 0 2px #fff}
 .scp-text.sel{color:#059669 !important}
@@ -109,6 +113,8 @@ export class SiteView {
   private lastCorner: { id: string; index: number; time: number } | null = null;
   private brush: THREE.LineLoop;
   private blind: THREE.Object3D | null = null;
+  private cables: THREE.Object3D | null = null;
+  private cablesKey: [unknown, number] = [null, -1];
   private blindRef: unknown = null;
   private doc: ViewDoc | null = null;
   private heightsVersion = 0;
@@ -142,6 +148,9 @@ export class SiteView {
   private horizon: THREE.Mesh;
   private povRect = { x: 0, y: 0, width: 1, height: 1 };
   private povInset = 0;
+  private povNight = false;
+  private hemi = new THREE.HemisphereLight(0xeef4ff, 0x6b6250, 0.9);
+  private irLight = new THREE.SpotLight(0xffffff, 0, 0, 0.6, 0.5, 2);
   private groundTone: { src: unknown; color: THREE.Color } | null = null;
 
   constructor(private container: HTMLDivElement, private cb: ViewCallbacks) {
@@ -222,7 +231,11 @@ export class SiteView {
     this.env = pmrem.fromScene(new RoomEnvironment()).texture;
     pmrem.dispose();
     this.scene.environment = this.env;
-    this.scene.add(new THREE.HemisphereLight(0xeef4ff, 0x6b6250, 0.9));
+    this.scene.add(this.hemi);
+    // The infrared lamp for night views: always in the scene (off by day), so switching to night
+    // doesn't change the light setup the shaders were built for.
+    this.irLight.intensity = 0;
+    this.scene.add(this.irLight, this.irLight.target);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.bias = -0.0004;
@@ -295,6 +308,7 @@ export class SiteView {
     this.syncItems(prev);
     this.syncCoverage();
     this.syncBlindSpots();
+    this.syncCables();
     this.syncSelection();
     this.syncOverlays();
     this.syncHandles();
@@ -319,6 +333,7 @@ export class SiteView {
   }
 
   setTool(tool: ViewTool) {
+    if (tool.mode !== "measure" && this.tool.mode === "measure") this.clearMeasure();
     this.tool = tool;
     this.brush.visible = tool.terrain && this.brush.visible;
     if (tool.mode === "select" || !tool.preview) this.updateGhost(null);
@@ -401,6 +416,26 @@ export class SiteView {
     this.invalidate();
   }
 
+  /** Brings an item into view if it is off screen (or under the panel on the right): pans to it,
+   * and zooms out only if it is too big to fit. */
+  reveal(id: string, rightInset = 0) {
+    const doc = this.doc;
+    const b = this.itemBounds(id);
+    if (!doc || !b) return;
+    const box = this.screenBox(id);
+    const m = 24;
+    const visibleW = this.size.width - rightInset;
+    if (box && box.x >= m && box.y >= m && box.x + box.width <= visibleW - m && box.y + box.height <= this.size.height - m) return;
+    if (box && (box.width > visibleW - 2 * m || box.height > this.size.height - 2 * m)) {
+      this.fitBounds(b, { margin: 1.3 });
+      return;
+    }
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    void this.controls.moveTo(cx, heightAt(doc.heights, doc.gridSize, cx, cy), cy, true);
+    this.invalidate();
+  }
+
   fitSite(animate = true) {
     const doc = this.doc;
     if (!doc) return;
@@ -479,8 +514,17 @@ export class SiteView {
     this.povId = id;
     this.controls.enabled = !id;
     this.labelsLayer.style.display = id ? "none" : "";
+    this.renderer.domElement.style.filter = id && this.povNight ? "grayscale(1) contrast(1.15) brightness(1.1)" : "";
     this.handlesLayer.style.display = id ? "none" : "";
     this.updateCursor();
+    this.invalidate();
+  }
+
+  /** Night: the scene is dark and only the camera's own infrared light shows things (black and white). */
+  setPovNight(on: boolean) {
+    if (on === this.povNight) return;
+    this.povNight = on;
+    this.renderer.domElement.style.filter = on && this.povId ? "grayscale(1) contrast(1.15) brightness(1.1)" : "";
     this.invalidate();
   }
 
@@ -489,8 +533,8 @@ export class SiteView {
     return { ...this.povRect };
   }
 
-  /** What a camera sees, as a canvas of the given size (rendered from this scene). */
-  renderCameraView(id: string, width: number, height: number): HTMLCanvasElement | null {
+  /** What a camera sees, as a canvas of the given size (rendered from this scene); night = infrared. */
+  renderCameraView(id: string, width: number, height: number, night = false): HTMLCanvasElement | null {
     const cam = this.item(id) as CameraItem | null;
     if (!cam || !this.doc) return null;
     width = Math.max(16, Math.round(width));
@@ -500,17 +544,19 @@ export class SiteView {
     out.height = height;
     const ratio = this.renderer.getPixelRatio();
     const canvas = this.renderer.domElement;
+    const ctx2d = out.getContext("2d");
+    if (ctx2d && night) ctx2d.filter = "grayscale(1) contrast(1.15) brightness(1.1)";
     if (width <= canvas.width && height <= canvas.height) {
       // Small enough: draw it in a corner of the view's own canvas (no resizing, which is slow),
       // copy it out, then redraw the view.
       const w = width / ratio, h = height / ratio;
-      this.drawCameraView(cam, { x: 0, y: this.size.height - h, width: w, height: h });
-      out.getContext("2d")?.drawImage(canvas, 0, 0, width, height, 0, 0, width, height);
+      this.drawCameraView(cam, { x: 0, y: this.size.height - h, width: w, height: h }, night);
+      ctx2d?.drawImage(canvas, 0, 0, width, height, 0, 0, width, height);
     } else {
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(width, height, false);
-      this.drawCameraView(cam, { x: 0, y: 0, width, height });
-      out.getContext("2d")?.drawImage(canvas, 0, 0);
+      this.drawCameraView(cam, { x: 0, y: 0, width, height }, night);
+      ctx2d?.drawImage(canvas, 0, 0);
       this.renderer.setPixelRatio(ratio);
       this.renderer.setSize(this.size.width, this.size.height, false);
     }
@@ -519,7 +565,7 @@ export class SiteView {
   }
 
   /** Renders a camera's view into a rectangle of the canvas (CSS px), in camera-view dress. */
-  private drawCameraView(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }) {
+  private drawCameraView(cam: CameraItem, rect: { x: number; y: number; width: number; height: number }, night = this.povNight) {
     const doc = this.doc!;
     const upf = this.upf();
     const aspect = rect.width / rect.height;
@@ -551,10 +597,30 @@ export class SiteView {
     const hidden = [this.coverageGroup, this.fx, this.ground.extras, own].filter((o): o is THREE.Object3D => !!o && o.visible);
     hidden.forEach(o => (o.visible = false));
     const bg = this.scene.background;
-    this.scene.background = new THREE.Color(SKY_HAZE);
-    this.scene.fog = new THREE.Fog(SKY_HAZE, Math.max(cam.range * 1.5, span * 0.8), Math.max(cam.range * 6, span * 5));
+    const env = this.scene.environment;
+    const sunI = this.sun.intensity, hemiI = this.hemi.intensity;
+    if (night) {
+      // Dark night; the camera's infrared lamp lights what is in front of it, fading with distance.
+      const reach = (cam.irRangeFt ?? DEFAULT_IR_RANGE_FT) * upf;
+      this.scene.background = new THREE.Color(0x050608);
+      this.scene.fog = new THREE.Fog(0x050608, reach * 0.9, reach * 1.6);
+      this.scene.environment = null;
+      this.sun.intensity = 0;
+      this.hemi.intensity = 0.04;
+      this.irLight.position.copy(eye);
+      this.irLight.target.position.copy(eye.clone().add(dir));
+      this.irLight.angle = Math.min(1.3, ((hFov * DEG) / 2) * 1.25);
+      // Bright up close, fading out toward its rated reach (ground near the camera is lit at a
+      // grazing angle, so it needs a strong lamp).
+      this.irLight.distance = reach * 1.5;
+      this.irLight.decay = 1;
+      this.irLight.intensity = 2.2 * reach;
+    } else {
+      this.scene.background = new THREE.Color(SKY_HAZE);
+      this.scene.fog = new THREE.Fog(SKY_HAZE, Math.max(cam.range * 1.5, span * 0.8), Math.max(cam.range * 6, span * 5));
+      this.skyDome.visible = true;
+    }
     this.horizon.visible = true;
-    this.skyDome.visible = true;
     this.skyDome.position.copy(eye);
     this.skyDome.scale.setScalar(c.far * 0.9);
     if (this.shadowsDirty) {
@@ -571,6 +637,12 @@ export class SiteView {
     this.horizon.visible = false;
     this.skyDome.visible = false;
     this.scene.fog = null;
+    if (night) {
+      this.irLight.intensity = 0;
+      this.scene.environment = env;
+      this.sun.intensity = sunI;
+      this.hemi.intensity = hemiI;
+    }
     this.scene.background = bg;
     hidden.forEach(o => (o.visible = true));
   }
@@ -822,12 +894,19 @@ export class SiteView {
 
   // ------------------------------------------------------------------ scene sync
 
+  /** Doors drawn on a building: wherever a "door" spot is marked next to one of its walls. */
+  private doorsFor(b: BuildingItem) {
+    const doors = this.doc!.items.filter(i => i.type === "target" && (i as TargetItem).kind === "door").map(t => toBuildingLocal(b, t));
+    return doors.length ? doorsOnWalls(buildingLocalPoints(b), doors, this.upf()) : [];
+  }
+
   private signature(item: CanvasItem) {
     const doc = this.doc!;
     switch (item.type) {
       case "building": {
         const b = item as BuildingItem;
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot]);
+        const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
@@ -842,7 +921,7 @@ export class SiteView {
     switch (item.type) {
       case "building": {
         const photo = doc.roofPhoto && this.ground.photo ? { texture: this.ground.photo, rect: doc.background.rect } : null;
-        return createBuildingModel(item as BuildingItem, 0, { unitsPerFoot: doc.unitsPerFoot, photo });
+        return createBuildingModel(item as BuildingItem, 0, { unitsPerFoot: doc.unitsPerFoot, photo, doors: this.doorsFor(item as BuildingItem) });
       }
       case "tree": return create3dTree(item as TreeItem);
       case "parking": return create3dCar(item as ParkingItem);
@@ -891,7 +970,7 @@ export class SiteView {
     const doc = this.doc!;
     const seen = new Set<string>();
     for (const item of doc.items) {
-      if (item.type === "label" || item.type === "target") continue;
+      if (item.type === "label" || item.type === "target" || item.type === "recorder") continue;
       seen.add(item.id);
       const sig = this.signature(item);
       let entry = this.objects.get(item.id);
@@ -1008,6 +1087,39 @@ export class SiteView {
     group.traverse(o => { o.raycast = () => {}; });
     this.blind = group;
     this.fx.add(group);
+  }
+
+  /** Each camera's cable back to the recorder: along the ground at right angles, then up to the camera. */
+  private syncCables() {
+    const doc = this.doc!;
+    if (doc.items === this.cablesKey[0] && this.heightsVersion === this.cablesKey[1]) return;
+    this.cablesKey = [doc.items, this.heightsVersion];
+    if (this.cables) {
+      this.fx.remove(this.cables);
+      disposeObjectDeep(this.cables);
+      this.cables = null;
+    }
+    const rec = doc.items.find(i => i.type === "recorder");
+    const cams = doc.items.filter(i => i.type === "camera") as CameraItem[];
+    if (!rec || !cams.length) return;
+    const lift = 0.3 * doc.unitsPerFoot;
+    const at = (x: number, y: number) => new THREE.Vector3(x, this.h(x, y) + lift, y);
+    const pos: THREE.Vector3[] = [];
+    for (const cam of cams) {
+      const p = cameraPlanPosition(cam, doc.items);
+      const path = [at(rec.x, rec.y), at(p.x, rec.y), at(p.x, p.y), this.cameraWorld(cam)];
+      for (let i = 0; i < path.length - 1; i++) pos.push(path[i], path[i + 1]);
+    }
+    const lines = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(pos),
+      new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 3 * doc.unitsPerFoot, gapSize: 2 * doc.unitsPerFoot, depthTest: false, transparent: true, opacity: 0.9 })
+    );
+    lines.computeLineDistances();
+    lines.renderOrder = 5;
+    lines.name = "cable-runs";
+    lines.raycast = () => {};
+    this.cables = lines;
+    this.fx.add(lines);
   }
 
   /** Selected building turns see-through (so the photo shows for lining it up) and gets an outline. */
@@ -1159,6 +1271,20 @@ export class SiteView {
           el.append(b, s);
           return el;
         }, new THREE.Vector3(t.x, this.h(t.x, t.y), t.y), 11);
+      } else if (item.type === "recorder") {
+        const r = item as RecorderItem;
+        put(`rec:${r.id}`, `${r.label}|${sel}`, () => {
+          const el = document.createElement("div");
+          el.className = `scp-pin scp-rec${sel ? " sel" : ""}`;
+          el.dataset.itemId = r.id;
+          el.setAttribute("data-testid", "recorder-pin");
+          el.title = `${r.label}: drag to move`;
+          // The badge says what it is; no caption to collide with building numbers.
+          const b = document.createElement("b");
+          b.textContent = "REC";
+          el.append(b);
+          return el;
+        }, new THREE.Vector3(r.x, this.h(r.x, r.y), r.y), 11);
       } else if (item.type === "building") {
         const b = item as BuildingItem;
         const text = b.label?.trim();
@@ -1491,6 +1617,7 @@ export class SiteView {
       el.style.transform = `translate(${Math.round(s.x - w)}px, ${Math.round(s.y - hgt + dy)}px)`;
     };
     for (const o of this.overlays.values()) place(o.el, o.anchor, o.dy);
+    for (const m of this.measureLabels) place(m.el, m.at, -12);
     for (const h of this.handles) {
       let w: THREE.Vector3 | null = null;
       try { w = h.visible && !h.visible() ? null : h.world(); } catch { w = null; }
@@ -1730,7 +1857,8 @@ export class SiteView {
       return;
     }
     if (e.button !== 0) return;
-    const modifierRotate = e.ctrlKey || e.metaKey || e.altKey || (e.shiftKey && !this.tool.terrain);
+    // (Shift belongs to the brush while shaping terrain, and chains points while measuring.)
+    const modifierRotate = e.ctrlKey || e.metaKey || e.altKey || (e.shiftKey && !this.tool.terrain && this.tool.mode !== "measure");
     const domItem = (target.closest?.("[data-item-id]") as HTMLElement | null)?.dataset.itemId ?? null;
     // (Alt-dragging an item moves it without snapping, so items keep their modifier drags.)
     if (modifierRotate && !domItem && !(this.tool.mode === "select" && !this.tool.terrain && this.pick(e.clientX, e.clientY))) {
@@ -1787,6 +1915,17 @@ export class SiteView {
       this.gesture(e, { click: groundClick(p => this.cb.onTrace(p)), drag: panOrNothing });
       return;
     }
+    if (tool.mode === "measure") {
+      stop();
+      this.gesture(e, {
+        click: ev => {
+          const g = this.groundAt(ev.clientX, ev.clientY);
+          if (g) this.addMeasurePoint(g, ev.shiftKey);
+        },
+        drag: panOrNothing
+      });
+      return;
+    }
     if (tool.mode !== "select") {
       stop();
       this.gesture(e, {
@@ -1841,7 +1980,9 @@ export class SiteView {
     this.cb.onTerrainBrush(point, 0.016, lower, "start");
     const tick = () => {
       const now = performance.now();
-      const dt = Math.min((now - last) / 1000, 0.05);
+      // Real time between frames, so a slow device sculpts as fast as a quick one (only a long
+      // stall, like a hidden tab, is cut short).
+      const dt = Math.min((now - last) / 1000, 0.25);
       last = now;
       this.cb.onTerrainBrush(point, dt || 0.016, lower, "move");
       frame = requestAnimationFrame(tick);
@@ -1916,6 +2057,75 @@ export class SiteView {
 
   private povWheelTimer = 0;
 
+  // ------------------------------------------------------------------ measuring
+
+  private measurePts: THREE.Vector3[] = [];
+  private measureCursor: THREE.Vector3 | null = null;
+  private measureLine: THREE.Line | null = null;
+  private measureLabels: { el: HTMLDivElement; at: THREE.Vector3 }[] = [];
+
+  /** Points measured so far (plan coordinates), and the total length in plan units. */
+  measurement() {
+    const pts = this.measurePts.map(v => ({ x: v.x, y: v.z }));
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return { points: pts, total };
+  }
+
+  private clearMeasure() {
+    this.measurePts = [];
+    this.measureCursor = null;
+    this.drawMeasure();
+  }
+
+  private addMeasurePoint(p: THREE.Vector3, keepGoing: boolean) {
+    // A new measurement after a finished one, unless Shift keeps the chain going.
+    if (this.measurePts.length >= 2 && !keepGoing) this.measurePts = [];
+    this.measurePts.push(p.clone());
+    this.drawMeasure();
+  }
+
+  private drawMeasure() {
+    if (this.measureLine) {
+      this.fx.remove(this.measureLine);
+      this.measureLine.geometry.dispose();
+      this.measureLine = null;
+    }
+    this.measureLabels.forEach(l => l.el.remove());
+    this.measureLabels = [];
+    const pts = [...this.measurePts];
+    if (this.measureCursor && pts.length >= 1 && pts.length < 2) pts.push(this.measureCursor);
+    if (pts.length >= 1) {
+      const lift = 0.3 * this.upf();
+      const geo = new THREE.BufferGeometry().setFromPoints(pts.map(v => new THREE.Vector3(v.x, v.y + lift, v.z)));
+      this.measureLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xfacc15, depthTest: false, transparent: true }));
+      this.measureLine.renderOrder = 30;
+      this.measureLine.frustumCulled = false;
+      this.fx.add(this.measureLine);
+      const upf = this.upf();
+      let total = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const d = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z) / upf;
+        total += d;
+        const el = document.createElement("div");
+        el.className = "scp-measure";
+        el.dataset.testid = "measure-label";
+        el.setAttribute("data-testid", "measure-label");
+        el.textContent = `${d < 10 ? d.toFixed(1) : Math.round(d)} ft`;
+        this.labelsLayer.appendChild(el);
+        this.measureLabels.push({ el, at: pts[i - 1].clone().lerp(pts[i], 0.5) });
+      }
+      if (pts.length > 2) {
+        const el = document.createElement("div");
+        el.className = "scp-measure total";
+        el.textContent = `Total ${total < 10 ? total.toFixed(1) : Math.round(total)} ft`;
+        this.labelsLayer.appendChild(el);
+        this.measureLabels.push({ el, at: pts[pts.length - 1].clone() });
+      }
+    }
+    this.invalidate();
+  }
+
   /** Drag inside a camera view to aim the camera: the picture follows the pointer. */
   private povAim(e: PointerEvent) {
     const id = this.povId!;
@@ -1981,6 +2191,13 @@ export class SiteView {
         if (g) this.drawBrush(g);
         return;
       }
+      if (this.tool.mode === "measure") {
+        if (this.measurePts.length === 1 && g) {
+          this.measureCursor = g;
+          this.drawMeasure();
+        }
+        return;
+      }
       const target = document.elementFromPoint(p.x, p.y) as HTMLElement | null;
       if (this.tool.mode === "select" && !this.tool.aimingCameraId) {
         const dom = (target?.closest?.("[data-item-id]") as HTMLElement | null)?.dataset.itemId ?? null;
@@ -2004,7 +2221,7 @@ export class SiteView {
   // ------------------------------------------------------------------ placement preview
 
   private updateGhost(at: THREE.Vector3 | null) {
-    const preview = this.tool.mode !== "select" && this.tool.mode !== "trace-building" ? this.tool.preview : null;
+    const preview = this.tool.mode !== "select" && this.tool.mode !== "trace-building" && this.tool.mode !== "measure" ? this.tool.preview : null;
     if (this.ghostFan) {
       this.fx.remove(this.ghostFan);
       disposeObjectDeep(this.ghostFan);
@@ -2039,7 +2256,7 @@ export class SiteView {
         disposeObjectDeep(this.ghost);
       }
       this.ghostKey = key;
-      const obj = item.type === "label" || item.type === "target" ? this.pinGhost() : this.buildObject(item);
+      const obj = item.type === "label" || item.type === "target" || item.type === "recorder" ? this.pinGhost() : this.buildObject(item);
       if (obj) {
         obj.traverse(o => {
           const m = (o as THREE.Mesh).material as THREE.Material | undefined;

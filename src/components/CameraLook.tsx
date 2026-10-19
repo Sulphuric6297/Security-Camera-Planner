@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Map as MapIcon, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Map as MapIcon, Moon, Pause, Play, Plus } from "lucide-react";
 
 export type LookCamera = { id: string; number: number; label: string; color: string; thumb?: string };
 
@@ -12,6 +12,9 @@ type Props = {
   onSwitch: (id: string) => void;
   onExit: () => void;
   onAddToReport: () => void;
+  /** Night: the picture as the camera's infrared sees it. */
+  night: boolean;
+  onNight: (on: boolean) => void;
   /** Width covered on the right (the inspector): the picture sits left of it. */
   rightInset?: number;
 };
@@ -23,10 +26,24 @@ const two = (n: number) => String(n).padStart(2, "0");
  * with a recorder-style stamp, the camera's details, every camera's thumbnail to switch to, and
  * the way back to the map. Drag the picture to aim, scroll to zoom the lens.
  */
-export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onExit, onAddToReport, rightInset = 0 }: Props) {
+export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onExit, onAddToReport, night, onNight, rightInset = 0 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 1, h: 1 });
   const [now, setNow] = useState(() => new Date());
+  // Tour: step through every camera on its own (stops on any manual switch).
+  const [touring, setTouring] = useState(false);
+  const tourRef = useRef({ cameras, currentId, onSwitch });
+  tourRef.current = { cameras, currentId, onSwitch };
+  useEffect(() => {
+    if (!touring) return;
+    const t = window.setInterval(() => {
+      const { cameras: cams, currentId: id, onSwitch: go } = tourRef.current;
+      if (cams.length < 2) return;
+      const i = cams.findIndex(c => c.id === id);
+      go(cams[(i + 1) % cams.length].id);
+    }, 3500);
+    return () => window.clearInterval(t);
+  }, [touring]);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -48,6 +65,7 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
   const index = cameras.findIndex(c => c.id === currentId);
   const cam = cameras[index];
   const step = (d: number) => {
+    setTouring(false);
     if (cameras.length < 2) return;
     onSwitch(cameras[(index + d + cameras.length) % cameras.length].id);
   };
@@ -61,11 +79,11 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
         CAM {cam ? two(cam.number) : "--"}&nbsp;&nbsp;{cam?.label.toUpperCase()}
       </div>
       <div className="absolute font-mono font-semibold text-white text-[13px] sm:text-sm" style={{ right: size.w - frame.left - frame.width + 14, top: frame.top + 12, textShadow: "0 1px 3px rgba(0,0,0,.9)" }}>
-        {stamp}
+        {night && <span className="mr-3">IR</span>}{stamp}
       </div>
 
       {/* Top bar: switch cameras, back to the map */}
-      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2" style={{ top: frame.top > 56 ? frame.top - 46 : frame.top + 44 }}>
+      <div className="absolute left-1/2 -translate-x-1/2 w-max flex items-center gap-2 whitespace-nowrap" style={{ top: frame.top > 56 ? frame.top - 46 : frame.top + 44 }}>
         <button className={btn} onClick={() => step(-1)} disabled={cameras.length < 2} aria-label="Previous camera" title="Previous camera (←)">
           <ChevronLeft className="w-4 h-4" />
         </button>
@@ -75,6 +93,14 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
         </div>
         <button className={btn} onClick={() => step(1)} disabled={cameras.length < 2} aria-label="Next camera" title="Next camera (→)">
           <ChevronRight className="w-4 h-4" />
+        </button>
+        {cameras.length > 1 && (
+          <button className={`${btn} ${touring ? "!bg-emerald-600 !border-emerald-400/40" : ""}`} onClick={() => setTouring(v => !v)} aria-pressed={touring} title="Show every camera in turn">
+            {touring ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />} Tour
+          </button>
+        )}
+        <button className={`${btn} ${night ? "!bg-indigo-600 !border-indigo-400/40" : ""}`} onClick={() => onNight(!night)} aria-pressed={night} title="Night: what the camera's infrared sees (N)">
+          <Moon className="w-3.5 h-3.5" /> Night
         </button>
         <button className={btn} onClick={onAddToReport} title="Add this view to the report">
           <Plus className="w-3.5 h-3.5" /> Report
@@ -95,7 +121,7 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
 
       {/* Hint */}
       <div className="absolute rounded-full bg-black/60 px-3 py-1 text-[11px] text-slate-200" style={{ right: size.w - frame.left - frame.width + 12, bottom: size.h - frame.top - frame.height + 12 + (cameras.length > 1 ? 92 : 0) }}>
-        Drag to aim · scroll to zoom the lens · ← → other cameras · Esc map
+        Drag to aim · scroll to zoom the lens · ← → other cameras · N night · Esc map
       </div>
 
       {/* Every camera, to jump between them */}
@@ -106,7 +132,7 @@ export function CameraLook({ cameras, currentId, aspect, details, onSwitch, onEx
               key={c.id}
               role="tab"
               aria-selected={c.id === currentId}
-              onClick={() => onSwitch(c.id)}
+              onClick={() => { setTouring(false); onSwitch(c.id); }}
               className={`relative shrink-0 w-32 h-[76px] rounded-lg overflow-hidden border-2 bg-zinc-800 shadow ${c.id === currentId ? "border-emerald-400" : "border-white/20 hover:border-white/50"}`}
               title={c.label}
             >

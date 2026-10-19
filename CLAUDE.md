@@ -57,20 +57,21 @@ Useful commands:
 | `import-site.spec.ts` | Address search, drawing or moving the area, building review, auto-aligning outlines to the photo + manual nudge, imagery + elevation + building import, re-import merge |
 | `plan-editing.spec.ts` | Placing every item type (top-down and tilted) at real size, vehicle types, dragging items, building corner/edge/height/rotate handles, unselected buildings pan instead of moving, undo/redo, duplicate, nudge, delete + Undo toast, map-style panning |
 | `camera.spec.ts` | Aim handle sets rotation and tilt, field-of-view and range handles, dragging a camera onto a wall mounts it, lens/mount/resolution presets, DORI distances, wall mounting, building rotation |
-| `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation |
+| `terrain.spec.ts` | Contours off by default and toggleable; sculpted terrain not overwritten by elevation; the brush works as fast at a low frame rate |
 | `roof-trace.spec.ts` | Click a roof on the satellite image to trace a building |
-| `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip |
-| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
-| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens |
-| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), night/infrared check |
+| `persistence.spec.ts` | IndexedDB autosave restore, Save → New → Open round trip, Recent plans (New keeps the plan, Undo, reopen, delete, duplicate) |
+| `views-and-report.spec.ts` | 3D render, camera preview, 3D lighting (no fog, full-site shadows), solid roofs with photo roofs as an option + roof picker, walls with siding/windows and doors at marked door spots, camera wall tiles, PDF report contents (schedule, parts list, coverage checklist), camera list CSV |
+| `workflow.spec.ts` | Step-driven side panel + Next, selection action bar, scale bar accuracy, zoom to fit/selection, auto-zoom + north arrow after import, shortcuts dialog, 3D snapshot menu, bigger handles on touch screens, picking from a side list brings the item into view |
+| `protect.spec.ts` | Marking spots to protect, checklist + score, blocked views, aim at a spot/target, outcome presets, blind-spot overlay, camera onto a building mounts on its wall, Suggest cameras (+ undo), Fix a spot (aim + zoom the best camera), night/infrared check |
 | `coverage.spec.ts` | Coverage math: DORI level, field of view, range, under-camera blind spot, walls and trees blocking, best camera per spot, blind-spot grid (pure logic) |
 | `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions, recorder storage estimate (pure logic) |
 | `suggest.spec.ts` | "Suggest cameras": wall mounts that meet each spot's goal, one camera for nearby spots, nothing for covered spots, pole fallback (pure logic) |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
 | `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site (pure logic) |
-| `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height (pure logic) |
+| `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height, facade window bays, doors on walls (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, old-save migration (pure logic) |
-| `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails switch cameras, Esc back; camera pictures rendered from the 3D scene |
+| `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view; camera pictures rendered from the 3D scene |
+| `cabling.spec.ts` | Recorder and cable runs: run lengths, 300 ft limit, recorder size (pure logic); placing/moving the recorder, cable runs on the map, totals in the Report step and PDF |
 | `detect.spec.ts` | Finding tree crowns and parked cars on an aerial photo, ignoring lawns and shadows (pure logic) |
 
 When you add a feature in a new area, add a new spec file and a row to this table.

@@ -24,6 +24,9 @@ test.describe("Import Site", () => {
     // The summary fades after a while: read it now.
     const summary = (await done.textContent()) ?? "";
     expect(summary).toContain("Added 2 buildings");
+    // Its "View in 3D" button (used now: the toast closes by itself after a while)
+    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
+    await expect(page.getByRole("tab", { name: "3D" })).toHaveAttribute("aria-selected", "true");
     // Where the imagery and elevation came from is on the Site step
     await expect(page.getByTestId("step-panel")).toContainText("global terrain tiles"); // USGS stubbed as unavailable
 
@@ -60,9 +63,6 @@ test.describe("Import Site", () => {
     const carAt = toPlan(PHOTO_CAR);
     expect(Math.hypot(car.x - carAt.x, car.y - carAt.y)).toBeLessThan(4);
     expect(Math.round(car.rotation) % 180).toBe(90); // parked east-west
-
-    await page.getByRole("status").getByRole("button", { name: "View in 3D" }).click();
-    await expect(page.getByRole("tab", { name: "3D" })).toHaveAttribute("aria-selected", "true");
   });
 
   test("Shift+drag draws a new area; the size label updates", async ({ page }) => {

@@ -38,6 +38,31 @@ test.describe("what to protect and coverage", () => {
     await expect(page.getByTestId("coverage-score")).toHaveText("1 of 1 covered");
   });
 
+  test("Fix aims the best camera at a spot and zooms in until it sees enough", async ({ page }) => {
+    await markSpot(page, 0.5, 0.45);
+    await placeWithKey(page, "c", 0.5, 0.51);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    // Roughly toward the door but not on it, with the wide lens: seen, too far for faces
+    const [cam] = await itemsOfType(page, "camera");
+    await page.evaluate(id => {
+      const s = (window as any).__scpProject();
+      s.setField("items", s.items.map((i: any) => (i.id === id ? { ...i, rotation: 250 } : i)));
+    }, cam.id);
+    await expect.poll(() => status(page)).toBe("partial");
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: "Fix Door 1" }).click();
+    await expect.poll(() => status(page)).toBe("met");
+    await expect(page.getByRole("status")).toContainText(/Aimed Camera 1 at Door 1 and zoomed in to \d+° wide/);
+    const [fixed] = await itemsOfType(page, "camera");
+    expect(Math.abs(((fixed.rotation - 270 + 540) % 360) - 180)).toBeLessThan(3); // straight at the door (north)
+    expect(fixed.hFov).toBeLessThan(cam.hFov);
+    await expect(page.getByRole("button", { name: "Fix Door 1" })).toHaveCount(0);
+    // Undo puts the camera back
+    await page.getByRole("status").getByRole("button", { name: "Undo" }).click();
+    await expect.poll(() => status(page)).toBe("partial");
+  });
+
   test("a building between the camera and the door blocks it", async ({ page }) => {
     // Door 40 ft north of a house, camera 30 ft south of it (84 ft apart, within range)
     await markSpot(page, 0.5, 0.45);

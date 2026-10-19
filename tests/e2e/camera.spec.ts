@@ -97,6 +97,50 @@ test.describe("cameras", () => {
     expect(undone2.hFov).toBe(before.hFov);
   });
 
+  test("a new camera starts with the setup of the last one", async ({ page }) => {
+    await placeWithKey(page, "c", 0.4, 0.5);
+    await page.getByRole("button", { name: /^12mm/ }).click();
+    await page.getByRole("button", { name: /^4K/ }).click();
+    await placeWithKey(page, "c", 0.6, 0.5);
+    const [, second] = await itemsOfType(page, "camera");
+    expect(second.hFov).toBe(28);
+    expect(second.resolutionWidth).toBe(3840);
+    expect(second.label).toBe("Camera 2");
+  });
+
+  test("copy one camera's settings and paste them onto another", async ({ page }) => {
+    await placeWithKey(page, "c", 0.4, 0.5);
+    await page.getByRole("button", { name: /^12mm/ }).click();
+    await placeWithKey(page, "c", 0.6, 0.5);
+    await page.getByRole("button", { name: /^2.8mm/ }).click();
+    const [first, second] = await itemsOfType(page, "camera");
+    expect(second.hFov).not.toBe(28);
+    await page.evaluate(id => (window as any).__scpSelect(id), first.id);
+    await page.getByRole("button", { name: "Copy settings" }).click();
+    await page.evaluate(id => (window as any).__scpSelect(id), second.id);
+    await page.getByRole("button", { name: "Paste settings" }).click();
+    const [, pasted] = await itemsOfType(page, "camera");
+    expect(pasted.hFov).toBe(28);
+    // Undo takes the paste back
+    await page.keyboard.press("Control+z");
+    expect((await itemsOfType(page, "camera"))[1].hFov).toBe(second.hFov);
+  });
+
+  test("duplicating a camera on a wall puts the copy further along the same wall", async ({ page }) => {
+    await placeWithKey(page, "b", 0.5, 0.5);
+    const [b] = await itemsOfType(page, "building");
+    const box = await itemBox(page, b.id);
+    await page.keyboard.press("c");
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height + 2);
+    await page.keyboard.press("Control+d");
+    const [cam, copy] = await itemsOfType(page, "camera");
+    expect(copy.mount.type).toBe("building");
+    expect(copy.mount.buildingId).toBe(b.id);
+    expect(copy.mount.edgeIndex).toBe(cam.mount.edgeIndex);
+    expect(Math.abs(copy.mount.edgeT - cam.mount.edgeT)).toBeGreaterThan(0.05);
+    expect(copy.label).toBe("Camera 2");
+  });
+
   test("height slider works for free-standing cameras", async ({ page }) => {
     await placeWithKey(page, "c", 0.5, 0.5);
     await page.getByRole("button", { name: /^Pole/ }).click();

@@ -29,4 +29,23 @@ test.describe("terrain & elevation", () => {
     await page.waitForTimeout(2500); // past any DEM auto-apply
     expect(Math.abs((await terrainRelief(page)) - sculpted)).toBeLessThan(0.5);
   });
+
+  test("the sculpt brush works as fast with few frames a second (slow device)", async ({ page }) => {
+    // About 8 frames a second
+    await page.addInitScript(() => {
+      window.requestAnimationFrame = (cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 120);
+      window.cancelAnimationFrame = (id: number) => window.clearTimeout(id);
+    });
+    await page.reload();
+    await importSite(page);
+    const reliefBefore = await terrainRelief(page);
+    await page.getByRole("toolbar", { name: "Tools" }).getByRole("button", { name: "Terrain" }).click();
+    const p = await planPoint(page, 0.5, 0.5);
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    await page.waitForTimeout(1200);
+    await page.mouse.up();
+    // The same hold raises the ground as much as at full frame rate (over 5 ft)
+    expect(await terrainRelief(page)).toBeGreaterThan(reliefBefore + 5);
+  });
 });

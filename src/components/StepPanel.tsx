@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  HardDrive,
   Image as ImageIcon,
   LayoutGrid,
   Mountain,
@@ -67,6 +68,9 @@ type Props = {
   };
   /** The "What to protect" checklist (shown in the Cameras and Review steps). */
   coverage?: React.ReactNode;
+  /** Recorder and cable runs (null until the recorder is placed). */
+  cabling: { channels: number; totalFt: number; boxes: number; longest: { label: string; lengthFt: number } | null; tooLong: string[] } | null;
+  onPlaceRecorder: () => void;
 };
 
 const card = "rounded-xl border border-white/10 bg-white/5 p-3";
@@ -295,6 +299,28 @@ export function StepPanel(props: Props) {
             <button onClick={props.onMoreReportOptions} className={action}>
               <Download className="w-4 h-4 text-slate-400" /> More report options…
             </button>
+          </div>
+          <div className={card} data-testid="cabling">
+            <div className="text-[10px] uppercase font-bold text-slate-400 mb-1.5">Recorder and cables</div>
+            {props.cabling ? (
+              <>
+                <div className="text-sm text-slate-100">
+                  About <b>{props.cabling.totalFt.toLocaleString("en-US")} ft</b> of network cable ({props.cabling.boxes} × 1000 ft box), a <b>{props.cabling.channels}-channel</b> PoE recorder
+                </div>
+                {props.cabling.longest && <div className="text-[11px] text-slate-500">Longest run: {props.cabling.longest.label}, about {props.cabling.longest.lengthFt} ft</div>}
+                {props.cabling.tooLong.length > 0 && (
+                  <div className="mt-1 text-[11px] text-amber-300">Over 300 ft: {props.cabling.tooLong.join(", ")}. Add a switch part way, or move the recorder.</div>
+                )}
+                <button onClick={props.onPlaceRecorder} className="mt-2 text-xs font-semibold text-emerald-300 hover:text-emerald-200">Move the recorder</button>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-slate-400 mb-2">Place the recorder (NVR) to get each camera's cable length and the cable to buy.</p>
+                <button onClick={props.onPlaceRecorder} className={action}>
+                  <HardDrive className="w-4 h-4 text-amber-300" /> Place the recorder
+                </button>
+              </>
+            )}
           </div>
           {props.storage.widths.length > 0 && (() => {
             const e = estimateStorage(props.storage.widths, props.storage.days, props.storage.mode);

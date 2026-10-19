@@ -152,4 +152,25 @@ test.describe("plan editing", () => {
     const [moved] = await itemsOfType(page, "parking");
     expect(Math.hypot(moved.x - car.x, moved.y - car.y)).toBeGreaterThan(10);
   });
+
+  test("measure: D, click two points, read the distance; Shift+click keeps going", async ({ page }) => {
+    await page.keyboard.press("d");
+    const a = await screenOf(page, 100, 100);
+    const b = await screenOf(page, 160, 100); // 60 ft east
+    const c = await screenOf(page, 160, 180); // then 80 ft south
+    await page.mouse.click(a.x, a.y);
+    await page.mouse.click(b.x, b.y);
+    const labels = page.getByTestId("measure-label");
+    await expect(labels).toHaveCount(1);
+    await expect(labels.first()).toHaveText(/^(59|60|61) ft$/);
+    await page.keyboard.down("Shift");
+    await page.mouse.click(c.x, c.y);
+    await page.keyboard.up("Shift");
+    await expect(labels).toHaveCount(2);
+    await expect(page.getByText(/^Total (139|140|141) ft$/)).toBeVisible();
+    // Nothing was added to the plan, and Esc clears it
+    expect((await page.evaluate(() => (window as any).__scpProject().items)).length).toBe(0);
+    await page.keyboard.press("Escape");
+    await expect(labels).toHaveCount(0);
+  });
 });

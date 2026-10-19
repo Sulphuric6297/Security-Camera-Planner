@@ -49,6 +49,10 @@ test.describe("looking through a camera", () => {
     await expect(tabs.first().locator("img")).toHaveAttribute("src", /^data:image\/jpeg/);
     await tabs.first().click();
     await expect(look).toContainText("1 of 2");
+    // Tour: steps to the next camera by itself
+    await page.getByRole("button", { name: "Tour" }).click();
+    await expect(look).toContainText("2 of 2", { timeout: 6000 });
+    await page.getByRole("button", { name: "Tour" }).click();
     await page.getByRole("button", { name: "Back to map" }).click();
     await expect(look).toHaveCount(0);
   });
@@ -102,5 +106,49 @@ test.describe("looking through a camera", () => {
     expect(shot.height).toBe(180);
     expect(shot.skyShare).toBeGreaterThan(0.05); // daylight sky at the top
     expect(shot.skyShare).toBeLessThan(0.7); // ground below
+  });
+
+  test("Night shows the camera's infrared picture: dark beyond its reach, black and white", async ({ page }) => {
+    await importSite(page);
+    await page.keyboard.press("Escape");
+    await placeWithKey(page, "c", 0.5, 0.5);
+    const [cam] = await itemsOfType(page, "camera");
+    await page.keyboard.press("Enter");
+    const look = page.getByTestId("camera-look");
+    const night = look.getByRole("button", { name: "Night" });
+    await expect(night).toHaveAttribute("aria-pressed", "false");
+    await night.click();
+    await expect(night).toHaveAttribute("aria-pressed", "true");
+    await expect(look).toContainText("IR");
+    await expect(page.getByTestId("camera-look-details")).toContainText(/infrared lights about 100 ft/);
+    const canvasFilter = () => page.getByTestId("plan").locator("canvas").first().evaluate(c => getComputedStyle(c).filter);
+    expect(await canvasFilter()).toContain("grayscale");
+    // The night picture is grey and much darker than the day picture
+    const stats = await page.evaluate(id => {
+      const v = (window as any).__scpView;
+      const measure = (night: boolean) => {
+        const d = v.renderCameraView(id, 320, 180, night).getContext("2d").getImageData(0, 0, 320, 180).data;
+        let luma = 0, chroma = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          luma += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          chroma += Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]);
+        }
+        const n = d.length / 4;
+        return { luma: luma / n, chroma: chroma / n };
+      };
+      return { day: measure(false), night: measure(true) };
+    }, cam.id);
+    expect(stats.night.luma).toBeLessThan(stats.day.luma * 0.75);
+    expect(stats.night.chroma).toBeLessThan(3);
+    // N toggles it; leaving the camera view goes back to day
+    await page.keyboard.press("n");
+    await expect(night).toHaveAttribute("aria-pressed", "false");
+    await page.keyboard.press("n");
+    await expect(night).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+    await expect(look).toHaveCount(0);
+    expect(await canvasFilter()).not.toContain("grayscale");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("camera-look").getByRole("button", { name: "Night" })).toHaveAttribute("aria-pressed", "false");
   });
 });

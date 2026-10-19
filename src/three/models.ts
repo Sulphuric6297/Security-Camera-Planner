@@ -29,6 +29,7 @@ export const getItemTypeLabel = (type: CanvasItem["type"], plural = false) => {
   if (type === "label") return plural ? "Text" : "Text";
   if (type === "image") return plural ? "Overlays" : "Overlay";
   if (type === "target") return plural ? "Protected spots" : "Protected spot";
+  if (type === "recorder") return plural ? "Recorders" : "Recorder";
   return type;
 };
 
@@ -283,6 +284,7 @@ const getLeafTexture = (needles: boolean) => {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
+  tex.userData.shared = true;
   if (needles) needleTexture = tex;
   else leafTexture = tex;
   return tex;

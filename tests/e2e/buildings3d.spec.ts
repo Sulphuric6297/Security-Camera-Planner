@@ -1,7 +1,7 @@
 // Pure-logic tests (no browser page) for 3D building roofs.
 import { test, expect } from "@playwright/test";
 import * as THREE from "three";
-import { applyPhotoUVs, buildRoof, buildWalls, chooseRoof, orientedRect, rectilinearParts } from "../../src/three/buildings";
+import { applyPhotoUVs, buildFacadeWalls, buildRoof, chooseRoof, doorsOnWalls, orientedRect, rectilinearParts } from "../../src/three/buildings";
 import { straightSkeleton } from "../../src/three/roofSkeleton";
 
 const rect = (w: number, d: number, angle = 0) => {
@@ -170,10 +170,52 @@ test.describe("3D building roofs", () => {
   });
 
   test("walls are exactly the wall height (no bevel)", () => {
-    const g = buildWalls(rect(40, 20), 12);
+    const g = buildFacadeWalls(rect(40, 20), 12);
     g.computeBoundingBox();
     const box = g.boundingBox as THREE.Box3;
     expect(box.max.y - box.min.y).toBeCloseTo(12, 5);
     expect(box.max.x - box.min.x).toBeCloseTo(40, 5);
+  });
+
+  test("walls hold whole window bays, face out either way round, and short walls get no window", () => {
+    for (const pts of [rect(40, 20), [...rect(40, 20)].reverse()]) {
+      const g = buildFacadeWalls(pts, 12);
+      const pos = g.getAttribute("position"), nor = g.getAttribute("normal"), uv = g.getAttribute("uv");
+      const index = g.getIndex()!;
+      const bays: number[] = [];
+      for (let q = 0; q < pos.count / 4; q++) {
+        const v = q * 4;
+        const mid = { x: (pos.getX(v) + pos.getX(v + 1)) / 2, z: (pos.getZ(v) + pos.getZ(v + 1)) / 2 };
+        // Normal points away from the middle of the building
+        expect(nor.getX(v) * mid.x + nor.getZ(v) * mid.z).toBeGreaterThan(0);
+        bays.push(Math.max(uv.getX(v), uv.getX(v + 1)));
+        expect(Math.max(uv.getY(v + 2), uv.getY(v + 3))).toBe(1); // one storey
+      }
+      // 40 ft walls: 3 bays of 12 ft; 20 ft walls: 2
+      expect(bays.sort()).toEqual([2, 2, 3, 3]);
+      // Triangles wind counter-clockwise seen from outside (front faces out)
+      for (let t = 0; t < index.count; t += 3) {
+        const [a, b, c] = [0, 1, 2].map(k => new THREE.Vector3().fromBufferAttribute(pos, index.getX(t + k)));
+        const n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+        expect(n.dot(new THREE.Vector3().fromBufferAttribute(nor, index.getX(t)))).toBeGreaterThan(0);
+      }
+    }
+    // A 24 ft tall wall has two storeys; a 3 ft jog has plain siding (less than one bay, no window)
+    const tall = buildFacadeWalls([{ x: 0, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 24 }, { x: 0, y: 24 }], 24).getAttribute("uv");
+    expect(tall.getY(2)).toBe(2);
+    expect(Math.max(tall.getX(0), tall.getX(1))).toBe(0.25);
+  });
+
+  test("marked doors go on the nearest wall, facing out, clear of the corners", () => {
+    const pts = rect(40, 20); // walls at x = +-20, y = +-10
+    const [front, corner] = doorsOnWalls(pts, [{ x: 5, y: 13 }, { x: 19.5, y: 12 }, { x: 0, y: 40 }]);
+    expect(front).toMatchObject({ x: 5, y: 10, nx: 0, ny: 1 });
+    expect(corner.y).toBe(10);
+    expect(corner.x).toBeCloseTo(18.25, 5);
+    // The far one (30 ft from any wall) is not a door on this building
+    expect(doorsOnWalls(pts, [{ x: 0, y: 40 }])).toHaveLength(0);
+    // Plan units at 2 per foot: the same door, the same place
+    const big = pts.map(p => ({ x: p.x * 2, y: p.y * 2 }));
+    expect(doorsOnWalls(big, [{ x: 10, y: 26 }], 2)[0]).toMatchObject({ x: 10, y: 20 });
   });
 });

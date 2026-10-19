@@ -83,6 +83,12 @@ export const doriDistanceFt = (hFovDeg: number, resolutionWidth: number, ppm: nu
   return (resolutionWidth / (ppm * widthAt1m)) * FT_PER_M;
 };
 
+/** Widest view (deg) that still gives `ppm` pixels per meter at a distance (ft): doriDistanceFt's inverse. */
+export const hFovForDensity = (resolutionWidth: number, ppm: number, distanceFt: number) => {
+  const distM = Math.max(distanceFt, 0.1) / FT_PER_M;
+  return (2 * Math.atan(resolutionWidth / (ppm * distM) / 2) * 180) / Math.PI;
+};
+
 export const getCameraHFov = (cam: CameraItem) => cam.hFov ?? cam.fov;
 export const getCameraResolution = (cam: CameraItem) => cam.resolutionWidth ?? DEFAULT_RESOLUTION_WIDTH;
 

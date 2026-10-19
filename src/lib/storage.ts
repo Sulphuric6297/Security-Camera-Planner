@@ -26,3 +26,34 @@ export const idbSet = async (key: string, value: unknown) => {
     tx.onerror = () => reject(tx.error);
   });
 };
+export const idbDelete = async (key: string) => {
+  const db = await openAutosaveDb();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+// --- Plan library: earlier plans, kept when you start a new one or open another ---
+// The open plan lives under AUTOSAVE_KEY; the others under "plan:<id>", listed (newest first) in PLANS_KEY.
+
+export type PlanMeta = { id: string; name: string; updatedAt: number; cameras: number; buildings: number };
+const PLANS_KEY = "plans";
+const planKey = (id: string) => `plan:${id}`;
+
+export const listPlans = async (): Promise<PlanMeta[]> => {
+  const list = await idbGet(PLANS_KEY);
+  return Array.isArray(list) ? list : [];
+};
+export const storePlan = async (meta: PlanMeta, data: unknown) => {
+  await idbSet(planKey(meta.id), data);
+  const list = (await listPlans()).filter(p => p.id !== meta.id);
+  await idbSet(PLANS_KEY, [meta, ...list].sort((a, b) => b.updatedAt - a.updatedAt));
+};
+export const loadPlan = (id: string) => idbGet(planKey(id));
+export const removePlan = async (id: string) => {
+  await idbDelete(planKey(id));
+  await idbSet(PLANS_KEY, (await listPlans()).filter(p => p.id !== id));
+};

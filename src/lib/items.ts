@@ -35,7 +35,7 @@ export const TREE_SIZES = {
 export type TreeSize = keyof typeof TREE_SIZES;
 export const DEFAULT_TREE = TREE_SIZES.medium;
 
-export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target";
+export type NewItemKind = "camera" | "building" | "tree" | "parking" | "label" | "target" | "recorder";
 
 /** Spots to protect, with the detail you usually want there. */
 export const TARGET_KINDS: Record<TargetKind, { label: string; goal: TargetItem["goal"] }> = {
@@ -153,6 +153,8 @@ export const createItem = (
       const kind = opts.targetKind ?? "door";
       return { ...common, type: "target", kind, goal: TARGET_KINDS[kind].goal, label: `${TARGET_KINDS[kind].label} ${(opts.targetIndex ?? 0) + 1}` } as CanvasItem;
     }
+    case "recorder":
+      return { ...common, type: "recorder", label: "Recorder" } as CanvasItem;
   }
 };
 

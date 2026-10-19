@@ -176,6 +176,32 @@ preview:
   leaf texture (not shadow edges), touching crowns are split; cars are compared with the pavement
   around them, so silver, black and white cars all show, and rows of parked cars are split.
 
+### Repeatable setup and safer files (done)
+
+- The camera panel opens with a verdict card (what the camera covers, how well) and "Look through
+  this camera"; the exact numbers sit under "Exact settings".
+- The next camera starts like the last one you set up (lens, resolution, tilt, mount height).
+  Copy/paste a camera's settings (Ctrl+Shift+C/V, or the buttons on the card); duplicating a wall
+  camera slides the copy along the same wall.
+- Measure tool (D): click two points for a distance; Shift+click chains a path with a total.
+- Look through: Tour steps through every camera on its own; Night (N) shows the camera's
+  infrared picture (black and white, dark beyond its IR reach) and can go into the report.
+- Plan library: New never wipes the plan. It goes under Open plan → Recent plans (with Undo), and
+  you can reopen, delete (with Undo) or duplicate plans. Saved files are named after the plan.
+- Plan settings only hold what people use: grid, map image, camera cones in 3D.
+- Each spot to protect that isn't covered well enough has a Fix button: it aims the camera that
+  sees it best at it and zooms the lens in until it gets the wanted detail (or suggests a camera
+  when none sees it).
+- Picking a camera or spot in a side list brings it into view; the camera panel's header shows
+  the camera's number.
+- Recorder and cables: place the recorder (NVR) from the Report step; every camera's cable run is
+  drawn on the map (at right angles, then up to the camera), and the Report step and PDF list each
+  run, the total cable (in 1000 ft boxes), runs over 300 ft, and the recorder size (4/8/16/32
+  channels).
+- Walls have lap siding and a window every 12 ft (whole windows per wall, one row per storey), so
+  camera views read like the real house; a door is drawn wherever a door spot is marked next to a
+  wall.
+
 ## Principles for every change
 - Keep the plan the single canvas. Steps only change the panel and hints, never lock the user in.
 - Every action is undoable. Use toasts with Undo, not confirm dialogs.

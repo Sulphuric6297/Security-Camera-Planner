@@ -1,7 +1,7 @@
 // Pure-logic tests (no browser page) for coverage analysis.
 import { test, expect } from "@playwright/test";
 import { blindSpotCells, cameraSees, evaluateTargets, type CoverageCamera, type Obstacle } from "../../src/lib/coverage";
-import { doriDistanceFt } from "../../src/lib/camera";
+import { doriDistanceFt, hFovForDensity } from "../../src/lib/camera";
 
 // A 4 MP camera with a 90° lens at 9 ft, tilted 15° down, looking east (+x).
 const cam = (over: Partial<CoverageCamera> = {}): CoverageCamera => ({
@@ -90,5 +90,14 @@ test.describe("coverage", () => {
     }
     // The cell straight behind the camera is a blind spot
     expect(res.runs.some(r => r.y <= -5 && r.y + r.height >= -5 && r.x <= -30 && r.x + r.width >= -30)).toBe(true);
+  });
+
+  test("the lens angle for a detail level at a distance is the inverse of the DORI distance", () => {
+    for (const [res, ppm, ft] of [[2688, 250, 40], [1920, 125, 80], [3840, 62.5, 150]]) {
+      const h = hFovForDensity(res, ppm, ft);
+      expect(doriDistanceFt(h, res, ppm)).toBeCloseTo(ft, 6);
+    }
+    // Closer needs less zoom
+    expect(hFovForDensity(2688, 250, 20)).toBeGreaterThan(hFovForDensity(2688, 250, 40));
   });
 });

@@ -36,6 +36,8 @@ type Props = {
   /** Share of the site some camera sees (when blind spots are on). */
   coveredFraction?: number | null;
   onSuggest: () => void;
+  /** Aim the best camera at a spot and zoom it in (or suggest a camera when none sees it). */
+  onFix: (id: string) => void;
   night: boolean;
   onToggleNight: (on: boolean) => void;
 };
@@ -84,6 +86,16 @@ export function CoveragePanel(props: Props) {
                     <span className="block text-sm text-slate-100 truncate">{t.label}</span>
                     <span className="block text-[11px] text-slate-400 truncate">{detail}</span>
                   </button>
+                  {status !== "met" && (
+                    <button
+                      onClick={() => props.onFix(t.id)}
+                      className="flex items-center gap-1 rounded-md bg-emerald-600/90 hover:bg-emerald-500 px-1.5 py-0.5 text-[11px] font-semibold text-white"
+                      title={r?.best ? `Aim ${camName(r.best.cameraId)} at it and zoom in until it sees ${LEVEL_LABEL[t.goal]}` : "Suggest a camera for it"}
+                      aria-label={`Fix ${t.label}`}
+                    >
+                      <Wand2 className="w-3 h-3" /> Fix
+                    </button>
+                  )}
                   <button onClick={() => props.onDelete(t.id)} className="p-1 text-slate-500 hover:text-red-300" title="Remove" aria-label={`Remove ${t.label}`}>
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

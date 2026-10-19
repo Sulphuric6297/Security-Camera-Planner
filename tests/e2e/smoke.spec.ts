@@ -27,4 +27,14 @@ test.describe("app shell", () => {
     await page.keyboard.press("2");
     await expect(page.getByRole("tab", { name: "2D" })).toHaveAttribute("aria-selected", "true");
   });
+
+  test("plan settings hold only settings that do something", async ({ page }) => {
+    await page.getByRole("button", { name: /Plan settings/ }).click();
+    const panel = page.getByLabel("Inspector");
+    await expect(panel).toContainText("Grid");
+    await expect(panel).toContainText("Camera cones in 3D");
+    for (const gone of ["Clear Canvas", "Building Label Defaults", "Environment Background", "3D Snapshots", "Stats"]) {
+      await expect(panel).not.toContainText(gone);
+    }
+  });
 });
