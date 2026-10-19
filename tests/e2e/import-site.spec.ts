@@ -1,3 +1,5 @@
+import { test as pure } from "@playwright/test";
+import { fetchOsmBuildings } from "../../src/lib/geo/buildings";
 import { test, expect, importSite, itemsOfType, project, terrainRelief, SITE, ROOFS, DETECTED_CENTER, PHOTO_TREE, PHOTO_CAR } from "./fixtures";
 
 test.describe("Import Site", () => {
@@ -149,5 +151,25 @@ test.describe("Import Site", () => {
     await expect.poll(() => outline.getAttribute("d")).not.toBe(before);
     await page.getByRole("button", { name: "Original" }).click();
     await expect.poll(() => outline.getAttribute("d")).not.toBe(before);
+  });
+});
+
+pure.describe("building lookup (pure logic)", () => {
+  pure("a stalled OpenStreetMap server is given up on, not waited for forever", async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    // Both servers accept the request and never answer (until the request is cancelled)
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      calls++;
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    }) as typeof fetch;
+    try {
+      const started = Date.now();
+      await expect(fetchOsmBuildings({ south: 39.78, west: -89.68, north: 39.781, east: -89.679 }, 200)).rejects.toThrow();
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(calls).toBe(2); // tried the other server too
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

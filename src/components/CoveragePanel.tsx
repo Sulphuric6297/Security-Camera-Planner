@@ -75,7 +75,7 @@ export function CoveragePanel(props: Props) {
             const Icon = status === "met" ? Check : status === "partial" ? AlertTriangle : X;
             const detail = !r?.best
               ? `Not covered: ${REASON_TEXT[r?.reason ?? "outside-view"]}`
-              : `${camName(r.best.cameraId)} · ${LEVEL_LABEL[r.best.level]}${status === "partial" ? ` (want ${LEVEL_LABEL[t.goal]})` : ""}`;
+              : `${camName(r.best.cameraId)}: ${LEVEL_LABEL[r.best.level]}${status === "partial" ? `, needs ${LEVEL_LABEL[t.goal]}` : ""}`;
             return (
               <li key={t.id} className="rounded-lg bg-black/20 px-2 py-1.5" data-status={status}>
                 <div className="flex items-center gap-2">
@@ -84,7 +84,7 @@ export function CoveragePanel(props: Props) {
                   </span>
                   <button className="flex-1 min-w-0 text-left" onClick={() => props.onSelect(t.id)}>
                     <span className="block text-sm text-slate-100 truncate">{t.label}</span>
-                    <span className="block text-[11px] text-slate-400 truncate">{detail}</span>
+                    <span className="block text-[11px] leading-snug text-slate-400">{detail}</span>
                   </button>
                   {status !== "met" && (
                     <button
@@ -106,7 +106,15 @@ export function CoveragePanel(props: Props) {
                     value={t.kind}
                     onChange={e => {
                       const kind = e.target.value as TargetItem["kind"];
-                      props.onUpdate(t.id, { kind, goal: TARGET_KINDS[kind].goal });
+                      if (kind === t.kind) return;
+                      // A spot still under its default name ("Door 2") is renamed for what it is now
+                      // ("Driveway 1", the lowest number no other spot uses).
+                      const defaultName = new RegExp(`^(${Object.values(TARGET_KINDS).map(k => k.label).join("|")}) \\d+$`).test(t.label);
+                      const base = TARGET_KINDS[kind].label;
+                      const used = new Set(targets.filter(o => o.id !== t.id).map(o => o.label));
+                      let n = 1;
+                      while (used.has(`${base} ${n}`)) n++;
+                      props.onUpdate(t.id, { kind, goal: TARGET_KINDS[kind].goal, ...(defaultName ? { label: `${base} ${n}` } : {}) });
                     }}
                     className="w-full min-w-0 bg-zinc-900 border border-white/10 rounded px-1 py-0.5 text-[11px] text-slate-200"
                   >

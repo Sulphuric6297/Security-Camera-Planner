@@ -34,16 +34,22 @@ export const estimateBuildingHeightFt = (tags: Record<string, string>) => {
 };
 
 // Building footprints from OpenStreetMap (free, no key). Coverage varies by area.
-export const fetchOsmBuildings = async (bounds: GeoBounds): Promise<OsmBuilding[]> => {
+/** How long to wait for one Overpass server before trying the next (they can stall for minutes). */
+export const OVERPASS_TIMEOUT_MS = 20000;
+
+export const fetchOsmBuildings = async (bounds: GeoBounds, timeoutMs = OVERPASS_TIMEOUT_MS): Promise<OsmBuilding[]> => {
   const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
   const query = `[out:json][timeout:25];(way["building"](${bbox});relation["building"]["type"="multipolygon"](${bbox}););out geom;`;
   let lastError: unknown = null;
   for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: `data=${encodeURIComponent(query)}`
+        body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal
       });
       if (!res.ok) throw new Error(`Overpass ${res.status}`);
       const json = await res.json();
@@ -65,6 +71,8 @@ export const fetchOsmBuildings = async (bounds: GeoBounds): Promise<OsmBuilding[
       return buildings;
     } catch (err) {
       lastError = err;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Building lookup failed.");

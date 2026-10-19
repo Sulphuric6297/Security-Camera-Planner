@@ -173,4 +173,24 @@ test.describe("guided workflow and plan tools", () => {
     await expect.poll(() => inView(cams[1].id)).toBe(true);
     await expect(page.getByLabel("Inspector").getByRole("heading").first()).toHaveText("2Camera 2");
   });
+
+  test("labels on the map don't sit on top of each other", async ({ page }) => {
+    // Two cameras and a spot almost on the same point
+    await placeWithKey(page, "c", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    await placeWithKey(page, "c", 0.503, 0.5);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    const boxes = async () => {
+      const els = await page.locator('[data-testid="camera-badge"]').all();
+      return Promise.all(els.map(e => e.boundingBox()));
+    };
+    await expect.poll(async () => (await boxes()).length).toBe(2);
+    await expect.poll(async () => {
+      const [a, b] = await boxes();
+      if (!a || !b) return "missing";
+      const overlap = a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+      return overlap ? "overlap" : "apart";
+    }).toBe("apart");
+  });
 });

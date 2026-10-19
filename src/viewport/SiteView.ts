@@ -55,7 +55,7 @@ type Handle = {
   /** Hidden when it would crowd the others (e.g. edge dots on a building that is small on screen). */
   visible?: () => boolean;
 };
-type Overlay = { el: HTMLDivElement; anchor: THREE.Vector3; dy: number; sig: string };
+type Overlay = { el: HTMLDivElement; anchor: THREE.Vector3; dy: number; sig: string; w?: number; h?: number };
 
 const STYLE = `
 .scp-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden}
@@ -1604,6 +1604,39 @@ export class SiteView {
 
   // ------------------------------------------------------------------ per-frame layout of DOM bits
 
+  // Camera badges, spot pins and the recorder are moved apart (down, then up) so none sits on
+  // another; a building's name that would be covered is hidden until there is room for it.
+  private layoutOverlays() {
+    const rank = (key: string) => (key.startsWith("cam:") ? 0 : key.startsWith("bld:") ? 3 : key.startsWith("txt:") ? 2 : 1);
+    const list = [...this.overlays.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
+    const taken: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    const hits = (r: { x0: number; y0: number; x1: number; y1: number }) => taken.some(t => r.x0 < t.x1 && r.x1 > t.x0 && r.y0 < t.y1 && r.y1 > t.y0);
+    for (const [key, o] of list) {
+      const s = this.project(o.anchor);
+      if (!s || s.x < -60 || s.y < -60 || s.x > this.size.width + 60 || s.y > this.size.height + 60) {
+        o.el.style.display = "none";
+        continue;
+      }
+      o.el.style.display = "";
+      if (!o.w || !o.h) { o.w = o.el.offsetWidth; o.h = o.el.offsetHeight; }
+      const w = o.w, h = o.h;
+      const x = s.x - w / 2, y = s.y - h / 2 + o.dy;
+      const box = (dy: number) => ({ x0: x, y0: y + dy, x1: x + w, y1: y + dy + h });
+      let dy = 0;
+      if (rank(key) === 3) {
+        // Least important: hide it rather than move it off its building.
+        const covered = hits(box(0));
+        o.el.style.visibility = covered ? "hidden" : "";
+        if (covered) continue;
+      } else {
+        const step = h + 2;
+        dy = [0, step, -step, 2 * step, -2 * step].find(d => !hits(box(d))) ?? 0;
+      }
+      taken.push(box(dy));
+      o.el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y + dy)}px)`;
+    }
+  }
+
   private layout() {
     const place = (el: HTMLElement, world: THREE.Vector3 | null, dy = 0, center = true) => {
       const s = world ? this.project(world) : null;
@@ -1616,7 +1649,7 @@ export class SiteView {
       const hgt = center ? el.offsetHeight / 2 : 0;
       el.style.transform = `translate(${Math.round(s.x - w)}px, ${Math.round(s.y - hgt + dy)}px)`;
     };
-    for (const o of this.overlays.values()) place(o.el, o.anchor, o.dy);
+    this.layoutOverlays();
     for (const m of this.measureLabels) place(m.el, m.at, -12);
     for (const h of this.handles) {
       let w: THREE.Vector3 | null = null;

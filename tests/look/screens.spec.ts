@@ -1,0 +1,174 @@
+// Screenshots of the main screens, saved to look/<name>.png. Run with `npm run look`
+// (add `-- -g "camera"` for one). Uses the same offline stubs as the test suite.
+import type { Page } from "@playwright/test";
+import { test, importSite, itemsOfType, placeWithKey } from "../e2e/fixtures";
+
+const shot = async (page: Page, name: string) => {
+  await page.waitForTimeout(900); // let camera moves and renders settle
+  await page.screenshot({ path: `look/${name}.png` });
+};
+
+// Default window positions (the e2e fixture parks the camera view out of the way).
+test.beforeEach(async ({ page }) => {
+  await page.evaluate(() => { localStorage.removeItem("scp.cameraViewPos"); localStorage.removeItem("scp.cameraViewWidth"); });
+});
+
+test("start", async ({ page }) => {
+  await shot(page, "01-start");
+});
+
+test("site", async ({ page }) => {
+  await importSite(page);
+  await shot(page, "02-site-2d");
+  const [house] = await itemsOfType(page, "building");
+  await page.evaluate(id => (window as any).__scpSelect(id), house.id);
+  await shot(page, "03-building-selected");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("3");
+  await shot(page, "04-site-3d");
+});
+
+test("camera", async ({ page }) => {
+  await importSite(page);
+  await page.keyboard.press("Escape");
+  await placeWithKey(page, "c", 0.45, 0.62);
+  await shot(page, "05-camera-selected");
+  await page.keyboard.press("3");
+  await shot(page, "06-camera-3d");
+});
+
+test("shapes", async ({ page }) => {
+  // An L-shaped and a T-shaped house, seen in 3D
+  await placeWithKey(page, "b", 0.4, 0.5);
+  await placeWithKey(page, "b", 0.62, 0.5);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const s = (window as any).__scpProject();
+    const L = [{ x: -40, y: -30 }, { x: 40, y: -30 }, { x: 40, y: -6 }, { x: -16, y: -6 }, { x: -16, y: 30 }, { x: -40, y: 30 }];
+    const T = [{ x: -40, y: -24 }, { x: 40, y: -24 }, { x: 40, y: 0 }, { x: 12, y: 0 }, { x: 12, y: 30 }, { x: -12, y: 30 }, { x: -12, y: 0 }, { x: -40, y: 0 }];
+    const [a, b] = s.items.filter((i: any) => i.type === "building");
+    s.setField("items", s.items.map((i: any) => (i.id === a.id ? { ...i, points: L } : i.id === b.id ? { ...i, points: T } : i)));
+  });
+  await page.keyboard.press("f");
+  await shot(page, "07-shapes-2d");
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => { const s = (window as any).__scpProject(); (window as any).__scpView.fitBounds({ minX: 380, minY: 300, maxX: 660, maxY: 400 }, { animate: false }); });
+  await shot(page, "08-shapes-3d");
+});
+
+test("odd-roofs", async ({ page }) => {
+  // Buildings that aren't rectangles or L/T shapes, with gable and hip roofs chosen
+  await placeWithKey(page, "b", 0.3, 0.5);
+  await placeWithKey(page, "b", 0.5, 0.5);
+  await placeWithKey(page, "b", 0.7, 0.5);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const s = (window as any).__scpProject();
+    // A store with an angled entrance notch, an odd house, a trapezoid
+    const notch = [{ x: -30, y: -20 }, { x: 30, y: -20 }, { x: 30, y: 20 }, { x: 10, y: 20 }, { x: 0, y: 8 }, { x: -10, y: 20 }, { x: -30, y: 20 }];
+    const odd = [{ x: -30, y: -25 }, { x: 30, y: -25 }, { x: 15, y: 5 }, { x: -20, y: 25 }, { x: -35, y: 0 }];
+    const trap = [{ x: -25, y: -15 }, { x: 25, y: -15 }, { x: 15, y: 15 }, { x: -15, y: 15 }];
+    const bs = s.items.filter((i: any) => i.type === "building");
+    const set = [[notch, "gable"], [odd, "hip"], [trap, "gable"]];
+    s.setField("items", s.items.map((i: any) => { const k = bs.findIndex((b: any) => b.id === i.id); return k < 0 ? i : { ...i, points: set[k][0], roofType: set[k][1] }; }));
+  });
+  await page.keyboard.press("3");
+  await page.waitForTimeout(800);
+  await page.evaluate(() => {
+    const bs = (window as any).__scpProject().items.filter((i: any) => i.type === "building");
+    const xs = bs.map((b: any) => b.x), ys = bs.map((b: any) => b.y);
+    (window as any).__scpView.fitBounds({ minX: Math.min(...xs) - 40, minY: Math.min(...ys) - 30, maxX: Math.max(...xs) + 40, maxY: Math.max(...ys) + 30 }, { animate: false });
+  });
+  await shot(page, "09-odd-roofs-3d");
+  await page.keyboard.press("q");
+  await page.keyboard.press("q");
+  await shot(page, "10-odd-roofs-turned");
+});
+
+test("objects-3d", async ({ page }) => {
+  // Close-ups of a car, trees and a house in 3D, to judge how the scene looks
+  await placeWithKey(page, "b", 0.5, 0.45);
+  await placeWithKey(page, "p", 0.62, 0.6);
+  await placeWithKey(page, "t", 0.38, 0.6);
+  await placeWithKey(page, "t", 0.42, 0.66);
+  await placeWithKey(page, "c", 0.5, 0.52);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const items = (window as any).__scpProject().items;
+    const xs = items.map((b: any) => b.x), ys = items.map((b: any) => b.y);
+    (window as any).__scpView.fitBounds({ minX: Math.min(...xs) - 10, minY: Math.min(...ys) - 10, maxX: Math.max(...xs) + 10, maxY: Math.max(...ys) + 10 }, { animate: false, minSpan: 30 });
+  });
+  await shot(page, "11-objects-3d");
+  await page.keyboard.press("q");
+  await page.keyboard.press("q");
+  await page.keyboard.press("q");
+  await shot(page, "12-objects-3d-turned");
+  // Close-up of the car
+  await page.evaluate(() => {
+    const car = (window as any).__scpProject().items.find((i: any) => i.type === "parking");
+    (window as any).__scpView.fitBounds({ minX: car.x - 12, minY: car.y - 12, maxX: car.x + 12, maxY: car.y + 12 }, { animate: false, minSpan: 10 });
+  });
+  await shot(page, "12b-car-close");
+});
+
+test("pov", async ({ page }) => {
+  // Looking through a camera on the house
+  await importSite(page);
+  await page.keyboard.press("Escape");
+  const [house] = (await itemsOfType(page, "building")).filter((b: any) => b.mine);
+  const box = await page.evaluate(id => (window as any).__scpView.screenBox(id), house.id);
+  const plan = (await page.getByTestId("plan").boundingBox())!;
+  await page.keyboard.press("c");
+  await page.mouse.click(box.x + plan.x + box.width / 2, box.y + plan.y + box.height + 3);
+  await page.keyboard.press("Escape");
+  const [cam] = await itemsOfType(page, "camera");
+  await page.evaluate(id => (window as any).__scpSelect(id), cam.id);
+  await shot(page, "13-camera-window");
+  await page.keyboard.press("Enter");
+  await shot(page, "14-pov");
+  await page.keyboard.press("n");
+  await shot(page, "15-pov-night");
+});
+
+test("plans", async ({ page }) => {
+  // Spots to protect with a Fix button, the camera panel header, then the Open plan menu
+  await importSite(page);
+  await page.keyboard.press("Escape");
+  await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+  await page.getByRole("button", { name: /Mark a door, gate or driveway/ }).click();
+  const plan = (await page.getByTestId("plan").boundingBox())!;
+  await page.mouse.click(plan.x + plan.width * 0.45, plan.y + plan.height * 0.4);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("c");
+  await page.mouse.click(plan.x + plan.width * 0.45, plan.y + plan.height * 0.62);
+  await page.keyboard.press("Escape");
+  await shot(page, "16-fix-spot");
+  await page.getByTitle("New plan").click();
+  await page.getByTitle("Open plan").click();
+  await shot(page, "17-recent-plans");
+});
+
+test("recorder", async ({ page }) => {
+  // Two cameras on the house, the recorder inside it, cable runs shown in 2D and 3D
+  await importSite(page);
+  await page.keyboard.press("Escape");
+  const [house] = (await itemsOfType(page, "building")).filter((b: any) => b.mine);
+  const box = await page.evaluate(id => (window as any).__scpView.screenBox(id), house.id);
+  const plan = (await page.getByTestId("plan").boundingBox())!;
+  await page.keyboard.press("c");
+  await page.mouse.click(box.x + plan.x + box.width * 0.3, box.y + plan.y + box.height + 3);
+  await page.keyboard.press("c");
+  await page.mouse.click(box.x + plan.x + box.width + 3, box.y + plan.y + box.height * 0.3);
+  await page.keyboard.press("Escape");
+  await page.locator('nav[aria-label="Steps"] button').nth(4).click();
+  await page.getByTestId("cabling").getByRole("button", { name: "Place the recorder" }).click();
+  await page.mouse.click(box.x + plan.x + box.width * 0.4, box.y + plan.y + box.height * 0.4);
+  await page.keyboard.press("Escape");
+  await shot(page, "18-recorder-2d");
+  await page.keyboard.press("3");
+  await shot(page, "19-recorder-3d");
+});
+

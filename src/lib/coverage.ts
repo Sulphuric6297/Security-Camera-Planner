@@ -106,6 +106,32 @@ export type TargetCoverage = {
   reason?: SightResult["reason"];
 };
 
+/**
+ * A camera to turn toward a spot nothing sees yet: the nearest one that would see it once aimed
+ * straight at it (in range, not blocked, not right under it). Only cameras that aren't the best for
+ * any other spot (`busy`) are considered, so turning one loses nothing.
+ * @param pitchFor tilt (degrees, negative = down) for a camera to look at something this far away (ft)
+ */
+export const cameraToTurn = (
+  cameras: CoverageCamera[],
+  target: P,
+  obstacles: Obstacle[],
+  unitsPerFoot: number,
+  busy: Set<string>,
+  pitchFor: (cam: CoverageCamera, distanceFt: number) => number
+): CoverageCamera | null => {
+  let best: { cam: CoverageCamera; d: number } | null = null;
+  for (const cam of cameras) {
+    if (busy.has(cam.id)) continue;
+    const d = Math.hypot(target.x - cam.x, target.y - cam.y);
+    const rotation = (Math.atan2(target.y - cam.y, target.x - cam.x) * 180) / Math.PI;
+    const aimed = { ...cam, rotation, pitch: pitchFor(cam, d / unitsPerFoot) };
+    if (!cameraSees(aimed, target, obstacles, unitsPerFoot).level) continue;
+    if (!best || d < best.d) best = { cam, d };
+  }
+  return best?.cam ?? null;
+};
+
 export const evaluateTargets = (
   cameras: CoverageCamera[],
   targets: { id: string; x: number; y: number; goal: DoriLevelId }[],

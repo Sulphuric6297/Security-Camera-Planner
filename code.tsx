@@ -54,7 +54,7 @@ import { CoveragePanel, GOAL_LABEL, LEVEL_LABEL, REASON_TEXT, STATUS_COLOR, targ
 import { buildReportHtml, camerasCsv, compassFromRotation, type ReportCamera, type ReportSpot } from "./src/lib/report";
 import { suggestCameras } from "./src/lib/suggest";
 import { estimateStorage } from "./src/lib/recording";
-import { blindSpotCells, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
+import { blindSpotCells, cameraToTurn, evaluateTargets, type CoverageCamera, type Obstacle } from "./src/lib/coverage";
 import { boundsOfPoints, type Bounds } from "./src/lib/view";
 import { traceRoof } from "./src/lib/roofTrace";
 import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, DEFAULT_CAMERA_HEIGHT_FT, DEFAULT_IR_RANGE_FT, DEFAULT_CAMERA_PITCH, DEFAULT_CANVAS, FONT_FAMILIES, FONT_WEIGHTS, NVR_COLS, NVR_DEFAULT_H, NVR_DEFAULT_W, NVR_HEADER_FOOTER, NVR_MARGIN, NVR_MIN_ROW_HEIGHT, TERRAIN_BRUSH_MAX, TERRAIN_BRUSH_MIN, TERRAIN_FALLOFF_MAX, TERRAIN_FALLOFF_MIN, clamp, generateId, mountHeightForBuilding } from "./src/constants";
@@ -3513,7 +3513,11 @@ export default function SecurityPlanner() {
     const t = targetItems.find(x => x.id === targetId);
     if (!t) return;
     const camId = targetResults.get(targetId)?.best?.cameraId;
-    const cam = camId ? cameraItems.find(c => c.id === camId) : undefined;
+    // Nothing sees it yet: turn a camera that isn't needed for any other spot, if one would see it.
+    const busy = new Set([...targetResults.entries()].filter(([id, r]) => id !== targetId && r.best).map(([, r]) => r.best!.cameraId));
+    const turnId = camId ?? cameraToTurn(coverageModel.cameras, t, coverageModel.obstacles, coverageModel.upf, busy,
+      (c, distanceFt) => suggestPitchForDistance(c.heightFt, distanceFt))?.id;
+    const cam = turnId ? cameraItems.find(c => c.id === turnId) : undefined;
     if (!cam) {
       handleSuggestCameras();
       return;

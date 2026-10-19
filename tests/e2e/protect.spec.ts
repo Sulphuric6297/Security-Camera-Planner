@@ -29,6 +29,10 @@ test.describe("what to protect and coverage", () => {
     await page.getByRole("button", { name: "Camera 1", exact: true }).click();
     // Seen, but too far to see faces with a 90° lens
     await expect.poll(() => status(page)).toBe("partial");
+    // The checklist says which camera sees it and what it still needs, in full (not cut off)
+    const row = page.getByRole("list", { name: "Protected spots" }).getByText(/^Camera 1: .*, needs faces$/);
+    await expect(row).toBeVisible();
+    expect(await row.evaluate(el => el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight + 1)).toBe(true);
 
     // Only need to notice someone there: now it's covered
     await page.getByRole("button", { name: "Notice someone" }).click();
@@ -61,6 +65,45 @@ test.describe("what to protect and coverage", () => {
     // Undo puts the camera back
     await page.getByRole("status").getByRole("button", { name: "Undo" }).click();
     await expect.poll(() => status(page)).toBe("partial");
+  });
+
+  test("Fix turns a camera that isn't needed elsewhere instead of adding one", async ({ page }) => {
+    await markSpot(page, 0.5, 0.45);
+    await placeWithKey(page, "c", 0.5, 0.51);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    // Facing straight away from the door: nothing sees it
+    const [cam] = await itemsOfType(page, "camera");
+    await page.evaluate(id => {
+      const s = (window as any).__scpProject();
+      s.setField("items", s.items.map((i: any) => (i.id === id ? { ...i, rotation: 90 } : i)));
+    }, cam.id);
+    await expect.poll(() => status(page)).toBe("none");
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    await page.getByRole("button", { name: "Fix Door 1" }).click();
+    await expect(page.getByRole("status")).toContainText(/Aimed Camera 1 at Door 1/);
+    expect(await itemsOfType(page, "camera")).toHaveLength(1); // no new camera
+    await expect.poll(() => status(page)).not.toBe("none");
+  });
+
+  test("a spot under its default name is renamed when its kind changes; a name you gave it stays", async ({ page }) => {
+    await markSpot(page, 0.5, 0.45);
+    await markSpot(page, 0.4, 0.45);
+    await page.locator('nav[aria-label="Steps"] button').nth(2).click();
+    const rows = page.getByRole("list", { name: "Protected spots" }).getByRole("listitem");
+    await rows.nth(1).getByLabel("Kind").selectOption({ label: "Driveway" });
+    await expect.poll(async () => (await itemsOfType(page, "target")).map(t => t.label)).toEqual(["Door 1", "Driveway 1"]);
+    // Picking the kind it already has changes nothing
+    await rows.nth(0).getByLabel("Kind").selectOption({ label: "Door" });
+    await expect.poll(async () => (await itemsOfType(page, "target")).map(t => t.label)).toEqual(["Door 1", "Driveway 1"]);
+    // Named by the user: kept
+    const [first] = await itemsOfType(page, "target");
+    await page.evaluate(id => {
+      const s = (window as any).__scpProject();
+      s.setField("items", s.items.map((i: any) => (i.id === id ? { ...i, label: "Back porch" } : i)));
+    }, first.id);
+    await rows.nth(0).getByLabel("Kind").selectOption({ label: "Yard" });
+    await expect.poll(async () => (await itemsOfType(page, "target")).map(t => [t.label, t.kind])).toEqual([["Back porch", "yard"], ["Driveway 1", "driveway"]]);
   });
 
   test("a building between the camera and the door blocks it", async ({ page }) => {
