@@ -1,6 +1,6 @@
 // --- Types ---
 
-export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder" | "add-open-part";
+export type ToolMode = "select" | "add-camera" | "add-building" | "add-tree" | "add-parking" | "add-label" | "trace-building" | "add-target" | "measure" | "add-recorder" | "add-open-part" | "add-opening";
 export type InteractionType = "move" | "rotate" | "fov" | "range" | "resize-image" | "move-label" | "vertex" | null;
 export type BuildingLabelDefaults = {
   fontFamily: string;
@@ -94,6 +94,36 @@ export interface CameraItem extends BaseItem {
   irRangeFt?: number;
 }
 
+export type OpenPartKind = "porch" | "deck" | "carport" | "patio";
+/** A porch, carport or patio under a building's roof. */
+export interface OpenPart {
+  /** Corners (a convex quad) in the building's own frame, plan units. */
+  pts: { x: number; y: number }[];
+  kind: OpenPartKind;
+  /** Floor height above the ground, plan units (a porch deck; 0 for a slab on the ground). */
+  floor: number;
+  /** Railing around a raised floor (porches). Unset: on when the floor is 1.5 ft or more up. */
+  railing?: boolean;
+  /** Roof over it: the house's own roof ("main", a part set into the house), its own lower roof
+   * sloping away from the house ("own", an attached porch), or none (a deck). Unset: "main" when
+   * it lies inside the house's outline, else "own" for porches and carports, "none" otherwise. */
+  roof?: "main" | "own" | "none";
+}
+
+export type OpeningKind = "window" | "picture-window" | "door" | "double-door" | "slider" | "garage-door";
+/** A window or door in one of a building's outer walls (like a home-design program's openings). */
+export interface Opening {
+  kind: OpeningKind;
+  /** Outline edge it sits in, and its middle's distance from that edge's start (plan units). */
+  edge: number;
+  at: number;
+  /** Size and the height of its bottom above the ground (plan units). */
+  width: number;
+  height: number;
+  sill: number;
+  shutters?: boolean;
+}
+
 export interface BuildingItem extends BaseItem {
   type: "building";
   importSource?: "osm"; // Footprint imported from OpenStreetMap (replaced on re-import)
@@ -101,9 +131,11 @@ export interface BuildingItem extends BaseItem {
   mine?: boolean;
   /** Porch, carport or pavilion: a roof on posts, no walls (cameras see through and under it). */
   openSides?: boolean;
-  /** Open parts under the roof (a porch, a carport): rectangles in the building's own frame with no
-   * outer walls, posts instead, and a wall where they meet the house. */
-  openParts?: { x: number; y: number }[][];
+  /** Open parts under the roof (a porch, a carport, a patio): areas in the building's own frame with
+   * no outer walls, posts instead, and a wall where they meet the house. */
+  openParts?: OpenPart[];
+  /** Windows and doors placed by the user. Unset: automatic windows (one per bay on every wall). */
+  openings?: Opening[];
   width: number;
   height: number;
   wallHeight?: number; // Vertical height in 3D (to the eaves)

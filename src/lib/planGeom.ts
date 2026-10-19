@@ -4,7 +4,7 @@
 import { CAMERA_WALL_SNAP_FT, OBJECT_ELEVATION_OFFSET, clamp } from "../constants";
 import type { BuildingItem, CameraItem, CanvasItem, TreeItem } from "../types";
 import { getEdgeOutwardNormal, pointInPolygonXY, rectanglePoints } from "./geometry";
-import { enclosedWalls } from "./openParts";
+import { enclosedWalls, insetParts, openPartsOf } from "./openParts";
 
 type P = { x: number; y: number };
 
@@ -49,7 +49,8 @@ export const buildingWallSegments = (b: BuildingItem): [P, P][] => {
   if (b.openSides) return [];
   const toWorld = (p: P) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
   const local = buildingLocalPoints(b);
-  if (b.openParts?.length) return enclosedWalls(local, b.openParts).map(w => [toWorld(w.a), toWorld(w.b)] as [P, P]);
+  const parts = insetParts(local, openPartsOf(b));
+  if (parts.length) return enclosedWalls(local, parts).map(w => [toWorld(w.a), toWorld(w.b)] as [P, P]);
   return local.map((p, i) => [toWorld(p), toWorld(local[(i + 1) % local.length])] as [P, P]);
 };
 

@@ -67,7 +67,7 @@ Useful commands:
 | `report.spec.ts` | Report HTML sections and escaping, parts list grouping, CSV escaping, compass directions, recorder storage estimate (pure logic) |
 | `suggest.spec.ts` | "Suggest cameras": wall mounts that meet each spot's goal, one camera angled to take in several spots, nothing for covered spots, pole fallback (pure logic) |
 | `align.spec.ts` | Lining footprints up with aerial imagery (pure logic, synthetic scenes) |
-| `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site; wall cameras stay outside L-shaped houses, walls left around porch/carport parts (pure logic) |
+| `geometry.spec.ts` | Plan geometry helpers such as clipping footprints to the site; wall cameras stay outside L-shaped houses, walls left around porch/carport parts, windows and doors (automatic layout, a door replaces the window it overlaps) (pure logic) |
 | `buildings3d.spec.ts` | 3D roofs: roof choice, gable/hip/flat geometry, photo texture coordinates, exact wall height, facade window bays, doors on walls, light soffits under eaves, open-sided buildings (porch, carport), houses with porch/carport parts (no walls there, posts, walls face out) (pure logic) |
 | `items.spec.ts` | New items at real-world size for any map scale, the 3D car exactly its stated length, old-save migration (pure logic) |
 | `pov.spec.ts` | Looking through a camera: Enter/Look through, drag to aim, scroll to zoom the lens, arrows/thumbnails/Tour switch cameras, Esc back, Night (infrared) view, the picture fills the window with Settings beside it, closing with its X/tabs/steps; camera pictures rendered from the 3D scene |

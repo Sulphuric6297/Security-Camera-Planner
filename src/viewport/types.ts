@@ -59,7 +59,12 @@ export type ViewCallbacks = {
   onTrace: (p: P) => void;
   onAim: (p: P) => void;
   /** A porch or carport part dragged out over the selected building (two opposite corners, plan). */
-  onOpenPart: (buildingId: string, a: P, b: P) => void;
+  /** A porch/carport part drawn on a building: corners in its own frame, or the wall clicked (and on which side of it). */
+  onOpenPart: (buildingId: string, shape: { pts: P[] } | { edge: number; outside: boolean }) => void;
+  /** A window or door placed on a building (a point on or near its wall, building frame, and the
+   * height clicked on the wall when known), and one picked to edit. */
+  onOpening: (buildingId: string, p: P, height: number | null) => void;
+  onSelectOpening: (buildingId: string, index: number) => void;
   /** Live edits while dragging (no undo step); onCommit ends the gesture. */
   onChange: (id: string, patch: Partial<CanvasItem>) => void;
   onCommit: () => void;

@@ -80,3 +80,18 @@ test.describe("geometry", () => {
     expect(two.some(w => inCarport({ x: (w.a.x + w.b.x) / 2, y: (w.a.y + w.b.y) / 2 }))).toBe(false);
   });
 });
+
+test.describe("windows and doors", () => {
+  test("automatic windows become a list; a new door takes the place of the window it overlaps", async () => {
+    const { autoOpenings, openingAt, placeOpening } = await import("../../src/lib/openings");
+    const house = [{ x: -20, y: -15 }, { x: 20, y: -15 }, { x: 20, y: 15 }, { x: -20, y: 15 }];
+    const auto = autoOpenings(house, 14, 1);
+    // 40 ft walls: 3 windows each, 30 ft walls: 3 (rounded 2.5); one storey
+    expect(auto.filter(o => o.edge === 0)).toHaveLength(3);
+    const door = openingAt(house, { x: 0, y: 15.5 }, "door", 1);
+    expect(door.edge).toBe(2);
+    const next = placeOpening(auto, door, 1);
+    expect(next.filter(o => o.edge === 2 && o.kind === "window").length).toBe(auto.filter(o => o.edge === 2).length - 1);
+    expect(next.some(o => o.kind === "door")).toBe(true);
+  });
+});

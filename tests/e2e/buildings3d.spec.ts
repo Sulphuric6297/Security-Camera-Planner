@@ -270,9 +270,9 @@ test.describe("3D building roofs", () => {
       expect(nor.getX(v) * (mid.x + 6) + nor.getZ(v) * (mid.z + 4)).toBeGreaterThan(0);
     }
     // Posts and beams hold up the roof over the porch and carport, up to the eaves
-    const posts = model.getObjectByName("building-posts") as THREE.Mesh;
-    expect(posts).toBeTruthy();
-    const box = new THREE.Box3().setFromObject(posts);
+    const box = new THREE.Box3();
+    model.traverse(o => { if (o.name === "building-posts") box.expandByObject(o); });
+    expect(box.isEmpty()).toBe(false);
     expect(box.max.y).toBeCloseTo(9, 1);
     expect(box.max.z).toBeGreaterThan(14.5); // along the open front
     expect(box.min.z).toBeLessThan(-14.5); // and the carport's far end

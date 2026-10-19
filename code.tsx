@@ -69,7 +69,9 @@ import { fetchBestElevationGrid } from "./src/lib/geo/elevation";
 import { PlaceSuggestion, fetchPlaceSuggestions, resolveSiteLocation } from "./src/lib/geo/geocode";
 import { getGeoTiffCorners } from "./src/lib/geo/geotiff";
 import { MAP_IMAGERY_SOURCES, MapImagerySource, fetchMapImagery } from "./src/lib/geo/imagery";
-import { partFromCorners } from "./src/lib/openParts";
+import { OPEN_PART_DEFAULTS, hasRailing, openPartsOf, partAlongEdge, partRoof } from "./src/lib/openParts";
+import { OPENING_DEFAULTS, autoOpenings, isDoor, openingAt, placeOpening } from "./src/lib/openings";
+import { doorsOnWalls } from "./src/three/buildings";
 import { getPointsBounds, pointInPolygonXY, insertVertexAtLongestEdge, insertVertexAtNearestEdge, rectanglePoints, scalePointsToSize, clipPolygonToRect, polygonArea } from "./src/lib/geometry";
 import { AUTOSAVE_KEY, type PlanMeta, idbGet, idbSet, listPlans, loadPlan, removePlan, storePlan } from "./src/lib/storage";
 import { ELEVATION_RAMP, computeContourSegments, elevationColor, getContourInterval, getTerrainStats } from "./src/lib/terrain";
@@ -78,9 +80,9 @@ import { SiteViewport } from "./src/viewport/SiteViewport";
 import type { SiteView } from "./src/viewport/SiteView";
 import type { ViewCallbacks, ViewDoc, ViewTool } from "./src/viewport/types";
 import { planSvg } from "./src/lib/planSvg";
-import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall, toBuildingLocal } from "./src/lib/planGeom";
+import { buildingWallSegments, buildingWorldPoints, cameraPlanPosition, heightAt, nearestWall, buildingLocalPoints, toBuildingLocal } from "./src/lib/planGeom";
 import { cableRuns, cableSummary } from "./src/lib/cabling";
-import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
+import { BaseItem, BuildingItem, CameraItem, CanvasItem, DemAlignTool, DemData, HistoryState, ImageItem, LabelItem, Opening, OpeningKind, OpenPart, OpenPartKind, ParkingItem, TargetItem, TerrainTool, ToolMode, TreeItem, ViewMode } from "./src/types";
 
 export default function SecurityPlanner() {
   // --- State ---
@@ -179,6 +181,25 @@ export default function SecurityPlanner() {
   // Layout: the workflow sidebar on the left can be hidden for more map.
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // What the placing tools create (chosen in the tool panel before clicking).
+  // Which kind of open part (porch, carport, patio) the add-open-part tool adds
+  const [openPartKind, setOpenPartKind] = useState<OpenPartKind>("porch");
+  const openPartKindRef = useRef<OpenPartKind>("porch");
+  openPartKindRef.current = openPartKind;
+  // Windows and doors: the kind the add-opening tool places, and the one being edited
+  const [openingKind, setOpeningKind] = useState<OpeningKind>("window");
+  const openingKindRef = useRef<OpeningKind>("window");
+  openingKindRef.current = openingKind;
+  const [selectedOpening, setSelectedOpening] = useState<{ id: string; index: number } | null>(null);
+  // A building's windows and doors as an editable list: the automatic ones (and a door at each
+  // marked door spot) until the user has placed their own.
+  const openingsOf = (b: BuildingItem): Opening[] => {
+    if (b.openings) return b.openings;
+    const upf = planGeoRef?.unitsPerFoot ?? 1;
+    const outline = buildingLocalPoints(b);
+    const spots = currentItemsRef.current.filter(i => i.type === "target" && (i as TargetItem).kind === "door").map(t => toBuildingLocal(b, t));
+    const doors = doorsOnWalls(outline, spots, upf).map(d => ({ x: d.x, y: d.y }));
+    return autoOpenings(outline, b.wallHeight ?? DEFAULT_BUILDING.wallHeight * upf, upf, doors);
+  };
   const [toolDefaults, setToolDefaults] = useState<ToolDefaults>({ treeSize: "medium", treeType: "deciduous", vehicleType: "sedan", targetKind: "door" });
   // Inspector: rarely used settings stay folded away until asked for.
   const [showMoreOptions, setShowMoreOptions] = useState(false);
@@ -2883,7 +2904,7 @@ export default function SecurityPlanner() {
   // Choosing a placing tool clears the selection, so the right panel shows that tool (not the old item).
   // Drawing a porch or carport part works on the selected building, so that one keeps it.
   useEffect(() => {
-    if (mode !== "select" && mode !== "add-open-part") setSelectedId(null);
+    if (mode !== "select" && mode !== "add-open-part" && mode !== "add-opening") setSelectedId(null);
   }, [mode]);
   // Selecting something shows it in the inspector (even if plan settings were open).
   useEffect(() => {
@@ -3074,7 +3095,7 @@ export default function SecurityPlanner() {
           return;
         }
         // Esc while drawing a porch or carport part only stops drawing (the building stays selected).
-        if (mode === "add-open-part") {
+        if (mode === "add-open-part" || mode === "add-opening") {
           setMode("select");
           return;
         }
@@ -3658,20 +3679,47 @@ export default function SecurityPlanner() {
       if (placeNewItemAt(tool, p.x, p.y)) setTimeout(() => saveHistory(), 50);
     },
     onTrace: p => traceRoofAt(p),
-    onOpenPart: (id, a, c) => {
+    onOpenPart: (id, shape) => {
       setMode("select");
       const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
       if (!b) return;
-      const la = toBuildingLocal(b, a), lc = toBuildingLocal(b, c);
       const upf = planGeoRef?.unitsPerFoot ?? 1;
-      // Too small to be a porch: a slip of the mouse
-      if (Math.abs(lc.x - la.x) < 3 * upf || Math.abs(lc.y - la.y) < 3 * upf) {
-        showExportNotice("Drag a bigger rectangle over the porch or carport (at least 3 ft each way).", "info");
-        return;
+      const kind = openPartKindRef.current;
+      const def = OPEN_PART_DEFAULTS[kind];
+      let pts: { x: number; y: number }[];
+      if ("edge" in shape) {
+        // Along the whole wall clicked: set into the house (at most half its depth), or attached
+        // outside it
+        const outline = buildingLocalPoints(b);
+        const xs = outline.map(p => p.x), ys = outline.map(p => p.y);
+        const across = Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+        pts = shape.outside ? partAlongEdge(outline, shape.edge, -def.depthFt * upf) : partAlongEdge(outline, shape.edge, Math.min(def.depthFt * upf, across / 2));
+      } else {
+        pts = shape.pts;
+        const w = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y), d = Math.hypot(pts[2].x - pts[1].x, pts[2].y - pts[1].y);
+        // Too small to be a porch: a slip of the mouse
+        if (w < 3 * upf || d < 3 * upf) {
+          showExportNotice(`Click a wall for a ${def.label.toLowerCase()} along it, or drag a bigger rectangle (at least 3 ft each way).`, "info");
+          return;
+        }
       }
-      updateItem(id, { openParts: [...(b.openParts ?? []), partFromCorners(la, lc)] } as Partial<BuildingItem>);
+      updateItem(id, { openParts: [...openPartsOf(b), { pts, kind, floor: def.floorFt * upf }] } as Partial<BuildingItem>);
       setTimeout(() => saveHistory(), 50);
     },
+    onOpening: (id, p, height) => {
+      const b = currentItemsRef.current.find(i => i.id === id) as BuildingItem | undefined;
+      if (!b) return;
+      const upf = planGeoRef?.unitsPerFoot ?? 1;
+      const outline = buildingLocalPoints(b);
+      const o = openingAt(outline, p, openingKindRef.current, upf);
+      // A window goes in the storey clicked
+      if (height !== null && !isDoor(o.kind)) o.sill = Math.max(1 * upf, Math.floor(height / (10 * upf)) * 10 * upf + o.sill);
+      const list = placeOpening(openingsOf(b), o, upf);
+      updateItem(id, { openings: list } as Partial<BuildingItem>);
+      setSelectedOpening({ id, index: list.length - 1 });
+      setTimeout(() => saveHistory(), 50);
+    },
+    onSelectOpening: (id, index) => setSelectedOpening({ id, index }),
     onAim: p => {
       if (!aimingCameraId) return;
       aimCameraAt(aimingCameraId, p);
@@ -3733,7 +3781,8 @@ export default function SecurityPlanner() {
 
   // One-line hint for the active tool (status-bar style).
   const toolHint = (() => {
-    if (mode === "add-open-part") return "Drag a rectangle over the part of the building that is open (porch, carport) · Esc to cancel";
+    if (mode === "add-opening") return `Click a wall to put a ${OPENING_DEFAULTS[openingKind].label.toLowerCase()} there · Esc to stop`;
+    if (mode === "add-open-part") return `Click just outside a wall to attach a ${OPEN_PART_DEFAULTS[openPartKind].label.toLowerCase()} to it, just inside to set one into the house, or drag its shape · Esc to cancel`;
     if (isTerrainMode && terrainTool === "woods") return "Woods: click and hold (or drag) to plant trees · Shift to clear them · Strength sets how dense";
     if (isTerrainMode) return "Terrain: click and hold to raise · Shift to lower · switch tool in the Terrain panel";
     if (vertexInsertMode) return "Click on an edge to add a corner";
@@ -4646,7 +4695,7 @@ export default function SecurityPlanner() {
 
       <div className="absolute z-0 overflow-hidden" style={{ top: 56, bottom: 0, left: sidebarOpen && !povCamId ? 352 : 0, right: 0 }}>
         {(viewMode === "plan" || viewMode === "iso3d") && !povCamId && renderToolDock()}
-        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure" && mode !== "add-open-part")) && (
+        {(viewMode === "plan" || viewMode === "iso3d") && (isTerrainMode || (mode !== "select" && mode !== "measure" && mode !== "add-open-part" && mode !== "add-opening")) && (
           <div className="absolute top-3 left-3 z-40 w-72 max-h-[calc(100%-6.5rem)] overflow-y-auto custom-scrollbar rounded-2xl border border-white/10 bg-zinc-900/95 p-4 shadow-2xl backdrop-blur" aria-label="Tool options">
               {isTerrainMode ? (
                 <div className="flex flex-col gap-4" data-testid="terrain-panel">
@@ -5721,39 +5770,220 @@ export default function SecurityPlanner() {
                     </span>
                   </label>
                   {!(selectedItem as BuildingItem).openSides && (
-                    <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-1.5" data-testid="open-parts">
-                      <div className="text-sm font-semibold text-slate-100">Porches and carports</div>
-                      <p className="text-[11px] text-slate-400">Parts under this roof with no outer walls: posts instead, and cameras see under them.</p>
-                      {((selectedItem as BuildingItem).openParts ?? []).map((part, i) => {
-                        const w = Math.round(Math.abs(part[1].x - part[0].x) / (planGeoRef?.unitsPerFoot ?? 1));
-                        const d = Math.round(Math.abs(part[2].y - part[1].y) / (planGeoRef?.unitsPerFoot ?? 1));
+                    <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-2" data-testid="open-parts">
+                      <div className="text-sm font-semibold text-slate-100">Porches, decks, carports and patios</div>
+                      <p className="text-[11px] text-slate-400">Set into the house (under its roof, no outer walls there) or attached outside a wall with their own roof. Cameras see under them. Drag the orange squares to resize, the orange bar to raise the floor.</p>
+                      {openPartsOf(selectedItem as BuildingItem).map((part, i) => {
+                        const b = selectedItem as BuildingItem;
+                        const upf = planGeoRef?.unitsPerFoot ?? 1;
+                        const [p0, p1, p2] = part.pts;
+                        const w = Math.round(Math.hypot(p1.x - p0.x, p1.y - p0.y) / upf);
+                        const d = Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y) / upf);
+                        const maxFloor = Math.max(0, ((b.wallHeight ?? DEFAULT_BUILDING.wallHeight) / upf) - 6);
+                        const setPart = (patch: Partial<OpenPart>, commit = true) => {
+                          updateItem(b.id, { openParts: openPartsOf(b).map((p, k) => (k === i ? { ...p, ...patch } : p)) } as Partial<BuildingItem>);
+                          if (commit) setTimeout(() => saveHistory(), 50);
+                        };
+                        const floorFt = Math.round((part.floor / upf) * 2) / 2;
                         return (
-                          <div key={i} className="flex items-center justify-between text-xs text-slate-200">
-                            <span>Open part {i + 1} · {w} × {d} ft</span>
-                            <button
-                              onClick={() => {
-                                const parts = ((selectedItem as BuildingItem).openParts ?? []).filter((_, k) => k !== i);
-                                updateItem(selectedItem.id, { openParts: parts.length ? parts : undefined } as Partial<BuildingItem>);
-                                setTimeout(() => saveHistory(), 50);
-                              }}
-                              className="p-1 text-slate-400 hover:text-red-400"
-                              aria-label={`Remove open part ${i + 1}`}
-                              title="Make it walls again"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                          <div key={i} className="rounded-md bg-black/20 border border-white/10 p-2 space-y-2" data-testid="open-part">
+                            <div className="flex items-center justify-between text-xs text-slate-200">
+                              <span className="font-semibold">{OPEN_PART_DEFAULTS[part.kind].label} {i + 1} · {w} × {d} ft</span>
+                              <button
+                                onClick={() => {
+                                  const parts = openPartsOf(b).filter((_, k) => k !== i);
+                                  updateItem(b.id, { openParts: parts.length ? parts : undefined } as Partial<BuildingItem>);
+                                  setTimeout(() => saveHistory(), 50);
+                                }}
+                                className="p-1 text-slate-400 hover:text-red-400"
+                                aria-label={`Remove open part ${i + 1}`}
+                                title="Make it walls again"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <div role="group" aria-label={`Kind of part ${i + 1}`} className="grid grid-cols-4 gap-1">
+                              {(["porch", "deck", "carport", "patio"] as OpenPartKind[]).map(k => (
+                                <button
+                                  key={k}
+                                  aria-pressed={part.kind === k}
+                                  onClick={() => setPart({ kind: k, floor: OPEN_PART_DEFAULTS[k].floorFt * upf, railing: undefined })}
+                                  className={`py-1 rounded text-[11px] font-semibold border ${part.kind === k ? "bg-amber-500/20 border-amber-400/40 text-amber-200" : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"}`}
+                                >
+                                  {OPEN_PART_DEFAULTS[k].label}
+                                </button>
+                              ))}
+                            </div>
+                            <div role="group" aria-label={`Roof over part ${i + 1}`} className="grid grid-cols-3 gap-1">
+                              {([["main", "House roof"], ["own", "Own roof"], ["none", "No roof"]] as const).map(([r, label]) => (
+                                <button
+                                  key={r}
+                                  aria-pressed={partRoof(buildingLocalPoints(b), part) === r}
+                                  onClick={() => setPart({ roof: r })}
+                                  className={`py-1 rounded text-[11px] font-semibold border ${partRoof(buildingLocalPoints(b), part) === r ? "bg-sky-500/20 border-sky-400/40 text-sky-200" : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"}`}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            <label className="block text-[11px] text-slate-300">
+                              <span className="flex justify-between"><span>Floor height</span><span className="font-semibold text-slate-100">{floorFt === 0 ? "on the ground" : `${floorFt} ft up`}</span></span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={maxFloor}
+                                step={0.5}
+                                value={floorFt}
+                                onChange={e => setPart({ floor: Number(e.target.value) * upf }, false)}
+                                onPointerUp={() => setTimeout(() => saveHistory(), 50)}
+                                onKeyUp={() => setTimeout(() => saveHistory(), 50)}
+                                className="w-full accent-amber-500"
+                                aria-label={`Floor height of part ${i + 1} (ft)`}
+                              />
+                            </label>
+                            {part.floor > 0 && (
+                              <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                                <input type="checkbox" className="accent-amber-500" checked={hasRailing(part, upf)} onChange={e => setPart({ railing: e.target.checked })} />
+                                Railing and steps
+                              </label>
+                            )}
                           </div>
                         );
                       })}
-                      <button
-                        onClick={() => setMode(mode === "add-open-part" ? "select" : "add-open-part")}
-                        aria-pressed={mode === "add-open-part"}
-                        className={`w-full py-1.5 rounded-md text-xs font-semibold border ${mode === "add-open-part" ? "bg-amber-500/20 border-amber-400/40 text-amber-200" : "bg-white/5 border-white/10 text-slate-200 hover:bg-white/10"}`}
-                      >
-                        {mode === "add-open-part" ? "Drag over the porch or carport on the map…" : "+ Draw a porch or carport part"}
-                      </button>
+                      {mode === "add-open-part" ? (
+                        <button
+                          onClick={() => setMode("select")}
+                          aria-pressed
+                          className="w-full py-1.5 rounded-md text-xs font-semibold border bg-amber-500/20 border-amber-400/40 text-amber-200"
+                        >
+                          Click a wall, or drag over the {OPEN_PART_DEFAULTS[openPartKind].label.toLowerCase()} on the roof… (Esc to stop)
+                        </button>
+                      ) : (
+                        <div className="grid grid-cols-4 gap-1">
+                          {(["porch", "deck", "carport", "patio"] as OpenPartKind[]).map(k => (
+                            <button
+                              key={k}
+                              onClick={() => { setOpenPartKind(k); setMode("add-open-part"); }}
+                              className="py-1.5 rounded-md text-xs font-semibold border bg-white/5 border-white/10 text-slate-200 hover:bg-white/10"
+                            >
+                              + {OPEN_PART_DEFAULTS[k].label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
+                  {!(selectedItem as BuildingItem).openSides && (() => {
+                    const b = selectedItem as BuildingItem;
+                    const upf = planGeoRef?.unitsPerFoot ?? 1;
+                    const list = b.openings;
+                    const selIndex = selectedOpening?.id === b.id && list && selectedOpening.index < list.length ? selectedOpening.index : -1;
+                    const sel = selIndex >= 0 ? list![selIndex] : null;
+                    const setOpening = (patch: Partial<Opening>, commit = true) => {
+                      updateItem(b.id, { openings: (b.openings ?? []).map((o, k) => (k === selIndex ? { ...o, ...patch } : o)) } as Partial<BuildingItem>);
+                      if (commit) setTimeout(() => saveHistory(), 50);
+                    };
+                    const startPlacing = (k: OpeningKind) => {
+                      if (!b.openings) updateItem(b.id, { openings: openingsOf(b) } as Partial<BuildingItem>);
+                      setOpeningKind(k);
+                      setMode("add-opening");
+                    };
+                    const nWin = (list ?? []).filter(o => !isDoor(o.kind)).length, nDoor = (list ?? []).length - nWin;
+                    const ftField = (label: string, value: number, key: "width" | "height" | "sill", min: number) => (
+                      <label className="block text-[11px] text-slate-400">
+                        {label}
+                        <input
+                          type="number"
+                          step={0.25}
+                          min={min}
+                          value={Math.round((value / upf) * 100) / 100}
+                          onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= min) setOpening({ [key]: v * upf } as Partial<Opening>, false); }}
+                          onBlur={() => setTimeout(() => saveHistory(), 50)}
+                          className="mt-0.5 w-full rounded bg-zinc-800 border border-white/10 px-1.5 py-1 text-xs text-slate-100"
+                          aria-label={`${label} (ft)`}
+                        />
+                      </label>
+                    );
+                    return (
+                      <div className="mt-2 rounded-lg bg-white/5 border border-white/10 p-2.5 space-y-2" data-testid="openings">
+                        <div className="text-sm font-semibold text-slate-100">Windows and doors</div>
+                        <p className="text-[11px] text-slate-400">
+                          {list
+                            ? `${nWin} window${nWin === 1 ? "" : "s"}, ${nDoor} door${nDoor === 1 ? "" : "s"}. Drag the blue dots along the walls; click one to change it.`
+                            : "Automatic: a window in every 12 ft of wall. Edit them to move, resize, remove or add your own."}
+                        </p>
+                        {!list && (
+                          <button
+                            onClick={() => { updateItem(b.id, { openings: openingsOf(b) } as Partial<BuildingItem>); setTimeout(() => saveHistory(), 50); }}
+                            className="w-full py-1.5 rounded-md text-xs font-semibold border bg-sky-500/15 border-sky-400/30 text-sky-200 hover:bg-sky-500/25"
+                          >
+                            Edit the windows and doors
+                          </button>
+                        )}
+                        {mode === "add-opening" ? (
+                          <button onClick={() => setMode("select")} aria-pressed className="w-full py-1.5 rounded-md text-xs font-semibold border bg-sky-500/20 border-sky-400/40 text-sky-200">
+                            Click a wall for the {OPENING_DEFAULTS[openingKind].label.toLowerCase()}… (Esc to stop)
+                          </button>
+                        ) : (
+                          <div className="grid grid-cols-3 gap-1">
+                            {(Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(k => (
+                              <button key={k} onClick={() => startPlacing(k)} className="py-1.5 px-1 rounded-md text-[11px] font-semibold border bg-white/5 border-white/10 text-slate-200 hover:bg-white/10">
+                                + {OPENING_DEFAULTS[k].label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {sel && (
+                          <div className="rounded-md bg-black/20 border border-sky-400/30 p-2 space-y-2" data-testid="opening-editor">
+                            <div className="flex items-center justify-between text-xs text-slate-200">
+                              <select
+                                value={sel.kind}
+                                onChange={e => {
+                                  const k = e.target.value as OpeningKind, d = OPENING_DEFAULTS[k];
+                                  setOpening({ kind: k, width: d.widthFt * upf, height: d.heightFt * upf, sill: d.sillFt * upf });
+                                }}
+                                className="rounded bg-zinc-800 border border-white/10 px-1.5 py-1 text-xs font-semibold text-slate-100"
+                                aria-label="Kind of window or door"
+                              >
+                                {(Object.keys(OPENING_DEFAULTS) as OpeningKind[]).map(k => <option key={k} value={k}>{OPENING_DEFAULTS[k].label}</option>)}
+                              </select>
+                              <button
+                                onClick={() => {
+                                  updateItem(b.id, { openings: (b.openings ?? []).filter((_, k) => k !== selIndex) } as Partial<BuildingItem>);
+                                  setSelectedOpening(null);
+                                  setTimeout(() => saveHistory(), 50);
+                                }}
+                                className="p-1 text-slate-400 hover:text-red-400"
+                                aria-label="Remove this window or door"
+                                title="Remove it"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-3 gap-1.5">
+                              {ftField("Width", sel.width, "width", 1)}
+                              {ftField("Height", sel.height, "height", 1)}
+                              {ftField(isDoor(sel.kind) ? "Bottom" : "Sill", sel.sill, "sill", 0)}
+                            </div>
+                            {!isDoor(sel.kind) && (
+                              <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                                <input type="checkbox" className="accent-sky-500" checked={!!sel.shutters} onChange={e => setOpening({ shutters: e.target.checked })} />
+                                Shutters
+                              </label>
+                            )}
+                          </div>
+                        )}
+                        {list && (
+                          <button
+                            onClick={() => { updateItem(b.id, { openings: undefined } as Partial<BuildingItem>); setSelectedOpening(null); setTimeout(() => saveHistory(), 50); }}
+                            className="w-full py-1 rounded-md text-[11px] text-slate-400 hover:text-slate-200"
+                          >
+                            Back to automatic windows
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {backgroundImg && (
                     <button
                       onClick={() => fitBuildingToPhoto(selectedItem.id)}

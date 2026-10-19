@@ -24,7 +24,8 @@ import {
   wallSnapDistance
 } from "../lib/planGeom";
 import { pointInPolygonXY } from "../lib/geometry";
-import { openPartEdges } from "../lib/openParts";
+import { openingPlace, wallAt } from "../lib/openings";
+import { movePartEdge, nearestEdge, openPartEdges, openPartsOf, partFromCorners, partRoof } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature } from "../three/models";
 import { createBuildingModel } from "../three/buildingMesh";
 import { doorsOnWalls } from "../three/buildings";
@@ -83,6 +84,10 @@ const STYLE = `
 .scp-h[data-handle=aim]{width:20px;height:20px;border-radius:50%;background:#3b82f6;border:3px solid #fff;cursor:crosshair;box-shadow:0 1px 4px rgba(0,0,0,.55)}
 .scp-h[data-handle=fov-l],.scp-h[data-handle=fov-r],.scp-h[data-handle=range],.scp-h[data-handle=radius]{width:15px;height:15px;border-radius:50%;background:var(--c,#3b82f6);border:2.5px solid #fff;cursor:ew-resize;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .scp-h[data-handle=range]{cursor:ns-resize}
+.scp-h[data-handle=opening]{width:14px;height:14px;border-radius:50%;background:#0ea5e9;border:2.5px solid #fff;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+.scp-h[data-handle=part-edge]{width:13px;height:13px;border-radius:3px;background:#fff;border:2.5px solid #f59e0b;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+.scp-h[data-handle=part-floor]{width:22px;height:22px;cursor:ns-resize;display:flex;align-items:center;justify-content:center}
+.scp-h[data-handle=part-floor]::before{content:"";width:18px;height:10px;border-radius:4px;background:#fff;border:2.5px solid #f59e0b;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 @media (pointer:coarse){.scp-h{transform-origin:center}.scp-h[data-handle]{scale:1.5}}
 `;
 
@@ -958,7 +963,7 @@ export class SiteView {
       case "building": {
         const b = item as BuildingItem;
         const doors = this.doorsFor(b).map(d => [Math.round(d.x * 10), Math.round(d.y * 10)]);
-        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
+        return JSON.stringify([b.points, b.width, b.height, b.wallHeight, b.roofType, b.color, !!b.openSides, b.openParts ?? null, b.openings ?? null, doc.roofPhoto && !!this.ground.photo, doc.roofPhoto ? [b.x, b.y, b.rotation, doc.background.rect] : 0, doc.unitsPerFoot, doors]);
       }
       case "tree": return getTreeSignature(item as TreeItem) + item.id;
       case "parking": return getCarSignature(item as ParkingItem);
@@ -1226,14 +1231,18 @@ export class SiteView {
       const v = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(verts), mat);
       v.renderOrder = 12;
       group.add(v);
-      // Porch and carport parts: dashed amber, at the ground and under the eaves
-      if (!b.openSides && b.openParts?.length) {
+      // Porch, carport and patio parts: dashed amber, at their floor and under the eaves
+      const partList = openPartsOf(b);
+      if (partList.length) {
         const local = buildingLocalPoints(b);
         const world = (p: { x: number; y: number }) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
         const seg: THREE.Vector3[] = [];
-        for (const e of openPartEdges(local, b.openParts)) {
-          const a = world(e.a), c = world(e.b);
-          for (const y of [base + 0.2, base + wall]) seg.push(new THREE.Vector3(a.x, y, a.y), new THREE.Vector3(c.x, y, c.y));
+        for (const part of partList) {
+          const edges = partRoof(local, part) === "main" ? openPartEdges(local, [part.pts]) : part.pts.map((a, i) => ({ a, b: part.pts[(i + 1) % part.pts.length] }));
+          for (const e of edges) {
+            const a = world(e.a), c = world(e.b);
+            for (const y of [base + Math.max(part.floor, 0) + 0.2, base + wall]) seg.push(new THREE.Vector3(a.x, y, a.y), new THREE.Vector3(c.x, y, c.y));
+          }
         }
         const parts = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg), new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 1.5 * this.upf(), gapSize: 1 * this.upf(), depthTest: false, transparent: true, opacity }));
         parts.computeLineDistances();
@@ -1392,7 +1401,7 @@ export class SiteView {
     const doc = this.doc;
     if (!doc) return;
     const sel = this.tool.mode === "select" && !this.tool.terrain ? this.item(this.selectedId) : null;
-    const key = sel ? `${sel.id}|${sel.type}|${sel.type === "building" ? buildingLocalPoints(sel as BuildingItem).length : ""}` : "";
+    const key = sel ? `${sel.id}|${sel.type}|${sel.type === "building" ? `${buildingLocalPoints(sel as BuildingItem).length}|${openPartsOf(sel as BuildingItem).length}|${(sel as BuildingItem).openings?.length ?? -1}` : ""}` : "";
     if (key === this.handleKey) return;
     this.handleKey = key;
     this.handles.forEach(h => h.el.remove());
@@ -1411,7 +1420,11 @@ export class SiteView {
       this.handles.push({ el, kind, index: opts.index, world, start, visible: opts.visible });
     };
     const id = sel.id;
-    if (sel.type === "building") this.buildingHandles(id, add);
+    if (sel.type === "building") {
+      this.buildingHandles(id, add);
+      this.openPartHandles(id, add);
+      this.openingHandles(id, add);
+    }
     else if (sel.type === "camera") this.cameraHandles(id, add);
     else if (sel.type === "tree") {
       add("radius", () => {
@@ -1573,6 +1586,102 @@ export class SiteView {
       title: "Drag up or down to change the height",
       // Height is a 3D thing: shown once the view is tilted (the inspector has it too).
       visible: () => this.controls.polarAngle > 15 * DEG
+    });
+  }
+
+  /** A handle on each window and door: drag it along the walls (onto another wall too); picking it
+   * shows it in the inspector. */
+  private openingHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+    const b0 = this.item(id) as BuildingItem;
+    (b0.openings ?? []).forEach((_, k) => {
+      const where = () => {
+        const b = this.item(id) as BuildingItem | null;
+        const o = b?.openings?.[k];
+        if (!b || !o) return null;
+        const place = openingPlace(buildingLocalPoints(b), o);
+        if (!place) return null;
+        const r = rotatePoint({ x: place.x + place.normal.x * 0.5 * this.upf(), y: place.y + place.normal.y * 0.5 * this.upf() }, b.rotation);
+        return { b, o, world: new THREE.Vector3(b.x + r.x, buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + o.sill + o.height / 2, b.y + r.y) };
+      };
+      add("opening", () => where()?.world ?? null, () => {
+        const w = where();
+        if (!w) return null;
+        this.cb.onSelectOpening(id, k);
+        const y = w.world.y;
+        const pose = { x: w.b.x, y: w.b.y, rotation: w.b.rotation };
+        const outline = buildingLocalPoints(w.b);
+        let moved = false;
+        return {
+          move: ev => {
+            const hit = this.planeAt(ev.clientX, ev.clientY, y);
+            const b = this.item(id) as BuildingItem | null;
+            const o = b?.openings?.[k];
+            if (!hit || !b || !o) return;
+            const at = wallAt(outline, toBuildingLocal(pose, { x: hit.x, y: hit.z }));
+            moved = true;
+            const next = b.openings!.map((q, j) => (j === k ? { ...q, edge: at.edge, at: Math.max(q.width / 2, Math.min(at.len - q.width / 2, at.at)) } : q));
+            this.cb.onChange(id, { openings: next } as Partial<CanvasItem>);
+          },
+          end: () => { if (moved) this.cb.onCommit(); }
+        };
+      }, { index: k, title: "Drag along the walls to move it · click to edit it" });
+    });
+  }
+
+  /** Handles on each porch/carport part: drag a side in or out (it snaps to the walls), and lift the floor. */
+  private openPartHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+    const b0 = this.item(id) as BuildingItem;
+    const parts0 = openPartsOf(b0);
+    const toWorld = (b: BuildingItem, p: P) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
+    const part = (k: number) => { const b = this.item(id) as BuildingItem | null; return b ? { b, part: openPartsOf(b)[k] } : null; };
+    const setPart = (b: BuildingItem, k: number, patch: Partial<(typeof parts0)[number]>) =>
+      this.cb.onChange(id, { openParts: openPartsOf(b).map((p, j) => (j === k ? { ...p, ...patch } : p)) } as Partial<CanvasItem>);
+    parts0.forEach((_, k) => {
+      for (let i = 0; i < 4; i++) {
+        add("part-edge", () => {
+          const cur = part(k);
+          if (!cur?.part || cur.part.pts.length !== 4) return null;
+          const a = cur.part.pts[i], c = cur.part.pts[(i + 1) % 4];
+          const w = toWorld(cur.b, { x: (a.x + c.x) / 2, y: (a.y + c.y) / 2 });
+          return new THREE.Vector3(w.x, this.eaveY(cur.b), w.y);
+        }, () => {
+          const cur = part(k);
+          if (!cur?.part) return null;
+          const y = this.eaveY(cur.b);
+          const pose = { x: cur.b.x, y: cur.b.y, rotation: cur.b.rotation };
+          const outline = buildingLocalPoints(cur.b);
+          const start = cur.part.pts.map(p => ({ ...p }));
+          return {
+            move: ev => {
+              const hit = this.planeAt(ev.clientX, ev.clientY, y);
+              const b = this.item(id) as BuildingItem | null;
+              if (!hit || !b) return;
+              const next = movePartEdge(start, i, toBuildingLocal(pose, { x: hit.x, y: hit.z }), outline, 1.5 * this.upf());
+              if (next) setPart(b, k, { pts: next });
+            },
+            end: () => this.cb.onCommit()
+          };
+        }, { index: k * 4 + i, title: "Drag to resize the porch or carport (snaps to the walls)" });
+      }
+      add("part-floor", () => {
+        const cur = part(k);
+        if (!cur?.part) return null;
+        const c = cur.part.pts.reduce((m, p) => ({ x: m.x + p.x / cur.part.pts.length, y: m.y + p.y / cur.part.pts.length }), { x: 0, y: 0 });
+        const w = toWorld(cur.b, c);
+        return new THREE.Vector3(w.x, buildingBaseHeight(cur.b, this.doc!.heights, this.doc!.gridSize) + cur.part.floor, w.y);
+      }, e => {
+        const cur = part(k);
+        if (!cur?.part) return null;
+        const base = buildingBaseHeight(cur.b, this.doc!.heights, this.doc!.gridSize);
+        const c = cur.part.pts.reduce((m, p) => ({ x: m.x + p.x / cur.part.pts.length, y: m.y + p.y / cur.part.pts.length }), { x: 0, y: 0 });
+        const w = toWorld(cur.b, c);
+        return this.heightDrag(e, () => new THREE.Vector3(w.x, base + cur.part.floor, w.y), () => cur.part.floor, h => {
+          const b = this.item(id) as BuildingItem | null;
+          if (!b) return;
+          const max = (b.wallHeight ?? DEFAULT_BUILDING.wallHeight) - 6 * this.upf();
+          setPart(b, k, { floor: Math.round(clamp(h, 0, max) / (0.5 * this.upf())) * 0.5 * this.upf() });
+        });
+      }, { index: k, title: "Drag up or down to raise or lower the floor", visible: () => this.controls.polarAngle > 15 * DEG });
     });
   }
 
@@ -2015,10 +2124,42 @@ export class SiteView {
       this.gesture(e, { click: groundClick(p => this.cb.onTrace(p)), drag: panOrNothing });
       return;
     }
+    if (tool.mode === "add-opening") {
+      stop();
+      const b = this.item(this.selectedId);
+      if (b?.type === "building") this.gesture(e, {
+        click: ev => {
+          const bb = b as BuildingItem;
+          const base = buildingBaseHeight(bb, this.doc!.heights, this.doc!.gridSize);
+          // On the wall where it was clicked (in 3D), else on the wall nearest the click
+          const obj = this.objects.get(bb.id)?.obj;
+          this.ray(ev.clientX, ev.clientY);
+          const hit = obj ? this.raycaster.intersectObject(obj, true).find(h => h.object.name === "building-walls") : undefined;
+          const p = hit?.point ?? this.planeAt(ev.clientX, ev.clientY, base + (bb.wallHeight ?? DEFAULT_BUILDING.wallHeight) / 2);
+          if (!p) return;
+          this.cb.onOpening(bb.id, toBuildingLocal(bb, { x: p.x, y: p.z }), hit ? hit.point.y - base : null);
+        },
+        drag: panOrNothing
+      });
+      return;
+    }
     if (tool.mode === "add-open-part") {
       stop();
       const b = this.item(this.selectedId);
-      if (b?.type === "building") this.gesture(e, { drag: start => this.openPartDrag(start, b as BuildingItem), click: () => {} });
+      if (b?.type === "building") this.gesture(e, {
+        drag: start => this.openPartDrag(start, b as BuildingItem),
+        // A click on (or near) a wall: a part along that whole wall
+        click: ev => {
+          const bb = b as BuildingItem;
+          const hit = this.planeAt(ev.clientX, ev.clientY, this.eaveY(bb));
+          if (!hit) return;
+          const local = toBuildingLocal(bb, { x: hit.x, y: hit.z });
+          const outline = buildingLocalPoints(bb);
+          const near = nearestEdge(outline, local);
+          // Inside the roof's edge: a part set into the house; outside it: one attached to that wall
+          if (near.dist < 20 * this.upf()) this.cb.onOpenPart(bb.id, { edge: near.index, outside: !pointInPolygonXY(local, outline) });
+        }
+      });
       return;
     }
     if (tool.mode === "measure") {
@@ -2075,38 +2216,52 @@ export class SiteView {
   }
 
   // Dragging out a porch or carport part over a building: a rectangle square to the building.
+  /** Height of a building's eaves (where its roof starts): parts are drawn on that plane, so they
+   * line up with the roof the user sees from above. */
+  private eaveY(b: BuildingItem) {
+    return buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + (b.wallHeight ?? DEFAULT_BUILDING.wallHeight);
+  }
+
   private openPartDrag(start: PointerEvent, b: BuildingItem): Drag | null {
-    const g0 = this.groundAt(start.clientX, start.clientY);
+    const y = this.eaveY(b);
+    const g0 = this.planeAt(start.clientX, start.clientY, y);
     if (!g0) return null;
-    const a = { x: g0.x, y: g0.z };
+    const outline = buildingLocalPoints(b);
+    // Snap to the walls: a side within 2 ft of a wall's line lands on it
+    const snap = (v: number, axis: "x" | "y") => {
+      let best = v, d = 2 * this.upf();
+      for (const p of outline) if (Math.abs(p[axis] - v) < d) { d = Math.abs(p[axis] - v); best = p[axis]; }
+      return best;
+    };
+    const la = toBuildingLocal(b, { x: g0.x, y: g0.z });
+    const a = { x: snap(la.x, "x"), y: snap(la.y, "y") };
     const mat = new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 1.5 * this.upf(), gapSize: 1 * this.upf(), depthTest: false });
     const line = new THREE.LineLoop(new THREE.BufferGeometry(), mat);
     line.renderOrder = 20;
     this.fx.add(line);
     let c = a;
+    const corners = () => partFromCorners(a, c);
     const draw = () => {
-      const la = toBuildingLocal(b, a), lc = toBuildingLocal(b, c);
-      const corners = [[la.x, la.y], [lc.x, la.y], [lc.x, lc.y], [la.x, lc.y]].map(([x, y]) => {
-        const r = rotatePoint({ x, y }, b.rotation);
-        const wx = b.x + r.x, wz = b.y + r.y;
-        return new THREE.Vector3(wx, this.h(wx, wz) + 0.4 * this.upf(), wz);
-      });
-      line.geometry.setFromPoints(corners);
+      line.geometry.setFromPoints(corners().map(p => {
+        const r = rotatePoint(p, b.rotation);
+        return new THREE.Vector3(b.x + r.x, y + 0.2 * this.upf(), b.y + r.y);
+      }));
       line.computeLineDistances();
       this.invalidate();
     };
     return {
       move: ev => {
-        const g = this.groundAt(ev.clientX, ev.clientY);
+        const g = this.planeAt(ev.clientX, ev.clientY, y);
         if (!g) return;
-        c = { x: g.x, y: g.z };
+        const l = toBuildingLocal(b, { x: g.x, y: g.z });
+        c = { x: snap(l.x, "x"), y: snap(l.y, "y") };
         draw();
       },
       end: () => {
         this.fx.remove(line);
         line.geometry.dispose();
         mat.dispose();
-        this.cb.onOpenPart(b.id, a, c);
+        this.cb.onOpenPart(b.id, { pts: corners() });
       }
     };
   }

@@ -2,6 +2,7 @@
 // with no outer walls, posts holding up the roof instead, and a wall where they meet the house.
 // Pure geometry in the building's local frame (plan units).
 import { getEdgeOutwardNormal, pointInPolygonXY } from "./geometry";
+import type { OpenPart, OpenPartKind } from "../types";
 
 type P = { x: number; y: number };
 /** A piece of wall from a to b; `out` points to its outside (away from the enclosed rooms). */
@@ -159,4 +160,99 @@ export const openPartEdges = (outline: P[], parts: P[][]): { a: P; b: P }[] => {
 export const partFromCorners = (p: P, q: P): P[] => {
   const x0 = Math.min(p.x, q.x), x1 = Math.max(p.x, q.x), y0 = Math.min(p.y, q.y), y1 = Math.max(p.y, q.y);
   return [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+};
+
+/** A building's open parts (older saves stored bare corner lists: porches on the ground). */
+export const openPartsOf = (b: { openParts?: unknown[]; openSides?: boolean }): OpenPart[] =>
+  b.openSides ? [] : (b.openParts ?? []).map(p => (Array.isArray(p) ? { pts: p as P[], kind: "porch" as const, floor: 0 } : (p as OpenPart)));
+
+export const OPEN_PART_DEFAULTS: Record<OpenPartKind, { floorFt: number; depthFt: number; label: string }> = {
+  porch: { floorFt: 2, depthFt: 8, label: "Porch" },
+  deck: { floorFt: 3, depthFt: 12, label: "Deck" },
+  carport: { floorFt: 0, depthFt: 12, label: "Carport" },
+  patio: { floorFt: 0, depthFt: 10, label: "Patio" }
+};
+
+/** Whether a part gets a railing: as set, or when a porch or deck floor is 1.5 ft or more up. */
+export const hasRailing = (p: OpenPart, upf: number) => p.railing ?? ((p.kind === "porch" || p.kind === "deck") && p.floor >= 1.5 * upf);
+
+const centroid = (pts: P[]) => pts.reduce((m, p) => ({ x: m.x + p.x / pts.length, y: m.y + p.y / pts.length }), { x: 0, y: 0 });
+
+/** The roof over a part (see OpenPart.roof). */
+export const partRoof = (outline: P[], p: OpenPart): "main" | "own" | "none" =>
+  p.roof ?? (pointInPolygonXY(centroid(p.pts), outline) ? "main" : p.kind === "porch" || p.kind === "carport" ? "own" : "none");
+
+/** Corner lists of the parts set into the house (under its main roof): these take out its walls. */
+export const insetParts = (outline: P[], parts: OpenPart[]) => parts.filter(p => partRoof(outline, p) === "main").map(p => p.pts);
+
+/** The side of an attached part that meets the house (the edge nearest the outline). */
+export const attachEdge = (outline: P[], pts: P[]) => {
+  let best = 0, bestD = Infinity;
+  pts.forEach((a, i) => {
+    const b = pts[(i + 1) % pts.length];
+    const d = nearestEdge(outline, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }).dist;
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+};
+
+/** The outline clipped to a convex part (Sutherland-Hodgman): the floor area of that part. */
+export const clipToPart = (outline: P[], part: P[]): P[] => {
+  const sign = signedArea(part) > 0 ? 1 : -1;
+  let poly = outline;
+  for (let i = 0; i < part.length && poly.length; i++) {
+    const p = part[i], q = part[(i + 1) % part.length];
+    const side = (v: P) => ((q.x - p.x) * (v.y - p.y) - (q.y - p.y) * (v.x - p.x)) * sign;
+    const out: P[] = [];
+    poly.forEach((cur, k) => {
+      const prev = poly[(k + poly.length - 1) % poly.length];
+      const sc = side(cur), sp = side(prev);
+      if (sc >= 0) {
+        if (sp < 0) out.push(lerp(prev, cur, sp / (sp - sc)));
+        out.push(cur);
+      } else if (sp >= 0) out.push(lerp(prev, cur, sp / (sp - sc)));
+    });
+    poly = out;
+  }
+  return poly;
+};
+
+/** A part along one wall (edge i of the outline), reaching `depth` into the building. */
+export const partAlongEdge = (outline: P[], i: number, depth: number): P[] => {
+  const a = outline[i], b = outline[(i + 1) % outline.length];
+  const n = getEdgeOutwardNormal(outline, i);
+  return [a, b, { x: b.x - n.x * depth, y: b.y - n.y * depth }, { x: a.x - n.x * depth, y: a.y - n.y * depth }];
+};
+
+/** The outline edge nearest a point (index and distance). */
+export const nearestEdge = (outline: P[], p: P) => {
+  let best = { index: 0, dist: Infinity };
+  outline.forEach((a, i) => {
+    const b = outline[(i + 1) % outline.length];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+    const d = Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+    if (d < best.dist) best = { index: i, dist: d };
+  });
+  return best;
+};
+
+/** Move edge i of a part along its normal to pass through `p`, snapping to the outline's corners. */
+export const movePartEdge = (part: P[], i: number, p: P, outline: P[], snap: number): P[] | null => {
+  const a = part[i], b = part[(i + 1) % part.length];
+  const n = getEdgeOutwardNormal(part, i);
+  let d = (p.x - a.x) * n.x + (p.y - a.y) * n.y;
+  let bestSnap = snap;
+  for (const v of outline) {
+    const c = (v.x - a.x) * n.x + (v.y - a.y) * n.y;
+    if (Math.abs(c - d) < bestSnap) { bestSnap = Math.abs(c - d); d = c; }
+  }
+  // Keep at least a little depth: the opposite edge stays where it is
+  const opp = part[(i + 2) % part.length];
+  const span = (a.x - opp.x) * n.x + (a.y - opp.y) * n.y;
+  if (span + d < snap) return null;
+  const next = part.map(q => ({ ...q }));
+  next[i] = { x: a.x + n.x * d, y: a.y + n.y * d };
+  next[(i + 1) % part.length] = { x: b.x + n.x * d, y: b.y + n.y * d };
+  return next;
 };

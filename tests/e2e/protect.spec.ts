@@ -150,15 +150,15 @@ test.describe("what to protect and coverage", () => {
     const inspector = page.getByLabel("Inspector");
     const drawPart = async (x0: number, y0: number, x1: number, y1: number) => {
       await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-      await inspector.getByRole("button", { name: /Draw a porch or carport part/ }).click();
+      await inspector.getByRole("button", { name: "+ Porch" }).click();
       await drag(page, await screenOf(page, x0, y0), await screenOf(page, x1, y1));
     };
     // Esc leaves the drawing tool without adding anything
     await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-    await inspector.getByRole("button", { name: /Draw a porch or carport part/ }).click();
-    await expect(inspector.getByRole("button", { name: /Drag over the porch or carport/ })).toBeVisible();
+    await inspector.getByRole("button", { name: "+ Porch" }).click();
+    await expect(inspector.getByRole("button", { name: /Click a wall, or drag over the porch/ })).toBeVisible();
     await page.keyboard.press("Escape");
-    await expect(inspector.getByRole("button", { name: /Draw a porch or carport part/ })).toBeVisible();
+    await expect(inspector.getByRole("button", { name: "+ Porch" })).toBeVisible();
     expect((await itemsOfType(page, "building"))[0].openParts ?? []).toHaveLength(0);
 
     // A porch across the front, 6 ft deep: the camera now sees the door under it; the house stays closed
@@ -171,7 +171,7 @@ test.describe("what to protect and coverage", () => {
     await drawPart(b.x - b.width / 2 - 2 * upf, back - 2 * upf, b.x, back + 8 * upf);
     await expect.poll(async () => ((await itemsOfType(page, "building"))[0].openParts ?? []).length).toBe(2);
     await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-    await expect(inspector.getByTestId("open-parts")).toContainText("Open part 2");
+    await expect(inspector.getByTestId("open-parts")).toContainText("Porch 2");
     // Remove the porch: the wall is back in the way; the carport stays
     await inspector.getByRole("button", { name: "Remove open part 1" }).click();
     await expect.poll(async () => ((await itemsOfType(page, "building"))[0].openParts ?? []).length).toBe(1);

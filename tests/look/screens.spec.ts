@@ -207,32 +207,64 @@ test("trees", async ({ page }) => {
 });
 
 test("porch", async ({ page }) => {
-  // A house with a porch across the front and a carport at one end, drawn with the inspector button
+  // A house with a porch along the front (click the wall) and a carport dragged over one end
   await placeWithKey(page, "b", 0.5, 0.45);
   await page.keyboard.press("Escape");
   const [b] = await itemsOfType(page, "building");
   const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
-  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 10 * upf, maxX: b.x + b.width / 2 + 10 * upf, minY: b.y - b.height / 2 - 10 * upf, maxY: b.y + b.height / 2 + 10 * upf }, { animate: false }), [b, upf] as const);
+  const eave = b.wallHeight ?? 14 * upf;
+  const fit = () => page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 25 * upf, maxX: b.x + b.width / 2 + 25 * upf, minY: b.y - b.height / 2 - 20 * upf, maxY: b.y + b.height / 2 + 20 * upf }, { animate: false }), [b, upf] as const);
+  await fit();
   await page.waitForTimeout(400);
-  const at = (x: number, y: number) => page.evaluate(([x, y]) => (window as any).__scpView.toClient(x, y, 0), [x, y] as const) as Promise<{ x: number; y: number }>;
-  const draw = async (x0: number, y0: number, x1: number, y1: number) => {
-    await page.evaluate(id => (window as any).__scpSelect(id), b.id);
-    await page.getByLabel("Inspector").getByRole("button", { name: /Draw a porch or carport part/ }).click();
-    const p = await at(x0, y0), q = await at(x1, y1);
-    await page.mouse.move(p.x, p.y);
-    await page.mouse.down();
-    await page.mouse.move(q.x, q.y, { steps: 8 });
-    await shot(page, "26-porch-drawing");
-    await page.mouse.up();
-  };
+  const at = (x: number, y: number) => page.evaluate(([x, y, lift]) => (window as any).__scpView.toClient(x, y, lift), [x, y, eave] as const) as Promise<{ x: number; y: number }>;
   const front = b.y + b.height / 2, right = b.x + b.width / 2;
-  await draw(b.x - b.width / 2 - 1 * upf, front - 8 * upf, right + 1 * upf, front + 1 * upf);
-  await draw(right - 12 * upf, b.y - b.height / 2 - 1 * upf, right + 1 * upf, front - 8 * upf);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  await page.getByLabel("Inspector").getByRole("button", { name: "+ Porch" }).click();
+  await shot(page, "26-porch-adding");
+  // Just outside the front wall: a porch attached to it with its own roof
+  const w = await at(b.x, front + 3 * upf);
+  await page.mouse.click(w.x, w.y);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  await page.getByLabel("Inspector").getByRole("button", { name: "+ Carport" }).click();
+  const p = await at(right - 14 * upf, b.y - b.height / 2), q = await at(right, front - 8 * upf);
+  await page.mouse.move(p.x, p.y);
+  await page.mouse.down();
+  await page.mouse.move(q.x, q.y, { steps: 8 });
+  await page.mouse.up();
   await page.evaluate(id => (window as any).__scpSelect(id), b.id);
   await shot(page, "27-porch-2d");
-  await page.keyboard.press("Escape");
   await page.keyboard.press("3");
   await page.waitForTimeout(600);
-  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 10 * upf, maxX: b.x + b.width / 2 + 10 * upf, minY: b.y - b.height / 2 - 10 * upf, maxY: b.y + b.height / 2 + 10 * upf }, { animate: false }), [b, upf] as const);
+  await fit();
   await shot(page, "28-porch-3d");
+  await page.evaluate(() => { const v = (window as any).__scpView; v.controls?.rotate?.(0.5, -0.25, false); });
+  await shot(page, "29-porch-3d-low");
+});
+
+test("windows and doors", async ({ page }) => {
+  await placeWithKey(page, "b", 0.5, 0.45);
+  await page.keyboard.press("Escape");
+  const [b] = await itemsOfType(page, "building");
+  const upf = await page.evaluate(() => (window as any).__scpProject().planGeoRef?.unitsPerFoot ?? 1);
+  const at = (x: number, y: number, lift = 4 * upf) => page.evaluate(([x, y, lift]) => (window as any).__scpView.toClient(x, y, lift), [x, y, lift] as const) as Promise<{ x: number; y: number }>;
+  await page.keyboard.press("3");
+  await page.waitForTimeout(600);
+  await page.evaluate(([b, upf]) => (window as any).__scpView.fitBounds({ minX: b.x - b.width / 2 - 15 * upf, maxX: b.x + b.width / 2 + 15 * upf, minY: b.y - b.height / 2 - 10 * upf, maxY: b.y + b.height / 2 + 10 * upf }, { animate: false }), [b, upf] as const);
+  await page.waitForTimeout(500);
+  await page.evaluate(id => (window as any).__scpSelect(id), b.id);
+  const panel = page.getByLabel("Inspector").getByTestId("openings");
+  await panel.scrollIntoViewIfNeeded();
+  await panel.getByRole("button", { name: "Edit the windows and doors" }).click();
+  // A door in the middle of the front wall, a garage door near its right end
+  await panel.getByRole("button", { name: "+ Door" }).click();
+  let p = await at(b.x - 6 * upf, b.y + b.height / 2);
+  await page.mouse.click(p.x, p.y);
+  await page.keyboard.press("Escape");
+  await panel.getByRole("button", { name: "+ Garage door" }).click();
+  p = await at(b.x + b.width / 2 - 10 * upf, b.y + b.height / 2);
+  await page.mouse.click(p.x, p.y);
+  await page.keyboard.press("Escape");
+  await shot(page, "30-openings");
+  await page.keyboard.press("Escape");
+  await shot(page, "31-openings-3d");
 });
