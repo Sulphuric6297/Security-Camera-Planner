@@ -25,7 +25,7 @@ import {
   wallSnapDistance
 } from "../lib/planGeom";
 import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
-import { isOwnBuilding } from "../lib/items";
+import { isOwnBuilding, scaledVehicle } from "../lib/items";
 import { isDoor, openingPlace, snapToWall, wallPieces } from "../lib/openings";
 import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature, resolveVehicleType } from "../three/models";
@@ -1435,10 +1435,13 @@ export class SiteView {
         const world = (p: { x: number; y: number }) => { const r = rotatePoint(p, b.rotation); return { x: b.x + r.x, y: b.y + r.y }; };
         const seg: THREE.Vector3[] = [];
         for (const part of partList) {
-          const edges = partRoof(local, part) === "main" ? openPartEdges(local, [part.pts]) : part.pts.map((a, i) => ({ a, b: part.pts[(i + 1) % part.pts.length] }));
+          const roof = partRoof(local, part);
+          const edges = roof === "main" ? openPartEdges(local, [part.pts]) : part.pts.map((a, i) => ({ a, b: part.pts[(i + 1) % part.pts.length] }));
+          // A part without a roof (a patio) is outlined on its floor only
+          const levels = roof === "none" ? [base + Math.max(part.floor, 0) + 0.2] : [base + Math.max(part.floor, 0) + 0.2, base + wall];
           for (const e of edges) {
             const a = world(e.a), c = world(e.b);
-            for (const y of [base + Math.max(part.floor, 0) + 0.2, base + wall]) seg.push(new THREE.Vector3(a.x, y, a.y), new THREE.Vector3(c.x, y, c.y));
+            for (const y of levels) seg.push(new THREE.Vector3(a.x, y, a.y), new THREE.Vector3(c.x, y, c.y));
           }
         }
         const parts = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg), new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 1.5 * this.upf(), gapSize: 1 * this.upf(), depthTest: false, transparent: true, opacity }));
@@ -1653,7 +1656,33 @@ export class SiteView {
         return new THREE.Vector3(t.x + r, this.h(t.x + r, t.y) + 0.2, t.y);
       }, e => this.planeDrag(e, id, (p, t: TreeItem) => ({ radius: Math.max(1 * this.upf(), Math.hypot(p.x - t.x, p.y - t.y) / (t.width ?? 1)) })), { title: "Drag to resize the crown", color: "#16a34a" });
     }
+    else if (sel.type === "parking" && !locked) this.vehicleHandles(id, add);
     if (!locked && (sel.type === "building" || sel.type === "parking" || sel.type === "image" || sel.type === "paving")) this.rotateHandle(id, add);
+  }
+
+  /** A vehicle's corners: drag one to make the whole vehicle bigger or smaller (it keeps its proportions). */
+  private vehicleHandles(id: string, add: (kind: string, world: () => THREE.Vector3 | null, start: Handle["start"], opts?: any) => void) {
+    const corner = (car: ParkingItem, i: number) => {
+      const r = rotatePoint({ x: (i === 1 || i === 2 ? 0.5 : -0.5) * car.width, y: (i >= 2 ? 0.5 : -0.5) * car.height }, car.rotation);
+      return { x: car.x + r.x, y: car.y + r.y };
+    };
+    for (let i = 0; i < 4; i++) {
+      add("corner", () => {
+        const car = this.item(id) as ParkingItem | null;
+        if (!car) return null;
+        const c = corner(car, i);
+        return new THREE.Vector3(c.x, this.h(c.x, c.y) + 0.2, c.y);
+      }, e => {
+        const car0 = this.item(id) as ParkingItem | null;
+        if (!car0) return null;
+        const c0 = corner(car0, i);
+        const reach0 = Math.hypot(c0.x - car0.x, c0.y - car0.y) || 1;
+        return this.planeDrag(e, id, p => {
+          const length = car0.height * (Math.hypot(p.x - car0.x, p.y - car0.y) / reach0);
+          return scaledVehicle(car0, clamp(length, 4 * this.upf(), 60 * this.upf())) as Partial<CanvasItem>;
+        });
+      }, { index: i, title: "Drag to make the vehicle bigger or smaller (it keeps its proportions)" });
+    }
   }
 
   private planeDrag<T extends CanvasItem>(e: PointerEvent, id: string, patch: (p: P, item: T, ev: PointerEvent) => Partial<CanvasItem> | null, y?: number): Drag | null {
@@ -1987,6 +2016,10 @@ export class SiteView {
     const part = (k: number) => { const b = this.item(id) as BuildingItem | null; return b ? { b, part: openPartsOf(b)[k] } : null; };
     const setPart = (b: BuildingItem, k: number, patch: Partial<(typeof parts0)[number]>) =>
       this.cb.onChange(id, { openParts: openPartsOf(b).map((p, j) => (j === k ? { ...p, ...patch } : p)) } as Partial<CanvasItem>);
+    // Under a roof the sides are dragged at the eaves (where the roof is seen); a part without one
+    // (a patio) on its own floor
+    const sideY = (b: BuildingItem, p: (typeof parts0)[number]) =>
+      partRoof(buildingLocalPoints(b), p) === "none" ? buildingBaseHeight(b, this.doc!.heights, this.doc!.gridSize) + Math.max(p.floor, 0) : this.eaveY(b);
     parts0.forEach((_, k) => {
       for (let i = 0; i < 4; i++) {
         add("part-edge", () => {
@@ -1994,11 +2027,11 @@ export class SiteView {
           if (!cur?.part || cur.part.pts.length !== 4) return null;
           const a = cur.part.pts[i], c = cur.part.pts[(i + 1) % 4];
           const w = toWorld(cur.b, { x: (a.x + c.x) / 2, y: (a.y + c.y) / 2 });
-          return new THREE.Vector3(w.x, this.eaveY(cur.b), w.y);
+          return new THREE.Vector3(w.x, sideY(cur.b, cur.part), w.y);
         }, () => {
           const cur = part(k);
           if (!cur?.part) return null;
-          const y = this.eaveY(cur.b);
+          const y = sideY(cur.b, cur.part);
           const pose = { x: cur.b.x, y: cur.b.y, rotation: cur.b.rotation };
           const outline = buildingLocalPoints(cur.b);
           const start = cur.part.pts.map(p => ({ ...p }));
@@ -2012,7 +2045,7 @@ export class SiteView {
             },
             end: () => this.cb.onCommit()
           };
-        }, { index: k * 4 + i, title: "Drag to resize the porch or carport (snaps to the walls)" });
+        }, { index: k * 4 + i, title: "Drag to resize the porch, carport or patio (snaps to the walls)" });
       }
       add("part-floor", () => {
         const cur = part(k);

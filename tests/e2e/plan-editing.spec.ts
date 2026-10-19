@@ -182,6 +182,109 @@ test.describe("plan editing", () => {
     expect(info.paint).toBe("#8e1b1b");
   });
 
+  test("every vehicle type faces the same way: headlights in front, tail lights at the back", async ({ page }) => {
+    await placeWithKey(page, "p", 0.5, 0.5);
+    await page.keyboard.press("Escape");
+    const [car] = await itemsOfType(page, "parking");
+    const types = ["sedan", "suv", "truck", "van", "hatchback", "sports"];
+    // One of each, all at the same rotation
+    await page.evaluate(([car, types]) => {
+      (window as any).__scpProject().setField("items", (prev: any[]) => [...prev.filter(i => i.id !== car.id), ...types.map((t, i) => ({ ...car, id: `car-${t}`, vehicleType: t, rotation: 0, x: car.x + (i - 2.5) * 10 }))]);
+    }, [car, types] as const);
+    await page.waitForFunction(n => {
+      let found = 0;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (o.userData.vehicleModel) found++; });
+      return found === n;
+    }, types.length, { timeout: 20000 });
+    // Each car's lights, colored from its light texture: white lamps in the front half and red ones
+    // in the back half count for it facing its front (where the generated car and the 2D symbol
+    // have their nose), the other way round against
+    const facing = await page.evaluate(() => {
+      const out: Record<string, number> = {};
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+      (window as any).__scpThree().scene.traverse((o: any) => {
+        if (!o.userData.vehicleModel) return;
+        const mesh = o.getObjectByName("vehicle-body");
+        const mats = mesh.material as any[];
+        const geo = mesh.geometry;
+        geo.computeBoundingBox();
+        const V = mesh.position.constructor;
+        const centre = geo.boundingBox.getCenter(new V());
+        mesh.localToWorld(centre);
+        const pos = geo.getAttribute("position"), uv = geo.getAttribute("uv");
+        const gr = geo.groups.find((g: any) => mats[g.materialIndex]?.name === "Optics");
+        const img = mats[gr.materialIndex].map.image;
+        canvas.width = img.width; canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        const px = ctx.getImageData(0, 0, img.width, img.height).data;
+        const v = new V();
+        let score = 0;
+        for (let i = gr.start; i < gr.start + gr.count; i++) {
+          const u = uv.getX(i) - Math.floor(uv.getX(i)), w = uv.getY(i) - Math.floor(uv.getY(i));
+          const k = (Math.min(img.height - 1, Math.floor(w * img.height)) * img.width + Math.min(img.width - 1, Math.floor(u * img.width))) * 4;
+          const r = px[k], g = px[k + 1], b = px[k + 2];
+          const red = r > 90 && r > 1.6 * g && r > 1.6 * b, white = r > 170 && g > 170 && b > 170;
+          if (!red && !white) continue;
+          mesh.localToWorld(v.fromBufferAttribute(pos, i));
+          // Plan y is world z: the front half is toward -y (the cars stand at rotation 0)
+          const inFront = v.z < centre.z;
+          score += (white === inFront ? 1 : -1);
+        }
+        out[o.userData.vehicleModel] = score;
+      });
+      return out;
+    });
+    expect(Object.keys(facing).sort()).toEqual([...types].sort());
+    for (const t of types) expect(facing[t], `${t}: headlights in front, tail lights at the back`).toBeGreaterThan(0);
+  });
+
+  test("a vehicle is resized as a whole: the size control and its corner handles keep its proportions", async ({ page }) => {
+    await placeWithKey(page, "p", 0.5, 0.5);
+    const [car0] = await itemsOfType(page, "parking");
+    const ratio = (c: any) => ({ wide: c.width / c.height, tall: c.vehicleHeight / c.height });
+    // No separate width or height to pull out of shape
+    await expect(page.getByText("Width (ft)", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Height (Z)", { exact: true })).toHaveCount(0);
+    // The size box: one and a half times as long, and as much wider and taller
+    await page.getByLabel("Vehicle length (ft)").fill(String(Math.round(car0.height * 1.5 * 10) / 10));
+    const [big] = await itemsOfType(page, "parking");
+    expect(big.height / car0.height).toBeCloseTo(1.5, 1);
+    expect(ratio(big).wide).toBeCloseTo(ratio(car0).wide, 3);
+    expect(ratio(big).tall).toBeCloseTo(ratio(car0).tall, 3);
+    // The 3D model follows, scaled evenly
+    await page.waitForFunction(id => {
+      let ok = false;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (o.userData.itemId === id && o.userData.vehicleModel) ok = true; });
+      return ok;
+    }, big.id, { timeout: 15000 });
+    const model = await page.evaluate(id => {
+      let obj: any = null;
+      (window as any).__scpThree().scene.traverse((o: any) => { if (!obj && o.userData.itemId === id && o.userData.vehicleModel) obj = o; });
+      const mesh = obj.getObjectByName("vehicle-body");
+      mesh.geometry.computeBoundingBox();
+      const b = mesh.geometry.boundingBox;
+      return { length: (b.max.z - b.min.z) * mesh.scale.z, even: Math.abs(mesh.scale.x - mesh.scale.z) + Math.abs(mesh.scale.y - mesh.scale.z) };
+    }, big.id);
+    expect(model.length).toBeCloseTo(big.height, 1);
+    expect(model.even).toBeLessThan(1e-6);
+    // A corner handle on the map: dragged out, the whole vehicle grows, still in proportion
+    const corner = await handleCenter(page, "corner", 2);
+    const mid = (await screenOf(page, big.x, big.y))!;
+    await drag(page, corner, { x: mid.x + (corner.x - mid.x) * 1.4, y: mid.y + (corner.y - mid.y) * 1.4 }, 10);
+    const [bigger] = await itemsOfType(page, "parking");
+    expect(bigger.height / big.height).toBeGreaterThan(1.25);
+    expect(bigger.height / big.height).toBeLessThan(1.55);
+    expect(ratio(bigger).wide).toBeCloseTo(ratio(car0).wide, 3);
+    expect(ratio(bigger).tall).toBeCloseTo(ratio(car0).tall, 3);
+    expect(bigger.x).toBeCloseTo(big.x, 3);
+    // Back to its real size in one click
+    await page.getByRole("button", { name: "Real size" }).click();
+    const [real] = await itemsOfType(page, "parking");
+    expect(real.height).toBeCloseTo(car0.height, 3);
+    expect(real.width).toBeCloseTo(car0.width, 3);
+  });
+
   test("vehicles are placed at real size; picking a type sets its size", async ({ page }) => {
     await placeWithKey(page, "p", 0.5, 0.5);
     const [car] = await itemsOfType(page, "parking");

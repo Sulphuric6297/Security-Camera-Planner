@@ -230,4 +230,30 @@ test.describe("editing a house hands-on", () => {
     // The foundation shows below the siding
     expect(await page.evaluate(() => !!(window as any).__scpThree().scene.getObjectByName("building-foundation"))).toBe(true);
   });
+
+  test("a patio's side handles sit on the patio itself, and dragging its outer side pulls it in", async ({ page }) => {
+    const house = await porchHouse(page);
+    // A patio (no roof, on the ground) along the west wall
+    const PATIO = [{ x: -35, y: -8 }, { x: -25, y: -8 }, { x: -25, y: 8 }, { x: -35, y: 8 }];
+    await page.evaluate(([id, pts]) => {
+      const s = (window as any).__scpProject();
+      s.setField("items", (prev: any[]) => prev.map((i: any) => (i.id !== id ? i : { ...i, openParts: [...i.openParts, { kind: "patio", pts, floor: 0 }] })));
+    }, [house.id, PATIO] as const);
+    await page.evaluate(b => (window as any).__scpView.fitBounds({ minX: b.x - 42, maxX: b.x - 5, minY: b.y - 16, maxY: b.y + 16 }, { animate: false }), house);
+    await page.waitForTimeout(400);
+    await page.evaluate(id => (window as any).__scpSelect(id), house.id);
+    await page.waitForTimeout(300);
+    // The outer (west) side's handle is on the ground at the patio's edge, not up at the eaves
+    const handle = await handleCenter(page, "part-edge", 2 * 4 + 3);
+    const edge = await local(page, house, -35, 0);
+    expect(Math.hypot(handle.x - edge.x, handle.y - edge.y)).toBeLessThan(10);
+    // Dragging it toward the house makes the patio shallower
+    const inner = await local(page, house, -29, 0);
+    await drag(page, handle, inner, 10);
+    const part = (await itemsOfType(page, "building"))[0].openParts[2];
+    const west = Math.min(...part.pts.map((q: any) => q.x));
+    expect(west).toBeGreaterThan(-31);
+    expect(west).toBeLessThan(-27);
+    expect(Math.max(...part.pts.map((q: any) => q.x))).toBeCloseTo(-25, 3);
+  });
 });

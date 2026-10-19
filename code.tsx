@@ -64,7 +64,7 @@ import { CAMERA_WALL_SNAP_FT, COLORS, DEFAULT_BUILDING, DEFAULT_BUILDING_LABEL, 
 import { DEFAULT_RESOLUTION_WIDTH, LENS_PRESETS, RESOLUTION_PRESETS, DORI_LEVELS, doriLevelAt, getCameraAspectValue, getCameraHFov, getCameraResolution, getDoriDistances, getGroundCoverage, hFovForDensity, suggestPitchForDistance, vFovFromH } from "./src/lib/camera";
 import { BuildingCandidate, OsmBuilding, findBuildingCandidates } from "./src/lib/geo/buildings";
 import { shiftGeoPoints } from "./src/lib/geo/align";
-import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
+import { PAVING_KINDS, PAVING_SURFACES, TARGET_KINDS, VEHICLE_SIZES, createItem, isOwnBuilding, nextCameraIndex, migrateItems, scaledVehicle, vehicleDimensions, type NewItemKind, type VehicleType } from "./src/lib/items";
 import { alignToImageUrl, alignToSatelliteTiles } from "./src/lib/geo/alignImagery";
 import { detectSiteObjects } from "./src/lib/geo/detectSite";
 import { ElevationOverlayMode, FEET_PER_METER, GeoBounds, SITE_MAX_WIDTH_FT, getGeoBounds, selectionFromBounds } from "./src/lib/geo/core";
@@ -6255,7 +6255,7 @@ export default function SecurityPlanner() {
                 </div>
               )}
 
-              {(selectedItem.type === "building" || selectedItem.type === "parking") && (
+              {selectedItem.type === "building" && (
                 <div className={`${panelSection} ${inspectorOrder("size")}`}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
@@ -6265,28 +6265,18 @@ export default function SecurityPlanner() {
                       step="0.1"
                       min="1"
                       value={Math.round((selectedItem as any).width * 10) / 10}
-                      onChange={e =>
-                        selectedItem.type === "building"
-                          ? updateBuildingSize(selectedItem.id, (parseFloat(e.target.value) || 1), (selectedItem as BuildingItem).height)
-                          : updateItem(selectedItem.id, { width: (parseFloat(e.target.value) || 1) })
-                      }
+                      onChange={e => updateBuildingSize(selectedItem.id, (parseFloat(e.target.value) || 1), (selectedItem as BuildingItem).height)}
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-xs font-semibold text-slate-400 uppercase">
-                        {selectedItem.type === "parking" ? "Length (ft)" : "Depth (ft)"}
-                      </label>
+                      <label className="text-xs font-semibold text-slate-400 uppercase">Depth (ft)</label>
                       <input
                         type="number"
                       step="0.1"
                       min="1"
                       value={Math.round((selectedItem as any).height * 10) / 10}
-                      onChange={e =>
-                        selectedItem.type === "building"
-                          ? updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, (parseFloat(e.target.value) || 1))
-                          : updateItem(selectedItem.id, { height: (parseFloat(e.target.value) || 1) })
-                      }
+                      onChange={e => updateBuildingSize((selectedItem as BuildingItem).id, (selectedItem as BuildingItem).width, (parseFloat(e.target.value) || 1))}
                       className="w-full bg-transparent border border-white/20 rounded-lg p-2 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none"
                     />
                     </div>
@@ -6404,33 +6394,57 @@ export default function SecurityPlanner() {
                   />
                 </div>
 
-                {/* Vehicle Height */}
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
-                    <span>Height (Z)</span>
-                    <span>{Math.round(((selectedItem as ParkingItem).vehicleHeight ?? 5) * 10) / 10} ft</span>
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="range"
-                      min="3"
-                      max="14"
-                      step="0.1"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
-                    />
-                    <input
-                      type="number"
-                      min="3"
-                      max="14"
-                      step="0.1"
-                      value={(selectedItem as ParkingItem).vehicleHeight ?? 5}
-                      onChange={e => updateItem(selectedItem.id, { vehicleHeight: parseFloat(e.target.value) || 5 })}
-                      className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
-                    />
-                  </div>
-                </div>
+                {/* Size: the whole vehicle, in proportion */}
+                {(() => {
+                  const car = selectedItem as ParkingItem;
+                  const upf = planGeoRef?.unitsPerFoot ?? 1;
+                  const real = VEHICLE_SIZES[resolveVehicleType(car) ?? "sedan"];
+                  const ft = (v: number) => Math.round((v / upf) * 10) / 10;
+                  const setLength = (lengthFt: number) => {
+                    if (!(lengthFt > 0)) return;
+                    updateItem(car.id, scaledVehicle(car, Math.min(60, Math.max(4, lengthFt)) * upf));
+                  };
+                  return (
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-slate-400 uppercase flex justify-between">
+                        <span>Size (length)</span>
+                        <span>{ft(car.height)} ft</span>
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="range"
+                          aria-label="Vehicle size"
+                          min="6"
+                          max="40"
+                          step="0.1"
+                          value={ft(car.height)}
+                          onChange={e => setLength(parseFloat(e.target.value))}
+                          onPointerUp={() => setTimeout(() => saveHistory(), 50)}
+                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 self-center"
+                        />
+                        <input
+                          type="number"
+                          aria-label="Vehicle length (ft)"
+                          min="4"
+                          max="60"
+                          step="0.1"
+                          value={ft(car.height)}
+                          onChange={e => setLength(parseFloat(e.target.value))}
+                          onBlur={() => setTimeout(() => saveHistory(), 50)}
+                          className="w-16 bg-transparent border border-white/20 rounded-lg p-1 text-sm text-slate-200 custom-input focus:border-indigo-500 outline-none text-center"
+                        />
+                      </div>
+                      <div className="flex justify-between items-center text-[11px] text-slate-500">
+                        <span>{ft(car.width)} ft wide · {ft(car.vehicleHeight ?? car.width * 0.8)} ft tall</span>
+                        {Math.abs(car.height / upf - real.length) > 0.05 && (
+                          <button className="text-blue-400 hover:text-blue-300" onClick={() => { updateItem(car.id, vehicleDimensions(resolveVehicleType(car) ?? "sedan", upf)); setTimeout(() => saveHistory(), 50); }}>
+                            Real size
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

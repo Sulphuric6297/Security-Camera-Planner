@@ -67,6 +67,15 @@ export const vehicleDimensions = (type: VehicleType, unitsPerFoot = 1) => {
 };
 
 /**
+ * A vehicle made bigger or smaller as a whole: a new length (plan units) with its width and
+ * height scaled to match, so it keeps its proportions.
+ */
+export const scaledVehicle = (car: { width: number; height: number; vehicleHeight?: number }, length: number) => {
+  const k = length / car.height;
+  return { width: car.width * k, height: length, vehicleHeight: (car.vehicleHeight ?? car.width * 0.8) * k };
+};
+
+/**
  * Builds a new item of the given kind at (x, y) in plan units. Camera heights are in feet;
  * everything else (footprints, wall/tree/vehicle heights) is in plan units like the rest of the 3D scene.
  */
