@@ -26,7 +26,7 @@ import {
 } from "../lib/planGeom";
 import { getEdgeOutwardNormal, pointInPolygonXY } from "../lib/geometry";
 import { isOwnBuilding, scaledVehicle } from "../lib/items";
-import { pathPointAt, pavingFromPath, widenPath } from "../lib/pavingPath";
+import { pathPointAt, pavingFromPath } from "../lib/pavingPath";
 import { isDoor, openingPlace, snapToWall, wallPieces } from "../lib/openings";
 import { hasRailing, insetParts, movePartEdge, nearestEdge, nearestSide, openPartEdges, openPartsOf, partEntries, partFromCorners, partRoof, partSides } from "../lib/openParts";
 import { create3dCar, create3dTree, getCarSignature, getTreeSignature, resolveVehicleType } from "../three/models";
@@ -1742,41 +1742,31 @@ export class SiteView {
         }
       });
     }
-    // Its width: a square on each side at its first point. Dragging one moves that edge only (the
-    // other stays put); with Shift, both sides move evenly.
-    const edgeAt = (pv: PavingItem) => {
+    // Its width: a dot on the side at its first point
+    const side = (pv: PavingItem) => {
       const path = pv.path!;
       const a = path[0], b = pathPointAt(path, 0, 0.05);
       const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
       return { a, n: { x: -(b.y - a.y) / len, y: (b.x - a.x) / len } };
     };
-    ([1, -1] as const).forEach((side, index) => {
-      add("width", () => {
-        const pv = paving();
-        if (!pv?.path || pv.path.length < 2) return null;
-        const { a, n: nn } = edgeAt(pv);
-        const w = (widthOf(pv) / 2) * side;
-        return at(toWorld(pv, { x: a.x + nn.x * w, y: a.y + nn.y * w }));
-      }, e => {
-        const pv0 = paving();
-        if (!pv0?.path) return null;
-        const pose = { x: pv0.x, y: pv0.y, rotation: pv0.rotation };
-        const path = pv0.path.map(p => ({ ...p }));
-        const width0 = widthOf(pv0);
-        const { a, n: nn } = edgeAt(pv0);
-        return this.planeDrag(e, id, (p, _item, ev) => {
-          const q = toBuildingLocal(pose, p);
-          // How far the cursor is out along this side, from the middle line
-          const out = ((q.x - a.x) * nn.x + (q.y - a.y) * nn.y) * side;
-          const both = ev.shiftKey;
-          // One side: from the other edge (which stays) to the cursor; both: twice out from the middle
-          const raw = both ? 2 * Math.abs(out) : out + width0 / 2;
-          const w = Math.round(clamp(raw, 2 * this.upf(), 60 * this.upf()) / (0.5 * this.upf())) * 0.5 * this.upf();
-          const next = widenPath(path, width0, w, side, both);
-          return pavingFromPath(next.path, next.width) as Partial<CanvasItem>;
-        });
-      }, { index, title: "Drag to move this edge (the other side stays) · Shift: widen both sides evenly" });
-    });
+    add("width", () => {
+      const pv = paving();
+      if (!pv?.path || pv.path.length < 2) return null;
+      const { a, n: nn } = side(pv);
+      const w = widthOf(pv) / 2;
+      return at(toWorld(pv, { x: a.x + nn.x * w, y: a.y + nn.y * w }));
+    }, e => {
+      const pv0 = paving();
+      if (!pv0?.path) return null;
+      const pose = { x: pv0.x, y: pv0.y, rotation: pv0.rotation };
+      const path = pv0.path.map(p => ({ ...p }));
+      const { a, n: nn } = side(pv0);
+      return this.planeDrag(e, id, p => {
+        const q = toBuildingLocal(pose, p);
+        const w = clamp(2 * Math.abs((q.x - a.x) * nn.x + (q.y - a.y) * nn.y), 2 * this.upf(), 60 * this.upf());
+        return pavingFromPath(path, Math.round(w / (0.5 * this.upf())) * 0.5 * this.upf()) as Partial<CanvasItem>;
+      });
+    }, { title: "Drag to make it wider or narrower" });
   }
 
   /** A vehicle's corners: drag one to make the whole vehicle bigger or smaller (it keeps its proportions). */
