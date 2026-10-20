@@ -4404,7 +4404,7 @@ export default function SecurityPlanner() {
         if (selectedCamera) return "Drag the camera to move it · blue dot aims it · side dots widen · tip sets range · bar above sets height";
         if (selectedItem?.type === "building") return "Drag to move · corners reshape · pull an edge's middle dot to add a corner · bar on top sets height · ↻ rotates";
         if (selectedItem?.type === "paving") return (selectedItem as PavingItem).path
-          ? "Drag to move · pull a dot along its middle to bend it · side square sets the width · ↻ rotates"
+          ? "Drag to move · pull a dot along its middle to bend it · a side square moves that edge (Shift: both sides) · ↻ rotates"
           : "Drag to move · corners reshape · pull an edge's middle dot to add a corner · ↻ rotates";
         if (selectedItem) return "Drag to move it · Delete removes it";
         return "Drag to pan · scroll or pinch to zoom · right-drag or Shift+drag to rotate and tilt";
@@ -6482,7 +6482,7 @@ export default function SecurityPlanner() {
                     })()}
                     <p className="text-xs text-slate-400">
                       {pv.path
-                        ? "Pull a dot along its middle to bend it; drag the square on its side for the width. Double-click a dot to remove it."
+                        ? "Pull a dot along its middle to bend it. Drag the square on a side to move that edge (hold Shift to widen both sides). Double-click a dot to remove it."
                         : "Drag its corners on the map to match the photo. Pull the dot in the middle of an edge to add a corner; double-click a corner to remove it."}
                     </p>
                   </div>

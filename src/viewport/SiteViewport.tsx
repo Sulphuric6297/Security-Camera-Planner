@@ -142,7 +142,8 @@ export function SiteViewport(props: Props) {
       <div ref={hostRef} data-testid="plan" className="absolute inset-0 overflow-hidden select-none" style={{ touchAction: "none" }} />
       {actionBar}
       {props.povId && props.povUi}
-      <div className={`absolute top-3 z-20 flex items-start gap-2 ${props.povId ? "hidden" : ""}`} style={{ right: 12 + inset }}>
+      {/* Only the controls themselves take clicks: the gaps between and below them are map */}
+      <div className={`absolute top-3 z-20 flex items-start gap-2 pointer-events-none [&>*]:pointer-events-auto ${props.povId ? "hidden" : ""}`} style={{ right: 12 + inset }}>
         {tilted && (
           <div className="flex items-center gap-2">
           <button

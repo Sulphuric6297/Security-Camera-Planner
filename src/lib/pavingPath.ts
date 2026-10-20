@@ -95,3 +95,29 @@ export const pavingFromPath = (path: P[], width: number) => {
   const box = pointsBox(points);
   return { path: path.map(p => ({ ...p })), pathWidth: width, points, width: box.width, height: box.height };
 };
+
+/** Unit vector to the left of the path at its point `i` (the side `pathOutline` draws first). */
+const leftAt = (pts: P[], i: number): P => {
+  const n = pts.length;
+  const a = i < n - 1 ? pts[i] : pathPointAt(pts, n - 2, 0.999);
+  const b = i < n - 1 ? pathPointAt(pts, i, 0.001) : pts[n - 1];
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  return { x: -(b.y - a.y) / len, y: (b.x - a.x) / len };
+};
+
+/**
+ * A new width for a path, from one side: that edge moves and the other stays where it is (the line
+ * down the middle shifts by half the change, toward the side that moved). `side` is 1 for the left
+ * edge, -1 for the right; with `both`, the path grows evenly on both sides instead.
+ */
+export const widenPath = (pts: P[], width: number, newWidth: number, side: 1 | -1, both = false): { path: P[]; width: number } => {
+  if (both || pts.length < 2) return { path: pts.map(p => ({ ...p })), width: newWidth };
+  const shift = ((newWidth - width) / 2) * side;
+  return {
+    path: pts.map((p, i) => {
+      const n = leftAt(pts, i);
+      return { x: p.x + n.x * shift, y: p.y + n.y * shift };
+    }),
+    width: newWidth
+  };
+};

@@ -109,6 +109,19 @@ test.describe("guided workflow and plan tools", () => {
     await expect.poll(async () => Math.round((await measuredPxPerFt(page)) * 100)).toBe(Math.round(a * 100));
   });
 
+  test("the gaps around the map's corner controls are map: what is under them can be grabbed", async ({ page }) => {
+    // Just below the scale bar (beside the taller zoom buttons) is map, not a hidden panel
+    const bar = (await page.getByTestId("scale-bar").boundingBox())!;
+    const zoom = (await page.getByLabel("Zoom in").boundingBox())!;
+    const probe = { x: bar.x + bar.width / 2, y: Math.min(bar.y + 60, zoom.y + 80) };
+    const inMap = await page.evaluate(p => !!document.elementFromPoint(p.x, p.y)?.closest('[data-testid="plan"]'), probe);
+    expect(inMap).toBe(true);
+    // The controls themselves still work
+    const before = await measuredPxPerFt(page);
+    await page.getByLabel("Zoom in").click();
+    await expect.poll(() => measuredPxPerFt(page)).toBeGreaterThan(before * 1.2);
+  });
+
   test("after importing a site the plan zooms to the property and shows north", async ({ page }) => {
     await importSite(page);
     await expect(page.getByLabel("North arrow")).toBeVisible();
