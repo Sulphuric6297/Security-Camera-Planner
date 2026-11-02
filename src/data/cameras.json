@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-26",
+ "updated": "2026-11-02",
  "note": "UniFi models are refreshed weekly from Ubiquiti's tech specs by the 'Update camera list' workflow; the others are kept by hand. 'approx' marks figures worked out from the lens or taken from resellers.",
  "models": [
   {
@@ -176,7 +176,7 @@
   },
   {
    "aspect": 1.7777777777777777,
-   "resolutionWidth": 3864,
+   "resolutionWidth": 3840,
    "irRangeFt": 98,
    "id": "uvc-g6-turret",
    "brand": "UniFi",
@@ -407,6 +407,18 @@
    "hFov": 111.3,
    "url": "https://techspecs.ui.com/unifi/physical-security/uvc-g3-ins",
    "line": "G3"
+  },
+  {
+   "aspect": 1.7777777777777777,
+   "resolutionWidth": 1920,
+   "irRangeFt": 30,
+   "id": "uvc-ai-360",
+   "brand": "UniFi",
+   "name": "AI-360",
+   "form": "360",
+   "hFov": 180,
+   "url": "https://techspecs.ui.com/unifi/physical-security/uvc-ai-360",
+   "line": "AI"
   },
   {
    "aspect": 1.7777777777777777,
